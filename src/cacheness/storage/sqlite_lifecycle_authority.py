@@ -48,6 +48,12 @@ from .lifecycle_authority import (
     ReconciliationWork,
     VerificationProof,
 )
+from .migration_authority import (
+    AuthorityInventoryCursor,
+    AuthorityIdentitySnapshot,
+    AuthorityInventoryPage,
+    validate_inventory_page_request,
+)
 from .catalog import (
     CatalogCursor,
     CatalogCursorError,
@@ -1485,6 +1491,146 @@ class SqliteLifecycleAuthority:
                 )
                 for row in rows
             )
+
+    @staticmethod
+    def _inventory_identity(connection: sqlite3.Connection) -> AuthorityIdentitySnapshot:
+        """Read one validated SQLite authority identity inside the caller's snapshot."""
+        identity_row = connection.execute("SELECT identity FROM store_identity").fetchone()
+        revision_row = connection.execute(
+            "SELECT revision FROM authority_state WHERE singleton = 1"
+        ).fetchone()
+        if (
+            identity_row is None
+            or revision_row is None
+            or not isinstance(identity_row[0], str)
+            or type(revision_row[0]) is not int
+        ):
+            raise CacheBlobBackendError(
+                "SQLite migration inventory identity is malformed",
+                context={"operation": "migration_inventory"},
+            )
+        return AuthorityIdentitySnapshot(
+            store_id=identity_row[0],
+            revision=revision_row[0],
+            authority_kind="sqlite",
+            capability=f"sqlite-lifecycle-authority-v{SQLITE_USER_VERSION}",
+            schema_version=SQLITE_USER_VERSION,
+        )
+
+    def identity_snapshot(self) -> AuthorityIdentitySnapshot:
+        """Return one read-only SQLite identity without creating or upgrading a store."""
+        with self._read_connection() as connection:
+            if connection is None:
+                raise CacheBlobMigrationRequiredError(
+                    "SQLite migration inventory requires an initialized authority"
+                )
+            connection.execute("BEGIN")
+            try:
+                identity = self._inventory_identity(connection)
+                connection.execute("COMMIT")
+                return identity
+            except BaseException:
+                if connection.in_transaction:
+                    connection.execute("ROLLBACK")
+                raise
+
+    def inventory_page(
+        self,
+        cursor: AuthorityInventoryCursor | None = None,
+        *,
+        limit: int | None = None,
+        work_cap: int | None = None,
+    ) -> AuthorityInventoryPage:
+        """Read one raw, revision-bound keyset page in one SQLite read transaction."""
+        effective_limit, effective_work_cap = validate_inventory_page_request(
+            limit=limit,
+            work_cap=work_cap,
+            default_limit=self.lifecycle_limits.manifest_page_size,
+            default_work_cap=self.lifecycle_limits.max_operation_record_bytes,
+        )
+        with self._read_connection() as connection:
+            if connection is None:
+                raise CacheBlobMigrationRequiredError(
+                    "SQLite migration inventory requires an initialized authority"
+                )
+            connection.execute("BEGIN")
+            try:
+                identity = self._inventory_identity(connection)
+                if cursor is not None and (
+                    cursor.store_id != identity.store_id
+                    or cursor.revision != identity.revision
+                ):
+                    raise CacheBlobLifecycleConflictError(
+                        "Migration inventory changed; reinspection is required"
+                    )
+                if cursor is None or cursor.last_key is None:
+                    rows = connection.execute(
+                        "SELECT key, generation, locator, manifest, manifest_digest, lineage, revision "
+                        "FROM entries ORDER BY key, generation LIMIT ?",
+                        (effective_limit + 1,),
+                    ).fetchall()
+                else:
+                    rows = connection.execute(
+                        "SELECT key, generation, locator, manifest, manifest_digest, lineage, revision "
+                        "FROM entries WHERE key > ? OR (key = ? AND generation > ?) "
+                        "ORDER BY key, generation LIMIT ?",
+                        (
+                            cursor.last_key,
+                            cursor.last_key,
+                            cursor.last_generation,
+                            effective_limit + 1,
+                        ),
+                    ).fetchall()
+                entries: list[EntrySnapshot] = []
+                work_seen = 0
+                for row in rows:
+                    if len(entries) == effective_limit:
+                        break
+                    try:
+                        snapshot = EntrySnapshot(
+                            key=row[0],
+                            generation=row[1],
+                            locator=row[2],
+                            manifest=bytes(row[3]),
+                            expectation=EntryExpectation(row[5], row[6], row[1], row[4]),
+                        )
+                    except (TypeError, ValueError) as error:
+                        raise CacheBlobBackendError(
+                            "SQLite migration inventory row is malformed",
+                            context={"operation": "migration_inventory"},
+                        ) from error
+                    entry_bytes = len(snapshot.manifest)
+                    if work_seen + entry_bytes > effective_work_cap:
+                        if not entries:
+                            raise CacheBlobBackendError(
+                                "Migration inventory entry exceeds the configured work bound",
+                                context={"operation": "migration_inventory"},
+                            )
+                        break
+                    entries.append(snapshot)
+                    work_seen += entry_bytes
+                exhausted = len(entries) == len(rows) and len(rows) <= effective_limit
+                next_cursor = None
+                if not exhausted:
+                    last = entries[-1]
+                    next_cursor = AuthorityInventoryCursor(
+                        store_id=identity.store_id,
+                        revision=identity.revision,
+                        last_key=last.key,
+                        last_generation=last.generation,
+                    )
+                page = AuthorityInventoryPage(
+                    identity=identity,
+                    entries=tuple(entries),
+                    next_cursor=next_cursor,
+                    exhausted=exhausted,
+                )
+                connection.execute("COMMIT")
+                return page
+            except BaseException:
+                if connection.in_transaction:
+                    connection.execute("ROLLBACK")
+                raise
 
     def catalog_page(
         self,

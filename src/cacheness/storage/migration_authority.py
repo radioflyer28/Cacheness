@@ -14,8 +14,12 @@ import hashlib
 import json
 from typing import Protocol, runtime_checkable
 
+from .lifecycle_authority import EntrySnapshot
+
 _MAX_TEXT_BYTES = 512
 _MAX_CANDIDATE_ENTRIES = 256
+_MAX_INVENTORY_PAGE_ENTRIES = 256
+_MAX_INVENTORY_WORK_BYTES = 131_072
 
 
 def _bounded_text(value: str, field_name: str) -> str:
@@ -37,12 +41,60 @@ class AuthorityIdentitySnapshot:
     store_id: str
     revision: int
     authority_kind: str
+    capability: str = "unknown"
+    schema_version: int = 0
 
     def __post_init__(self) -> None:
         _bounded_text(self.store_id, "store_id")
         _bounded_text(self.authority_kind, "authority_kind")
+        _bounded_text(self.capability, "capability")
         if type(self.revision) is not int or self.revision < 0:
             raise ValueError("revision must be a non-negative integer")
+        if type(self.schema_version) is not int or self.schema_version < 0:
+            raise ValueError("schema_version must be a non-negative integer")
+
+
+@dataclass(frozen=True)
+class AuthorityInventoryCursor:
+    """Opaque-to-callers continuation bound to one authority revision."""
+
+    store_id: str
+    revision: int
+    last_key: str | None = None
+    last_generation: str | None = None
+
+    def __post_init__(self) -> None:
+        _bounded_text(self.store_id, "store_id")
+        if type(self.revision) is not int or self.revision < 0:
+            raise ValueError("revision must be a non-negative integer")
+        if (self.last_key is None) != (self.last_generation is None):
+            raise ValueError("inventory cursor key and generation must be supplied together")
+        if self.last_key is not None:
+            _bounded_text(self.last_key, "last_key")
+            _bounded_text(self.last_generation, "last_generation")
+
+
+def validate_inventory_page_request(
+    *,
+    limit: int | None,
+    work_cap: int | None,
+    default_limit: int,
+    default_work_cap: int,
+) -> tuple[int, int]:
+    """Validate caller limits before an authority opens or scans a catalog."""
+    effective_limit = default_limit if limit is None else limit
+    effective_work_cap = default_work_cap if work_cap is None else work_cap
+    if (
+        type(effective_limit) is not int
+        or not 1 <= effective_limit <= min(default_limit, _MAX_INVENTORY_PAGE_ENTRIES)
+    ):
+        raise ValueError("inventory page limit is out of bounds")
+    if (
+        type(effective_work_cap) is not int
+        or not 1 <= effective_work_cap <= min(default_work_cap, _MAX_INVENTORY_WORK_BYTES)
+    ):
+        raise ValueError("inventory page work cap is out of bounds")
+    return effective_limit, effective_work_cap
 
 
 @dataclass(frozen=True)
@@ -79,22 +131,40 @@ class AuthorityInventoryEntry:
 
 @dataclass(frozen=True)
 class AuthorityInventoryPage:
-    """One bounded immutable inventory page from a fixed authority revision."""
+    """One raw bounded inventory page from a fixed authority revision.
+
+    The entry descriptors deliberately remain ``EntrySnapshot`` values.  The
+    maintenance layer authenticates and classifies manifest bytes after this
+    authority read; inventory itself never parses payload or catalog schemas.
+    """
 
     identity: AuthorityIdentitySnapshot
-    entries: tuple[AuthorityInventoryEntry, ...]
-    total_entries: int
-    total_bytes: int
+    entries: tuple["EntrySnapshot", ...]
+    next_cursor: AuthorityInventoryCursor | None
+    exhausted: bool
 
     def __post_init__(self) -> None:
-        if len(self.entries) > _MAX_CANDIDATE_ENTRIES:
+        if len(self.entries) > _MAX_INVENTORY_PAGE_ENTRIES:
             raise ValueError("maintenance inventory page exceeds the entry bound")
-        if len({entry.key for entry in self.entries}) != len(self.entries):
+        if not isinstance(self.exhausted, bool):
+            raise ValueError("inventory exhausted must be a bool")
+        if len({(entry.key, entry.generation) for entry in self.entries}) != len(self.entries):
             raise ValueError("maintenance inventory contains duplicate keys")
-        if self.total_entries != len(self.entries):
-            raise ValueError("maintenance inventory total_entries disagrees with entries")
-        if self.total_bytes != sum(entry.byte_size for entry in self.entries):
-            raise ValueError("maintenance inventory total_bytes disagrees with entries")
+        if self.exhausted and self.next_cursor is not None:
+            raise ValueError("exhausted inventory page cannot continue")
+        if not self.exhausted and self.next_cursor is None:
+            raise ValueError("non-exhausted inventory page requires a continuation")
+        if self.next_cursor is not None:
+            if (
+                self.next_cursor.store_id != self.identity.store_id
+                or self.next_cursor.revision != self.identity.revision
+            ):
+                raise ValueError("inventory cursor does not match page identity")
+            if not self.entries or (
+                self.next_cursor.last_key,
+                self.next_cursor.last_generation,
+            ) != (self.entries[-1].key, self.entries[-1].generation):
+                raise ValueError("inventory cursor does not match the last emitted entry")
 
 
 def candidate_digest(entries: tuple[AuthorityInventoryEntry, ...]) -> str:
@@ -162,9 +232,15 @@ class ActivationReceipt:
 class MigrationAuthority(Protocol):
     """Minimal protocol used only by explicit offline migration services."""
 
-    def migration_identity(self) -> AuthorityIdentitySnapshot: ...
+    def identity_snapshot(self) -> AuthorityIdentitySnapshot: ...
 
-    def migration_inventory(self, *, expected_revision: int | None = None) -> AuthorityInventoryPage: ...
+    def inventory_page(
+        self,
+        cursor: AuthorityInventoryCursor | None = None,
+        *,
+        limit: int | None = None,
+        work_cap: int | None = None,
+    ) -> AuthorityInventoryPage: ...
 
     def activate_verified_candidate(
         self,
@@ -176,10 +252,12 @@ class MigrationAuthority(Protocol):
 
 __all__ = [
     "ActivationReceipt",
+    "AuthorityInventoryCursor",
     "AuthorityIdentitySnapshot",
     "AuthorityInventoryEntry",
     "AuthorityInventoryPage",
     "MigrationAuthority",
     "VerifiedCandidateReceipt",
     "candidate_digest",
+    "validate_inventory_page_request",
 ]

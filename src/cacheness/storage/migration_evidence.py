@@ -133,18 +133,28 @@ def _bounded_text(value: object, field_name: str, *, allow_empty: bool = False) 
 def _identity_record(identity: AuthorityIdentitySnapshot) -> dict[str, object]:
     return {
         "authority_kind": identity.authority_kind,
+        "capability": identity.capability,
         "revision": identity.revision,
+        "schema_version": identity.schema_version,
         "store_id": identity.store_id,
     }
 
 
 def _identity_from_record(record: object, field_name: str) -> AuthorityIdentitySnapshot:
-    if not isinstance(record, Mapping) or set(record) != {"authority_kind", "revision", "store_id"}:
+    if not isinstance(record, Mapping) or set(record) != {
+        "authority_kind",
+        "capability",
+        "revision",
+        "schema_version",
+        "store_id",
+    }:
         raise ValueError(f"{field_name} is invalid")
     return AuthorityIdentitySnapshot(
         store_id=record["store_id"],
         revision=record["revision"],
         authority_kind=record["authority_kind"],
+        capability=record["capability"],
+        schema_version=record["schema_version"],
     )
 
 

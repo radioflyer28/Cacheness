@@ -9,7 +9,11 @@ from typing import Any, Callable, Iterator
 from uuid import uuid4
 
 from cacheness.config import LifecycleLimits
-from cacheness.error_handling import CacheBlobLifecycleConflictError, CacheBlobStoreClosedError
+from cacheness.error_handling import (
+    CacheBlobBackendError,
+    CacheBlobLifecycleConflictError,
+    CacheBlobStoreClosedError,
+)
 
 from .lifecycle_authority import (
     AuthorityCapabilities,
@@ -30,11 +34,13 @@ from .lifecycle_authority import (
 )
 from .migration_authority import (
     ActivationReceipt,
+    AuthorityInventoryCursor,
     AuthorityIdentitySnapshot,
     AuthorityInventoryEntry,
     AuthorityInventoryPage,
     VerifiedCandidateReceipt,
     candidate_digest,
+    validate_inventory_page_request,
 )
 from .manifest import BlobManifest
 from .catalog import (
@@ -284,9 +290,9 @@ class InMemoryLifecycleAuthority:
             return tuple(self._copy(entry) for _, entry in sorted(self._entries.items()))
 
     # The methods below are intentionally not part of LifecycleAuthority.
-    # They are an explicit, whole-store maintenance seam used only by the
+    # They are an explicit, read-only maintenance seam used only by the
     # offline migration service. Normal reads/writes cannot reach them.
-    def migration_identity(self) -> AuthorityIdentitySnapshot:
+    def identity_snapshot(self) -> AuthorityIdentitySnapshot:
         """Return the current memory authority identity and exact revision."""
         self._require_open()
         with self._lock:
@@ -294,42 +300,77 @@ class InMemoryLifecycleAuthority:
                 store_id=self._catalog_store_id,
                 revision=self._revision,
                 authority_kind="memory",
+                capability="memory-lifecycle-authority-v1",
+                schema_version=0,
             )
 
-    def migration_inventory(
-        self, *, expected_revision: int | None = None
+    def inventory_page(
+        self,
+        cursor: AuthorityInventoryCursor | None = None,
+        *,
+        limit: int | None = None,
+        work_cap: int | None = None,
     ) -> AuthorityInventoryPage:
-        """Expose a bounded immutable source inventory at one exact revision."""
+        """Return one raw keyset page at one exact same-process revision."""
+        effective_limit, effective_work_cap = validate_inventory_page_request(
+            limit=limit,
+            work_cap=work_cap,
+            default_limit=self.lifecycle_limits.manifest_page_size,
+            default_work_cap=self.lifecycle_limits.max_operation_record_bytes,
+        )
         self._require_open()
         with self._lock:
-            if expected_revision is not None and expected_revision != self._revision:
+            identity = self.identity_snapshot()
+            if cursor is not None and (
+                cursor.store_id != identity.store_id
+                or cursor.revision != identity.revision
+            ):
                 raise CacheBlobLifecycleConflictError(
-                    "Migration source revision changed; reinspection is required"
+                    "Migration inventory changed; reinspection is required"
                 )
-            entries: list[AuthorityInventoryEntry] = []
-            for snapshot in self.list_entries():
-                manifest = BlobManifest.from_canonical_bytes(snapshot.manifest)
-                entries.append(
-                    AuthorityInventoryEntry(
-                        key=snapshot.key,
-                        generation=snapshot.generation,
-                        locator=snapshot.locator,
-                        manifest=bytes(snapshot.manifest),
-                        payload_digest=manifest.digest,
-                        byte_size=manifest.byte_size,
-                    )
-                )
-            identity = AuthorityIdentitySnapshot(
-                store_id=self._catalog_store_id,
-                revision=self._revision,
-                authority_kind="memory",
+            start_after = (
+                (cursor.last_key, cursor.last_generation)
+                if cursor is not None and cursor.last_key is not None
+                else None
             )
-            frozen_entries = tuple(entries)
+            remaining = sorted(
+                (
+                    entry
+                    for entry in self._entries.values()
+                    if start_after is None or (entry.key, entry.generation) > start_after
+                ),
+                key=lambda entry: (entry.key, entry.generation),
+            )
+            entries: list[EntrySnapshot] = []
+            work_seen = 0
+            for entry in remaining:
+                if len(entries) == effective_limit:
+                    break
+                entry_bytes = len(entry.manifest)
+                if work_seen + entry_bytes > effective_work_cap:
+                    if not entries:
+                        raise CacheBlobBackendError(
+                            "Migration inventory entry exceeds the configured work bound",
+                            context={"operation": "migration_inventory"},
+                        )
+                    break
+                entries.append(self._copy(entry))
+                work_seen += entry_bytes
+            exhausted = len(entries) == len(remaining)
+            next_cursor = None
+            if not exhausted:
+                last = entries[-1]
+                next_cursor = AuthorityInventoryCursor(
+                    store_id=identity.store_id,
+                    revision=identity.revision,
+                    last_key=last.key,
+                    last_generation=last.generation,
+                )
             return AuthorityInventoryPage(
                 identity=identity,
-                entries=frozen_entries,
-                total_entries=len(frozen_entries),
-                total_bytes=sum(entry.byte_size for entry in frozen_entries),
+                entries=tuple(entries),
+                next_cursor=next_cursor,
+                exhausted=exhausted,
             )
 
     def activate_verified_candidate(
@@ -347,11 +388,7 @@ class InMemoryLifecycleAuthority:
         """
 
         def activate() -> ActivationReceipt:
-            identity = AuthorityIdentitySnapshot(
-                store_id=self._catalog_store_id,
-                revision=self._revision,
-                authority_kind="memory",
-            )
+            identity = self.identity_snapshot()
             if receipt.destination_identity != identity:
                 raise CacheBlobLifecycleConflictError(
                     "Migration destination identity or revision changed before activation"

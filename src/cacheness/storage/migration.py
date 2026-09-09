@@ -530,18 +530,28 @@ def _identity_record(identity: AuthorityIdentitySnapshot) -> dict[str, object]:
     """Render only an authority fingerprint, never a path, DSN, or signing key."""
     return {
         "authority_kind": identity.authority_kind,
+        "capability": identity.capability,
         "revision": identity.revision,
+        "schema_version": identity.schema_version,
         "store_id": identity.store_id,
     }
 
 
 def _identity_from_record(record: object, field_name: str) -> AuthorityIdentitySnapshot:
-    if not isinstance(record, dict) or set(record) != {"authority_kind", "revision", "store_id"}:
+    if not isinstance(record, dict) or set(record) != {
+        "authority_kind",
+        "capability",
+        "revision",
+        "schema_version",
+        "store_id",
+    }:
         raise ValueError(f"{field_name} is invalid")
     return AuthorityIdentitySnapshot(
         store_id=record["store_id"],
         revision=record["revision"],
         authority_kind=record["authority_kind"],
+        capability=record["capability"],
+        schema_version=record["schema_version"],
     )
 
 
@@ -978,111 +988,98 @@ def _historical_contract() -> CompatibilityIdentity:
 def _read_only_authority_identity(store) -> AuthorityIdentitySnapshot:
     """Read an initialized authority fingerprint without opening a mutation boundary."""
     authority = getattr(store, "lifecycle_authority", None)
-    migration_identity = getattr(authority, "migration_identity", None)
-    if callable(migration_identity):
-        identity = migration_identity()
+    identity_snapshot = getattr(authority, "identity_snapshot", None)
+    if callable(identity_snapshot):
+        identity = identity_snapshot()
         if isinstance(identity, AuthorityIdentitySnapshot):
             return identity
-
-    path = getattr(authority, "path", None)
-    if path is None:
-        raise ValueError("store authority does not expose a read-only inspection identity")
-    from .sqlite_lifecycle_authority import SQLITE_APPLICATION_ID, SQLITE_USER_VERSION
-    import sqlite3
-
-    try:
-        connection = sqlite3.connect(f"file:{Path(path)}?mode=ro", uri=True)
-        try:
-            application_id = connection.execute("PRAGMA application_id").fetchone()[0]
-            user_version = connection.execute("PRAGMA user_version").fetchone()[0]
-            identity_rows = connection.execute("SELECT identity FROM store_identity").fetchall()
-            revision_rows = connection.execute(
-                "SELECT revision FROM authority_state WHERE singleton = 1"
-            ).fetchall()
-        finally:
-            connection.close()
-    except sqlite3.Error as exc:
-        raise ValueError("SQLite authority cannot be inspected read-only") from exc
-    if application_id != SQLITE_APPLICATION_ID or user_version != SQLITE_USER_VERSION:
-        raise ValueError("SQLite authority identity is not current")
-    if len(identity_rows) != 1 or len(revision_rows) != 1:
-        raise ValueError("SQLite authority identity is incomplete")
-    return AuthorityIdentitySnapshot(
-        store_id=identity_rows[0][0], revision=revision_rows[0][0], authority_kind="sqlite"
-    )
+    raise ValueError("store authority does not expose a read-only inspection identity")
 
 
 def inspect_migration_store(store) -> MigrationPlan:
     """Inspect one initialized current store without changing bytes, metadata, or authority state."""
     source_identity = _read_only_authority_identity(store)
     authority = getattr(store, "lifecycle_authority", None)
-    list_entries = getattr(authority, "list_entries", None)
-    if not callable(list_entries):
+    inventory_page = getattr(authority, "inventory_page", None)
+    if not callable(inventory_page):
         raise ValueError("store authority does not support read-only inventory inspection")
     signing_key = store._authority_manifest_key(initialize_new_store=False)
     assessments: list[MigrationEntryAssessment] = []
-    for snapshot in list_entries():
-        try:
-            manifest = BlobManifest.from_canonical_bytes(bytes(snapshot.manifest))
-            entry = AuthorityInventoryEntry(
-                key=snapshot.key,
-                generation=snapshot.generation,
-                locator=snapshot.locator,
-                manifest=bytes(snapshot.manifest),
-                payload_digest=manifest.digest,
-                byte_size=manifest.byte_size,
-            )
-            verify_current_manifest(manifest, signing_key)
-        except (
-            CacheManifestIntegrityError,
-            CacheManifestUnsupportedVersionError,
-            CacheMigrationOrRebuildRequiredError,
-            ValueError,
-        ):
-            raw_manifest = bytes(snapshot.manifest)
-            entry = AuthorityInventoryEntry(
-                key=snapshot.key,
-                generation=snapshot.generation,
-                locator=snapshot.locator,
-                manifest=raw_manifest,
-                payload_digest=hashlib.sha256(raw_manifest).hexdigest(),
-                byte_size=len(raw_manifest),
-            )
-            assessments.append(
-                MigrationEntryAssessment(
-                    entry=entry,
-                    disposition=MigrationDisposition.UNVERIFIABLE,
-                    reason=MigrationReason.MANIFEST_UNAUTHENTICATED,
+    limits = authority.lifecycle_limits
+    cursor = None
+    while True:
+        page = inventory_page(
+            cursor,
+            limit=limits.manifest_page_size,
+            work_cap=limits.max_operation_record_bytes,
+        )
+        if page.identity != source_identity:
+            raise ValueError("store inventory changed; reinspection is required")
+        for snapshot in page.entries:
+            try:
+                manifest = BlobManifest.from_canonical_bytes(bytes(snapshot.manifest))
+                entry = AuthorityInventoryEntry(
+                    key=snapshot.key,
+                    generation=snapshot.generation,
+                    locator=snapshot.locator,
+                    manifest=bytes(snapshot.manifest),
+                    payload_digest=manifest.digest,
+                    byte_size=manifest.byte_size,
                 )
-            )
-            continue
-        try:
-            store.handlers.resolve_payload_contract(
-                manifest.handler_type, manifest.payload_format, manifest.payload_format_version
-            )
-        except (
-            CacheManifestIntegrityError,
-            CacheManifestUnsupportedVersionError,
-            CacheMigrationOrRebuildRequiredError,
-            ValueError,
-        ):
+                verify_current_manifest(manifest, signing_key)
+            except (
+                CacheManifestIntegrityError,
+                CacheManifestUnsupportedVersionError,
+                CacheMigrationOrRebuildRequiredError,
+                ValueError,
+            ):
+                raw_manifest = bytes(snapshot.manifest)
+                entry = AuthorityInventoryEntry(
+                    key=snapshot.key,
+                    generation=snapshot.generation,
+                    locator=snapshot.locator,
+                    manifest=raw_manifest,
+                    payload_digest=hashlib.sha256(raw_manifest).hexdigest(),
+                    byte_size=len(raw_manifest),
+                )
+                assessments.append(
+                    MigrationEntryAssessment(
+                        entry=entry,
+                        disposition=MigrationDisposition.UNVERIFIABLE,
+                        reason=MigrationReason.MANIFEST_UNAUTHENTICATED,
+                    )
+                )
+                continue
+            try:
+                store.handlers.resolve_payload_contract(
+                    manifest.handler_type, manifest.payload_format, manifest.payload_format_version
+                )
+            except (
+                CacheManifestIntegrityError,
+                CacheManifestUnsupportedVersionError,
+                CacheMigrationOrRebuildRequiredError,
+                ValueError,
+            ):
+                assessments.append(
+                    MigrationEntryAssessment(
+                        entry=entry,
+                        disposition=MigrationDisposition.REBUILDABLE,
+                        reason=MigrationReason.MISSING_DIRECTED_EDGE,
+                        catalog_values=dict(manifest.catalog_values),
+                    )
+                )
+                continue
             assessments.append(
                 MigrationEntryAssessment(
                     entry=entry,
-                    disposition=MigrationDisposition.REBUILDABLE,
-                    reason=MigrationReason.MISSING_DIRECTED_EDGE,
+                    disposition=MigrationDisposition.MIGRATABLE,
+                    reason=MigrationReason.COMPATIBLE_EDGE,
                     catalog_values=dict(manifest.catalog_values),
                 )
             )
-            continue
-        assessments.append(
-            MigrationEntryAssessment(
-                entry=entry,
-                disposition=MigrationDisposition.MIGRATABLE,
-                reason=MigrationReason.COMPATIBLE_EDGE,
-                catalog_values=dict(manifest.catalog_values),
-            )
-        )
+        if page.exhausted:
+            break
+        cursor = page.next_cursor
     contract = _current_contract(source_identity.authority_kind)
     return MigrationPlan.create(
         run_id=f"inspection-{hashlib.sha256(source_identity.store_id.encode('utf-8')).hexdigest()[:32]}",
@@ -1255,13 +1252,23 @@ class OfflineMigrationService:
     def _revalidate_identities(self, plan: MigrationPlan | None = None) -> tuple[
         AuthorityIdentitySnapshot, AuthorityIdentitySnapshot
     ]:
-        source_identity = self._source_authority.migration_identity()
-        destination_identity = self._destination_authority.migration_identity()
+        source_identity = self._source_authority.identity_snapshot()
+        destination_identity = self._destination_authority.identity_snapshot()
         if plan is not None and (
             source_identity != plan.source_identity or destination_identity != plan.destination_identity
         ):
             raise ValueError("migration plan is stale; source or destination identity changed")
         return source_identity, destination_identity
+
+    @staticmethod
+    def _inventory_page(authority, cursor=None):
+        """Request one authority-declared bounded raw maintenance page."""
+        limits = authority.lifecycle_limits
+        return authority.inventory_page(
+            cursor,
+            limit=limits.manifest_page_size,
+            work_cap=limits.max_operation_record_bytes,
+        )
 
     def _authenticated_manifest(self, raw: bytes, *, role: str) -> BlobManifest:
         try:
@@ -1307,36 +1314,63 @@ class OfflineMigrationService:
 
     def inspect(self) -> MigrationInspection:
         """Inspect one fixed source revision without mutating either store."""
-        page = self._source_authority.migration_inventory()
-        destination_identity = self._destination_authority.migration_identity()
+        destination_identity = self._destination_authority.identity_snapshot()
         assessments: list[MigrationEntryAssessment] = []
-        for entry in page.entries:
-            try:
-                manifest = self._authenticated_manifest(entry.manifest, role="source")
-            except ValueError:
+        cursor = None
+        source_identity = None
+        while True:
+            page = self._inventory_page(self._source_authority, cursor)
+            if source_identity is None:
+                source_identity = page.identity
+            elif page.identity != source_identity:
+                raise ValueError("source inventory changed; reinspection is required")
+            for snapshot in page.entries:
+                try:
+                    manifest = self._authenticated_manifest(snapshot.manifest, role="source")
+                    entry = AuthorityInventoryEntry(
+                        key=snapshot.key,
+                        generation=snapshot.generation,
+                        locator=snapshot.locator,
+                        manifest=bytes(snapshot.manifest),
+                        payload_digest=manifest.digest,
+                        byte_size=manifest.byte_size,
+                    )
+                except ValueError:
+                    entry = AuthorityInventoryEntry(
+                        key=snapshot.key,
+                        generation=snapshot.generation,
+                        locator=snapshot.locator,
+                        manifest=bytes(snapshot.manifest),
+                        payload_digest=hashlib.sha256(snapshot.manifest).hexdigest(),
+                        byte_size=len(snapshot.manifest),
+                    )
+                    assessments.append(
+                        MigrationEntryAssessment(
+                            entry=entry,
+                            disposition=MigrationDisposition.UNVERIFIABLE,
+                            reason=MigrationReason.MANIFEST_UNAUTHENTICATED,
+                        )
+                    )
+                    continue
+                if any(edge.supports(manifest.versions) for edge in self.compatibility_edges):
+                    disposition = MigrationDisposition.MIGRATABLE
+                    reason = MigrationReason.COMPATIBLE_EDGE
+                else:
+                    disposition = MigrationDisposition.REBUILDABLE
+                    reason = MigrationReason.UNSUPPORTED_DIMENSIONS
                 assessments.append(
                     MigrationEntryAssessment(
                         entry=entry,
-                        disposition=MigrationDisposition.UNVERIFIABLE,
-                        reason=MigrationReason.MANIFEST_UNAUTHENTICATED,
+                        disposition=disposition,
+                        reason=reason,
                     )
                 )
-                continue
-            if any(edge.supports(manifest.versions) for edge in self.compatibility_edges):
-                disposition = MigrationDisposition.MIGRATABLE
-                reason = MigrationReason.COMPATIBLE_EDGE
-            else:
-                disposition = MigrationDisposition.REBUILDABLE
-                reason = MigrationReason.UNSUPPORTED_DIMENSIONS
-            assessments.append(
-                MigrationEntryAssessment(
-                    entry=entry,
-                    disposition=disposition,
-                    reason=reason,
-                )
-            )
+            if page.exhausted:
+                break
+            cursor = page.next_cursor
+        assert source_identity is not None
         inspection = MigrationInspection(
-            source_identity=page.identity,
+            source_identity=source_identity,
             destination_identity=destination_identity,
             assessments=tuple(assessments),
         )
@@ -1345,8 +1379,8 @@ class OfflineMigrationService:
                 evidence_version=1,
                 run_id=self.run_id,
                 plan_digest="",
-                source_identity=page.identity,
-                source_revision=page.identity.revision,
+                source_identity=source_identity,
+                source_revision=source_identity.revision,
                 destination_identity=destination_identity,
                 state=MaintenanceEvidenceState.INSPECTED,
                 completed_steps=("inspect",),
@@ -1405,45 +1439,54 @@ class OfflineMigrationService:
         """Copy authenticated immutable payloads into an invisible candidate."""
         self._validate_plan(plan)
         self._expect_evidence(MaintenanceEvidenceState.PLANNED, plan_digest=plan.digest)
-        page = self._source_authority.migration_inventory(
-            expected_revision=plan.source_identity.revision
-        )
         expected = {assessment.entry.key: assessment for assessment in plan.assessments}
-        if set(entry.key for entry in page.entries) != set(expected):
-            raise ValueError("source inventory changed; reinspection is required")
         candidates: list[AuthorityInventoryEntry] = []
-        for source_entry in page.entries:
-            assessment = expected[source_entry.key]
-            if assessment.entry.manifest_digest != source_entry.manifest_digest:
-                raise ValueError("source entry changed; reinspection is required")
-            manifest = self._authenticated_manifest(source_entry.manifest, role="source")
-            source_io = self.source._materialize_authority_store()
-            with source_io.open_snapshot(
-                manifest.locator, dict(manifest.handler_metadata)
-            ) as snapshot:
-                payload = snapshot.path.read_bytes()
-            if hashlib.sha256(payload).hexdigest() != manifest.digest or len(payload) != manifest.byte_size:
-                raise ValueError("source payload fails authenticated integrity verification")
-            suffix = "".join(Path(manifest.locator).suffixes)
-            candidate_locator = (
-                f"generations/migration/{self.run_id}/{source_entry.generation}{suffix}"
-            )
-            self.destination.payload_backend.write_blob(candidate_locator, payload)
-            candidate_manifest = sign_current_manifest(
-                replace(manifest, locator=candidate_locator), self._evidence_key
-            )
-            candidate_raw = candidate_manifest.canonical_bytes()
-            self._authenticated_manifest(candidate_raw, role="candidate")
-            candidates.append(
-                AuthorityInventoryEntry(
-                    key=source_entry.key,
-                    generation=source_entry.generation,
-                    locator=candidate_locator,
-                    manifest=candidate_raw,
-                    payload_digest=manifest.digest,
-                    byte_size=manifest.byte_size,
+        seen_keys: set[str] = set()
+        cursor = None
+        while True:
+            page = self._inventory_page(self._source_authority, cursor)
+            if page.identity != plan.source_identity:
+                raise ValueError("source inventory changed; reinspection is required")
+            for snapshot in page.entries:
+                assessment = expected.get(snapshot.key)
+                if assessment is None or assessment.entry.manifest_digest != hashlib.sha256(
+                    snapshot.manifest
+                ).hexdigest():
+                    raise ValueError("source entry changed; reinspection is required")
+                seen_keys.add(snapshot.key)
+                manifest = self._authenticated_manifest(snapshot.manifest, role="source")
+                source_io = self.source._materialize_authority_store()
+                with source_io.open_snapshot(
+                    manifest.locator, dict(manifest.handler_metadata)
+                ) as source_snapshot:
+                    payload = source_snapshot.path.read_bytes()
+                if hashlib.sha256(payload).hexdigest() != manifest.digest or len(payload) != manifest.byte_size:
+                    raise ValueError("source payload fails authenticated integrity verification")
+                suffix = "".join(Path(manifest.locator).suffixes)
+                candidate_locator = (
+                    f"generations/migration/{self.run_id}/{snapshot.generation}{suffix}"
                 )
-            )
+                self.destination.payload_backend.write_blob(candidate_locator, payload)
+                candidate_manifest = sign_current_manifest(
+                    replace(manifest, locator=candidate_locator), self._evidence_key
+                )
+                candidate_raw = candidate_manifest.canonical_bytes()
+                self._authenticated_manifest(candidate_raw, role="candidate")
+                candidates.append(
+                    AuthorityInventoryEntry(
+                        key=snapshot.key,
+                        generation=snapshot.generation,
+                        locator=candidate_locator,
+                        manifest=candidate_raw,
+                        payload_digest=manifest.digest,
+                        byte_size=manifest.byte_size,
+                    )
+                )
+            if page.exhausted:
+                break
+            cursor = page.next_cursor
+        if seen_keys != set(expected):
+            raise ValueError("source inventory changed; reinspection is required")
         self._revalidate_identities(plan)
         self._candidate_entries = tuple(candidates)
         receipt = VerifiedCandidateReceipt(
