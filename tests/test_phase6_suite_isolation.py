@@ -65,6 +65,27 @@ def test_runner_rejects_a_missing_live_module_path(tmp_path: Path) -> None:
         runner._validate_live_module_selection(tmp_path)
 
 
+def test_runner_rejects_a_live_module_symlink_before_pytest_selection(
+    tmp_path: Path,
+) -> None:
+    """A literal live exclusion cannot be redirected to an unrelated test."""
+
+    runner = _load_runner()
+    for raw_path in runner.LIVE_QUALIFICATION_MODULES:
+        fixture_path = tmp_path / raw_path
+        fixture_path.parent.mkdir(parents=True, exist_ok=True)
+        fixture_path.touch()
+
+    unrelated_test = tmp_path / "tests" / "unrelated_test.py"
+    unrelated_test.touch()
+    live_module = tmp_path / runner.LIVE_QUALIFICATION_MODULES[0]
+    live_module.unlink()
+    live_module.symlink_to(unrelated_test)
+
+    with pytest.raises(ValueError, match="must not be a symlink"):
+        runner._validate_live_module_selection(tmp_path)
+
+
 def test_runner_invokes_current_python_with_fixed_pytest_argv(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
