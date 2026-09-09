@@ -9,6 +9,7 @@ import pytest
 from cacheness.cache_policy import CacheOutcome, CacheRemovalReport
 from cacheness.config import CacheConfig
 from cacheness.core import UnifiedCache
+from cacheness.error_handling import CacheBlobBackendError
 from cacheness.storage.catalog import CatalogPredicate, CatalogQuery
 from cacheness.storage.composition import BackendRef, StoreTopology
 
@@ -136,6 +137,33 @@ def test_single_key_invalidation_returns_a_truthful_report(tmp_path) -> None:
 
         assert report == CacheRemovalReport(attempted=1, removed=1)
         assert cache.lookup(cache_key=key).outcome is CacheOutcome.ABSENT
+    finally:
+        cache.close()
+
+
+def test_single_key_invalidation_preserves_backend_failure_details(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed lifecycle delete is not reported as a successful removal."""
+
+    cache = _cache(tmp_path)
+    try:
+        key = cache.put({"generation": "unavailable"}, request_id="unavailable")
+        failure = CacheBlobBackendError("authority unavailable")
+        monkeypatch.setattr(
+            cache.store,
+            "delete",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(failure),
+        )
+
+        report = cache.invalidate(cache_key=key)
+
+        assert report.attempted == 1
+        assert report.removed == 0
+        assert report.conflicted == 0
+        assert report.failed == 1
+        assert report.failures[0].key == key
+        assert report.failures[0].cause is failure
     finally:
         cache.close()
 
