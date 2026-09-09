@@ -17,7 +17,7 @@ from typing import Any
 
 import pytest
 
-from cacheness.config import CacheConfig
+from cacheness.config import CacheConfig, CacheStorageConfig
 from cacheness.error_handling import (
     CacheBlobBackendError,
     CacheBlobLifecycleConflictError,
@@ -1153,7 +1153,12 @@ def test_guarded_handler_io_copies_one_private_snapshot_without_deserializing(tm
     handler = _InstrumentedHandler()
     io = GuardedHandlerIO(root)
     try:
-        result = io.put(handler, "payload", "a" * 64, CacheConfig(cache_dir=str(root)))
+        result = io.put(
+            handler,
+            "payload",
+            "a" * 64,
+            CacheConfig(storage=CacheStorageConfig(cache_dir=str(root))),
+        )
         final_path = Path(result["actual_path"])
 
         assert _is_descendant(final_path, root)
@@ -1198,7 +1203,7 @@ def test_guarded_handler_io_rejects_handler_created_symlink_ancestor(tmp_path):
                 SymlinkStageHandler(),
                 "payload",
                 "b" * 64,
-                CacheConfig(cache_dir=str(root)),
+                CacheConfig(storage=CacheStorageConfig(cache_dir=str(root))),
             )
         assert list(root.iterdir()) == []
         assert outside_artifact.read_text(encoding="utf-8") == "outside"
@@ -1240,7 +1245,12 @@ def test_guarded_handler_io_rejects_stage_parent_traversal(tmp_path, path_kind):
     io = GuardedHandlerIO(root)
     try:
         with pytest.raises(CacheUnsafePathError):
-            io.put(handler, "payload", "c" * 64, CacheConfig(cache_dir=str(root)))
+            io.put(
+                handler,
+                "payload",
+                "c" * 64,
+                CacheConfig(storage=CacheStorageConfig(cache_dir=str(root))),
+            )
         assert handler.outside_artifact is not None
         assert handler.outside_artifact.read_text(encoding="utf-8") == "outside"
         assert list(root.iterdir()) == []
@@ -1277,7 +1287,12 @@ def test_guarded_handler_io_rejects_stage_artifact_swapped_after_validation(
     )
     try:
         with pytest.raises(CacheUnsafePathError):
-            io.put(handler, "payload", "d" * 64, CacheConfig(cache_dir=str(root)))
+            io.put(
+                handler,
+                "payload",
+                "d" * 64,
+                CacheConfig(storage=CacheStorageConfig(cache_dir=str(root))),
+            )
         assert outside.read_text(encoding="utf-8") == "outside"
         assert list(root.iterdir()) == []
     finally:
@@ -1323,7 +1338,12 @@ def test_guarded_handler_io_rejects_ordinary_leaf_replacement_after_validation(
     )
     try:
         with pytest.raises(CacheUnsafePathError) as exc_info:
-            io.put(handler, "payload", "g" * 64, CacheConfig(cache_dir=str(root)))
+            io.put(
+                handler,
+                "payload",
+                "g" * 64,
+                CacheConfig(storage=CacheStorageConfig(cache_dir=str(root))),
+            )
         assert exc_info.value.context["reason"] == CacheReason.PATH_RACE.value
         assert list(root.iterdir()) == []
     finally:
@@ -1384,7 +1404,12 @@ def test_guarded_handler_io_rejects_ordinary_ancestor_replacement_after_validati
     )
     try:
         with pytest.raises(CacheUnsafePathError) as exc_info:
-            io.put(NestedStageHandler(), "payload", "h" * 64, CacheConfig(cache_dir=str(root)))
+            io.put(
+                NestedStageHandler(),
+                "payload",
+                "h" * 64,
+                CacheConfig(storage=CacheStorageConfig(cache_dir=str(root))),
+            )
         assert exc_info.value.context["reason"] == CacheReason.PATH_RACE.value
         assert list(root.iterdir()) == []
     finally:
@@ -1420,7 +1445,7 @@ def test_guarded_handler_io_rejects_hard_linked_external_stage_artifact(tmp_path
                 HardLinkStageHandler(),
                 "payload",
                 "e" * 64,
-                CacheConfig(cache_dir=str(root)),
+                CacheConfig(storage=CacheStorageConfig(cache_dir=str(root))),
             )
         assert outside.read_text(encoding="utf-8") == "outside"
         assert list(root.iterdir()) == []
@@ -1477,7 +1502,7 @@ def test_guarded_handler_io_rejects_stage_ancestor_swapped_after_validation(
                 NestedStageHandler(),
                 "payload",
                 "f" * 64,
-                CacheConfig(cache_dir=str(root)),
+                CacheConfig(storage=CacheStorageConfig(cache_dir=str(root))),
             )
         assert outside_payload.read_text(encoding="utf-8") == "outside"
         assert list(root.iterdir()) == []

@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from cacheness.config import CacheConfig, CompressionConfig
+from cacheness.config import CacheConfig, CacheStorageConfig, CompressionConfig
 from cacheness.error_handling import CacheManifestIntegrityError
 from cacheness.handlers import (
     ArrayHandler,
@@ -115,7 +115,7 @@ def test_composed_store_commits_a_signed_descriptor_and_frozen_receipt(tmp_path:
 def test_builtin_writes_publish_explicit_payload_format_identity(tmp_path: Path) -> None:
     """Native handlers keep their format identity independent of store format."""
     config = CacheConfig(
-        cache_dir=str(tmp_path),
+        storage=CacheStorageConfig(cache_dir=str(tmp_path)),
         compression=CompressionConfig(
             pickle_compression_codec="none",
             use_blosc2_arrays=False,
@@ -138,7 +138,7 @@ def test_builtin_writes_publish_explicit_payload_format_identity(tmp_path: Path)
 def test_native_payloads_keep_their_library_containers(tmp_path: Path) -> None:
     """Descriptors do not wrap native NumPy and pickle payload bytes."""
     config = CacheConfig(
-        cache_dir=str(tmp_path),
+        storage=CacheStorageConfig(cache_dir=str(tmp_path)),
         compression=CompressionConfig(
             pickle_compression_codec="none",
             use_blosc2_arrays=False,
@@ -164,7 +164,9 @@ def test_native_parquet_payload_keeps_its_file_signature(tmp_path: Path) -> None
 
     frame = pd.DataFrame({"value": [1, 2]})
     result = PandasDataFrameHandler().put(
-        frame, tmp_path / "native-frame", CacheConfig(cache_dir=str(tmp_path))
+        frame,
+        tmp_path / "native-frame",
+        CacheConfig(storage=CacheStorageConfig(cache_dir=str(tmp_path))),
     )
     payload = Path(result["actual_path"]).read_bytes()
 
