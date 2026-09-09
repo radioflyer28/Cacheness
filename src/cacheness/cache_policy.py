@@ -66,13 +66,20 @@ class CacheRemovalReport:
     attempted: int = 0
     removed: int = 0
     conflicted: int = 0
+    retryable: int = 0
     failed: int = 0
     complete: bool = True
     continuation: str | None = None
     failures: tuple[CacheRemovalFailure, ...] = ()
 
     def __post_init__(self) -> None:
-        counts = (self.attempted, self.removed, self.conflicted, self.failed)
+        counts = (
+            self.attempted,
+            self.removed,
+            self.conflicted,
+            self.retryable,
+            self.failed,
+        )
         if any(not isinstance(count, int) or isinstance(count, bool) or count < 0 for count in counts):
             raise ValueError("CacheRemovalReport counts must be non-negative integers")
         if self.attempted != self.removed + self.conflicted + self.failed:
@@ -89,13 +96,6 @@ class CacheRemovalReport:
             raise ValueError("CacheRemovalReport failures must match the failed count")
         if any(not isinstance(failure, CacheRemovalFailure) for failure in self.failures):
             raise ValueError("CacheRemovalReport failures must be native values")
-
-    @property
-    def retryable(self) -> int:
-        """Return the retryable exact-generation conflicts in this operation."""
-
-        return self.conflicted
-
 
 @dataclass(frozen=True)
 class _CacheRemovalCandidate:
@@ -142,6 +142,7 @@ def execute_exact_removals(
         attempted=attempted,
         removed=removed,
         conflicted=conflicted,
+        retryable=conflicted,
         failed=failed,
         complete=complete,
         continuation=continuation,

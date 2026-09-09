@@ -10,7 +10,11 @@ from cacheness.cache_policy import CacheOutcome, CacheRemovalReport
 from cacheness.config import CacheConfig
 from cacheness.core import UnifiedCache
 from cacheness.error_handling import CacheBlobBackendError
-from cacheness.storage.catalog import CatalogPredicate, CatalogQuery
+from cacheness.storage.catalog import (
+    CatalogPredicate,
+    CatalogQuery,
+    CatalogQueryValidationError,
+)
 from cacheness.storage.composition import BackendRef, StoreTopology
 
 
@@ -241,7 +245,7 @@ def test_unsupported_predicate_fails_before_catalog_io(
 
         monkeypatch.setattr(cache.store, "query_catalog", unexpected_query)
 
-        with pytest.raises(ValueError, match="queryable"):
+        with pytest.raises(CatalogQueryValidationError, match="queryable"):
             cache.invalidate_where(
                 CatalogQuery(
                     predicates=(CatalogPredicate("untrusted_field", "eq", "value"),)

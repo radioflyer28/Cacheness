@@ -8,6 +8,7 @@ from threading import Event, Thread
 import pytest
 
 from cacheness import CacheConfig, cacheness
+from cacheness.cache_policy import CacheRemovalReport
 from cacheness.error_handling import (
     CacheBlobLifecycleConflictError,
     CacheBlobRecoverableCleanupError,
@@ -182,15 +183,16 @@ def test_clear_all_preserves_a_generation_published_after_its_snapshot(
         key = first.put({"generation": "old"}, race_key="clear")
         published = False
 
-        def publish_after_snapshot(boundary: str) -> None:
+        def publish_before_removal(boundary: str) -> None:
             nonlocal published
-            if boundary == "clear.snapshot_committed" and not published:
+            if boundary == "delete.intent_prepared" and not published:
                 published = True
                 assert second.put({"generation": "new"}, race_key="clear") == key
 
-        first._cache_blob_store.lifecycle.test_hook = publish_after_snapshot
-        first.clear_all()
+        first._cache_blob_store.lifecycle.test_hook = publish_before_removal
+        report = first.clear_all()
 
+        assert report == CacheRemovalReport(attempted=1, conflicted=1, retryable=1)
         assert second.get(race_key="clear") == {"generation": "new"}
     finally:
         second.close()
@@ -211,8 +213,10 @@ def test_invalidate_refuses_to_retire_a_generation_replaced_by_another_instance(
                 second.put({"generation": "new"}, race_key="invalidate")
 
         first._cache_blob_store.lifecycle.test_hook = replace_before_removal
-        assert first.invalidate(cache_key=key) is None
+        report = first.invalidate(cache_key=key)
 
+        assert second.get(race_key="invalidate") == {"generation": "new"}
+        assert report == CacheRemovalReport(attempted=1, conflicted=1, retryable=1)
         assert second.get(race_key="invalidate") == {"generation": "new"}
     finally:
         second.close()

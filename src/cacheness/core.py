@@ -45,7 +45,12 @@ from .storage.catalog import (
     DEFAULT_PAGE_SIZE,
     CatalogEntry,
     CatalogField,
+    CatalogPage,
+    CatalogQuery,
     CatalogSchema,
+    CatalogStaleCursorError,
+    validate_catalog_page_request,
+    validate_catalog_query,
 )
 from .storage.composition import StoreTopology
 from .storage.path_security import encode_physical_name
@@ -344,20 +349,61 @@ class UnifiedCache:
         )
         return report.removed == 1
 
-    def _cleanup_expired(self) -> None:
-        """Apply TTL cleanup through exact BlobStore generation observations."""
+    def _cleanup_expired(
+        self,
+        *,
+        cursor: str | None = None,
+        page_size: int = _REMOVAL_PAGE_SIZE,
+        work_cap: int = _REMOVAL_WORK_CAP,
+    ) -> CacheRemovalReport:
+        """Select one bounded page of expired entries and exact-delete it."""
 
-        removed = 0
-        for cache_key in self._cache_blob_store.list():
-            snapshot, entry = self._authority_snapshot_entry(cache_key)
-            if (
-                snapshot is not None
-                and entry is not None
-                and self._is_expired(cache_key, entry=entry)
-            ):
-                removed += int(self._retire_exact_authority_snapshot(cache_key, snapshot))
-        if removed:
-            logger.info("Cleaned up %s expired cache entries", removed)
+        page = self._query_cache_catalog(
+            CatalogQuery(page_size=page_size),
+            cursor=cursor,
+            page_size=page_size,
+            work_cap=work_cap,
+        )
+        ttl = self.config.metadata.default_ttl_hours
+        candidates = tuple(
+            self._candidate_from_catalog_entry(entry)
+            for entry in page.entries
+            if self._is_expired_at(entry.created_at, ttl)
+        )
+        report = self._remove_exact_candidates(
+            candidates,
+            complete=page.exhausted,
+            continuation=page.cursor,
+        )
+        if report.removed:
+            logger.info("Cleaned up %s expired cache entries", report.removed)
+        return report
+
+    def _query_cache_catalog(
+        self,
+        query: CatalogQuery,
+        *,
+        cursor: str | None,
+        page_size: int,
+        work_cap: int,
+    ) -> CatalogPage:
+        """Validate a cache-policy page before the BlobStore authority is touched."""
+
+        validate_catalog_query(query, schema=_CACHE_POLICY_SCHEMA)
+        validate_catalog_page_request(
+            query,
+            schema=_CACHE_POLICY_SCHEMA,
+            cursor=cursor,
+            limit=page_size,
+            work_cap=work_cap,
+        )
+        return self._cache_blob_store.query_catalog(
+            query,
+            schema=_CACHE_POLICY_SCHEMA,
+            cursor=cursor,
+            limit=page_size,
+            work_cap=work_cap,
+        )
 
     def _enforce_size_limit(self) -> None:
         """Keep policy size eviction above storage without a second catalog."""
@@ -521,21 +567,68 @@ class UnifiedCache:
     @_clear_coordinated
     def invalidate(
         self, cache_key: Optional[str] = None, prefix: str = "", **kwargs: Any
-    ) -> None:
+    ) -> CacheRemovalReport:
         """Invalidate one observed cache generation if it is still current."""
 
         del prefix
         if cache_key is None:
             cache_key = self._create_cache_key(kwargs)
         snapshot = self._cache_blob_store.get_entry_info(cache_key)
-        if snapshot is not None:
-            self._retire_exact_authority_snapshot(cache_key, snapshot)
+        if snapshot is None:
+            return CacheRemovalReport()
+        return self._remove_exact_candidates((self._candidate_from_snapshot(snapshot),))
 
     @_clear_coordinated
-    def clear_all(self) -> int:
-        """Clear the cache's authority-owned membership snapshot."""
+    def invalidate_where(
+        self,
+        query: CatalogQuery,
+        *,
+        cursor: str | None = None,
+        page_size: int = _REMOVAL_PAGE_SIZE,
+        work_cap: int = _REMOVAL_WORK_CAP,
+    ) -> CacheRemovalReport:
+        """Remove one validated, bounded authoritative catalog page exactly."""
 
-        return self._cache_blob_store.clear()
+        try:
+            page = self._query_cache_catalog(
+                query,
+                cursor=cursor,
+                page_size=page_size,
+                work_cap=work_cap,
+            )
+        except CatalogStaleCursorError:
+            if cursor is None:
+                raise
+            return CacheRemovalReport(
+                retryable=1,
+                complete=False,
+                continuation=cursor,
+            )
+        candidates = tuple(
+            self._candidate_from_catalog_entry(entry) for entry in page.entries
+        )
+        return self._remove_exact_candidates(
+            candidates,
+            complete=page.exhausted,
+            continuation=page.cursor,
+        )
+
+    @_clear_coordinated
+    def clear_all(
+        self,
+        *,
+        cursor: str | None = None,
+        page_size: int = _REMOVAL_PAGE_SIZE,
+        work_cap: int = _REMOVAL_WORK_CAP,
+    ) -> CacheRemovalReport:
+        """Remove one bounded global page through exact BlobStore deletion."""
+
+        return self.invalidate_where(
+            CatalogQuery(page_size=page_size),
+            cursor=cursor,
+            page_size=page_size,
+            work_cap=work_cap,
+        )
 
     @_clear_read_coordinated
     def list_entries(self) -> list[dict[str, Any]]:

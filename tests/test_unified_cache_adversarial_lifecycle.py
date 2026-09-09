@@ -8,6 +8,7 @@ from threading import Event, Thread
 import pytest
 
 from cacheness import CacheConfig, cacheness
+from cacheness.cache_policy import CacheRemovalReport
 from cacheness.error_handling import (
     CacheBlobStoreClosedError,
 )
@@ -198,12 +199,14 @@ def test_empty_authority_clear_preserves_a_peer_first_put_after_durable_intent(
     intent_prepared = Event()
     release = Event()
     errors: list[BaseException] = []
-    clear_calls: list[None] = []
-    original_clear = second._cache_blob_store.clear
+    delete_calls: list[str] = []
+    original_delete = second._cache_blob_store.delete
 
-    def clear_canonical_authority() -> int:
-        clear_calls.append(None)
-        return original_clear()
+    def delete_through_canonical_authority(
+        delete_key: str, *, expected=None
+    ) -> bool:
+        delete_calls.append(delete_key)
+        return original_delete(delete_key, expected=expected)
 
     def pause_after_durable_intent(boundary: str) -> None:
         if boundary == "put.intent_prepared":
@@ -217,13 +220,15 @@ def test_empty_authority_clear_preserves_a_peer_first_put_after_durable_intent(
             errors.append(error)
 
     first._cache_blob_store.lifecycle.test_hook = pause_after_durable_intent
-    monkeypatch.setattr(second._cache_blob_store, "clear", clear_canonical_authority)
+    monkeypatch.setattr(
+        second._cache_blob_store, "delete", delete_through_canonical_authority
+    )
     writer = Thread(target=put_first_generation)
     try:
         writer.start()
         assert intent_prepared.wait(timeout=5)
-        assert second.clear_all() == 0
-        assert clear_calls == [None]
+        assert second.clear_all() == CacheRemovalReport()
+        assert delete_calls == []
 
         release.set()
         _join(writer)
