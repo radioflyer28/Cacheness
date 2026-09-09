@@ -473,3 +473,13 @@ Plans:
 Plans:
 
 - [ ] Verify protected-DACL provisioning, same-session SQLite contention, and different-token denial; promote with $gsd-review-backlog when ready.
+
+### Phase 999.2: Formalize custom payload handler contract and developer kit (BACKLOG)
+
+**Goal:** Give third-party format authors one canonical, BlobStore-first extension contract with accurate per-store registration documentation, stable payload identity/version guidance, representative native-format examples, and reusable conformance tests.
+**Requirements:** TBD
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] Replace stale global cache-handler examples with `store.handlers.register_handler(...)`, document lifecycle ownership and migration compatibility responsibilities, and provide a contract-test kit; promote with $gsd-review-backlog when ready.
