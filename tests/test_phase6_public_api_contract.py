@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import os
 import subprocess
 import sys
@@ -197,3 +198,48 @@ def test_sqlcache_remains_a_separate_supported_surface() -> None:
     assert cached.__module__ == "cacheness.decorators"
     assert BlobStore.__module__ == "cacheness.storage.blob_store"
     assert RoleRegistry.__module__ == "cacheness.storage.composition"
+
+
+@pytest.mark.parametrize(
+    "name",
+    (
+        "cacheness",
+        "get_cache",
+        "reset_cache",
+        "create_cache_config",
+        "cache_function",
+        "memoize",
+        "CacheContext",
+    ),
+)
+def test_removed_development_public_names_do_not_delegate(name: str) -> None:
+    """The cutover removes overlapping owners rather than preserving adapters."""
+
+    assert name not in cacheness.__all__
+    assert not hasattr(cacheness, name)
+
+
+def test_removed_cache_compatibility_methods_and_flat_config_are_absent() -> None:
+    """The canonical lifecycle uses typed results and nested configuration only."""
+
+    assert not hasattr(UnifiedCache, "for_api")
+    assert not hasattr(UnifiedCache, "get")
+    assert not hasattr(UnifiedCache, "get_stats")
+    assert not hasattr(UnifiedCache, "list_entries")
+
+    parameters = inspect.signature(CacheConfig).parameters
+    for name in (
+        "cache_dir",
+        "default_ttl_hours",
+        "metadata_backend",
+        "blob_backend",
+        "hash_path_content",
+    ):
+        assert name not in parameters
+
+    config = CacheConfig()
+    for name in ("cache_dir", "default_ttl_hours", "blob_backend"):
+        assert not hasattr(config, name)
+
+    with pytest.raises(TypeError):
+        CacheConfig(cache_dir="deprecated")
