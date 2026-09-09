@@ -29,7 +29,13 @@ from cacheness import (
     UnifiedCache,
     cached,
 )
-from cacheness.config import CacheStorageConfig
+from cacheness.config import (
+    CacheStorageConfig,
+    load_config_from_json,
+    load_config_from_yaml,
+    save_config_to_json,
+    save_config_to_yaml,
+)
 from cacheness.error_handling import CacheMigrationOrRebuildRequiredError
 from cacheness.storage.composition import BackendRef
 from cacheness.storage.manifest import StoreVersionDimensions
@@ -146,6 +152,37 @@ def test_optional_yaml_capability_fails_only_when_requested() -> None:
     )
 
     assert completed.returncode == 0, completed.stderr
+
+
+@pytest.mark.parametrize(
+    ("suffix", "save_config", "load_config"),
+    (
+        ("json", save_config_to_json, load_config_from_json),
+        ("yaml", save_config_to_yaml, load_config_from_yaml),
+    ),
+)
+def test_config_round_trip_preserves_every_cache_policy_setting(
+    tmp_path, suffix, save_config, load_config
+) -> None:
+    """Persisted policy settings retain their cache semantics after loading."""
+
+    if suffix == "yaml":
+        pytest.importorskip("yaml")
+    config = CacheConfig(
+        storage=CacheStorageConfig(cache_dir=str(tmp_path / "cache")),
+        policy=CachePolicyConfig(
+            default_ttl_hours=None,
+            max_authoritative_bytes=7,
+            catalog_page_size=3,
+            maintenance_work_cap=3,
+            max_maintenance_state_bytes=512,
+        ),
+    )
+    path = tmp_path / f"cache-config.{suffix}"
+
+    save_config(config, path)
+
+    assert load_config(path).policy == config.policy
 
 
 @pytest.mark.parametrize(

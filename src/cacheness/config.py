@@ -908,6 +908,7 @@ def save_config_to_json(config: CacheConfig, path: Union[str, Path], indent: int
     data = {
         "storage": asdict(config.storage),
         "metadata": asdict(config.metadata),
+        "policy": asdict(config.policy),
         "compression": asdict(config.compression),
         "serialization": asdict(config.serialization),
         "handlers": asdict(config.handlers),
@@ -951,6 +952,7 @@ def save_config_to_yaml(config: CacheConfig, path: Union[str, Path]) -> None:
     data = {
         "storage": asdict(config.storage),
         "metadata": asdict(config.metadata),
+        "policy": asdict(config.policy),
         "compression": asdict(config.compression),
         "serialization": asdict(config.serialization),
         "handlers": asdict(config.handlers),
