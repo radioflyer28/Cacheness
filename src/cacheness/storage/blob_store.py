@@ -214,7 +214,7 @@ class BlobStore:
         self.lifecycle_limits = self.config.lifecycle_limits
         self._instance_admission = InstanceAdmission(self.lifecycle_limits)
         self._immutable_metadata_patch_fields = _IMMUTABLE_METADATA_PATCH_FIELDS
-        self.handlers = HandlerRegistry()
+        self.handlers = HandlerRegistry(self.config)
         if manifest_key_provider is not None:
             self._manifest_key_provider = manifest_key_provider
         elif self._is_memory_topology():

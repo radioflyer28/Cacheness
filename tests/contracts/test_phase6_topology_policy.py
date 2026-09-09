@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from cacheness.config import CacheConfig, CacheStorageConfig
+from cacheness.config import CacheConfig, CacheStorageConfig, HandlerConfig
 from cacheness.core import UnifiedCache
 from cacheness.error_handling import CacheBlobStoreClosedError
 from cacheness.handlers import ObjectHandler
@@ -291,6 +291,67 @@ def test_injected_store_retains_its_custom_handler_registry(tmp_path: Path) -> N
         assert store.get("after") == _CustomValue("after")
         assert store.handlers is caller_handlers
     finally:
+        store.close()
+
+
+def test_direct_store_applies_its_configured_handler_availability(tmp_path: Path) -> None:
+    """Direct storage keeps disabled handler policy instead of recreating defaults."""
+
+    config = CacheConfig(
+        storage=CacheStorageConfig(cache_dir=tmp_path / "store"),
+        handlers=HandlerConfig(
+            enable_pandas_dataframes=False,
+            enable_polars_dataframes=False,
+            enable_pandas_series=False,
+            enable_polars_series=False,
+            enable_numpy_arrays=False,
+            enable_object_pickle=False,
+        ),
+    )
+    store = BlobStore(
+        _local_topology("memory-memory", tmp_path / "payloads"),
+        cache_dir=tmp_path / "store",
+        config=config,
+    )
+    store.initialize()
+    try:
+        assert store.handlers.config is config
+        assert store.handlers.handlers == []
+        with pytest.raises(ValueError, match="No handler available"):
+            store.put({"must_not_be_pickled": True}, key="disabled-handlers")
+    finally:
+        store.close()
+
+
+def test_injected_store_preserves_configured_handler_priority(tmp_path: Path) -> None:
+    """Cache policy observes the handler order selected by the caller's store."""
+
+    config = CacheConfig(
+        storage=CacheStorageConfig(cache_dir=tmp_path / "cache"),
+        handlers=HandlerConfig(
+            handler_priority=["object_pickle", "numpy_arrays"],
+            enable_pandas_dataframes=False,
+            enable_polars_dataframes=False,
+            enable_pandas_series=False,
+            enable_polars_series=False,
+        ),
+    )
+    store = BlobStore(
+        _local_topology("memory-memory", tmp_path / "payloads"),
+        cache_dir=tmp_path / "store",
+        config=config,
+    )
+    store.initialize()
+    cache = UnifiedCache(config, store=store)
+    try:
+        assert [handler.data_type for handler in store.handlers.handlers] == [
+            "object",
+            "array",
+        ]
+        assert cache.handlers is store.handlers
+        assert cache.handlers.config is config
+    finally:
+        cache.close()
         store.close()
 
 
