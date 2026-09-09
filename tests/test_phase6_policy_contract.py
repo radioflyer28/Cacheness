@@ -6,10 +6,19 @@ import math
 
 import pytest
 
-from cacheness.cache_policy import CacheMaintenancePhase, CacheMaintenanceResult
+from cacheness.cache_policy import (
+    CacheMaintenancePhase,
+    CacheMaintenanceResult,
+    CachePutResult,
+    CacheRemovalReport,
+)
 from cacheness.config import CacheConfig, CachePolicyConfig
 from cacheness.core import _CACHE_NAMESPACE, _CACHE_POLICY_SCHEMA, UnifiedCache
-from cacheness.error_handling import CacheBlobLifecycleConflictError
+from cacheness.error_handling import (
+    CacheBlobBackendError,
+    CacheBlobLifecycleConflictError,
+)
+from cacheness.storage import BlobReceipt
 from cacheness.storage.catalog import CatalogQuery
 from cacheness.storage.composition import BackendRef, StoreTopology
 
@@ -184,3 +193,98 @@ def test_foreign_maintenance_state_is_rejected_before_authority_io(
     finally:
         first.close()
         second.close()
+
+
+def test_put_retains_canonical_receipt_when_maintenance_is_incomplete(tmp_path) -> None:
+    """A committed write remains inspectable while bounded work is pending."""
+
+    cache = _cache(tmp_path, byte_limit=0)
+    try:
+        value = {"payload": "x" * 128}
+        result = cache.put(value, request_id="post-commit-partial")
+
+        assert isinstance(result, CachePutResult)
+        assert isinstance(result.receipt, BlobReceipt)
+        assert result.maintenance.complete is False
+        assert result.maintenance.retryable is True
+        assert result.maintenance.state is not None
+        assert (
+            cache.lookup(cache_key=result.receipt.key, ttl_hours=None).value == value
+        )
+    finally:
+        cache.close()
+
+
+def test_put_preserves_receipt_when_one_maintenance_step_reports_complete(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The receipt and a complete policy report remain distinct immutable facts."""
+
+    cache = _cache(tmp_path, byte_limit=1024 * 1024)
+    complete = CacheMaintenanceResult(
+        complete=True,
+        retryable=False,
+        removal=CacheRemovalReport(),
+    )
+    try:
+        monkeypatch.setattr(cache, "maintain_size", lambda: complete)
+
+        result = cache.put({"payload": "complete"}, request_id="post-commit-complete")
+
+        assert isinstance(result, CachePutResult)
+        assert isinstance(result.receipt, BlobReceipt)
+        assert result.maintenance is complete
+    finally:
+        cache.close()
+
+
+def test_put_preserves_receipt_when_maintenance_reports_backend_failure(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A post-commit policy failure cannot falsify the BlobStore write result."""
+
+    cache = _cache(tmp_path, byte_limit=0)
+    try:
+        def unavailable_catalog(*_args, **_kwargs):
+            raise CacheBlobBackendError("catalog unavailable")
+
+        monkeypatch.setattr(cache.store, "query_catalog", unavailable_catalog)
+
+        result = cache.put(
+            {"payload": "backend-failure"}, request_id="post-commit-failure"
+        )
+
+        assert isinstance(result, CachePutResult)
+        assert isinstance(result.receipt, BlobReceipt)
+        assert result.maintenance.complete is False
+        assert result.maintenance.retryable is True
+        assert isinstance(result.maintenance.cause, CacheBlobBackendError)
+    finally:
+        cache.close()
+
+
+def test_failed_put_skips_size_maintenance(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed canonical write does not start policy work."""
+
+    cache = _cache(tmp_path)
+    maintenance_calls = 0
+    try:
+        def failed_put(*_args, **_kwargs):
+            raise CacheBlobBackendError("canonical put failed")
+
+        def unexpected_maintenance() -> CacheMaintenanceResult:
+            nonlocal maintenance_calls
+            maintenance_calls += 1
+            raise AssertionError("maintenance must not run after a failed put")
+
+        monkeypatch.setattr(cache.store, "put_entry", failed_put)
+        monkeypatch.setattr(cache, "maintain_size", unexpected_maintenance)
+
+        with pytest.raises(CacheBlobBackendError, match="canonical put failed"):
+            cache.put({"payload": "never"}, request_id="pre-commit-failure")
+
+        assert maintenance_calls == 0
+    finally:
+        cache.close()
