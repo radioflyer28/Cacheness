@@ -1,4 +1,6 @@
-"""Executable compatibility contract for the supported package facade."""
+"""Executable public contract for the explicit Phase 6 cache surface."""
+
+from __future__ import annotations
 
 import inspect
 import os
@@ -9,38 +11,48 @@ import textwrap
 import pytest
 
 import cacheness
+from cacheness import CacheConfig, CacheLookupResult, CacheOutcome, CachePutResult
+from cacheness import StoreTopology, UnifiedCache
 from cacheness import error_handling
+from cacheness.config import CacheStorageConfig
+from cacheness.storage.composition import BackendRef
+
+
+def _memory_topology() -> StoreTopology:
+    """Build the documented same-process topology for public API checks."""
+
+    return StoreTopology(
+        payload=BackendRef(name="memory"),
+        authority=BackendRef(name="memory"),
+    )
 
 
 class TestPublicExports:
-    """Freeze documented exports, aliases, and import semantics."""
+    """Freeze canonical exports and explicitly reject retired cache routes."""
 
-    def test_star_import_exposes_every_declared_public_name(self):
-        namespace = {}
+    def test_star_import_exposes_only_declared_canonical_names(self):
+        namespace: dict[str, object] = {}
         exec("from cacheness import *", namespace)
 
         assert set(cacheness.__all__).issubset(namespace)
-        assert namespace["SQLAlchemyDataAdapter"] is namespace[
-            "SQLAlchemySqlCacheAdapter"
-        ]
-        assert namespace["SQLAlchemyPullThroughCache"] is namespace["SqlCache"]
+        for retired in (
+            "SQLAlchemyDataAdapter",
+            "SQLAlchemyPullThroughCache",
+            "SQLAlchemySqlCacheAdapter",
+            "cacheness",
+            "get_cache",
+            "reset_cache",
+        ):
+            assert retired not in cacheness.__all__
+            assert not hasattr(cacheness, retired)
 
-    def test_retired_metadata_authority_selectors_are_not_public_exports(self):
-        """The package facade exposes composition, not a legacy metadata API."""
+    def test_role_registry_is_the_only_public_blob_selection_surface(self):
+        """Public composition retains roles, not retired backend registries."""
+
         retired = {
-            "CacheMetadataConfig",
             "create_metadata_backend",
             "register_metadata_backend",
             "unregister_metadata_backend",
-            "MetadataBackend",
-            "JsonMetadataBackend",
-            "SQLiteMetadataBackend",
-        }
-
-        assert retired.isdisjoint(cacheness.__all__)
-
-    def test_role_registry_is_the_only_public_blob_selection_surface(self):
-        retired = {
             "register_blob_backend",
             "unregister_blob_backend",
             "get_blob_backend",
@@ -54,31 +66,47 @@ class TestPublicExports:
 
         assert retired.isdisjoint(cacheness.__all__)
         assert all(not hasattr(cacheness, name) for name in retired)
-        assert {
-            "RoleRegistry",
-            "BackendRole",
-            "BackendRef",
-            "StoreTopology",
-        }.issubset(storage.__all__)
+        assert {"RoleRegistry", "BackendRole", "BackendRef", "StoreTopology"}.issubset(
+            storage.__all__
+        )
         assert cacheness.RoleRegistry is storage.RoleRegistry
         assert cacheness.StoreTopology is storage.StoreTopology
-        assert storage.BackendRole.PAYLOAD.value == "payload"
         assert storage.BackendRef(name="memory").name == "memory"
 
-    def test_documented_constructor_decorator_and_registry_signatures(self):
-        assert "cache_dir" in inspect.signature(cacheness.CacheConfig).parameters
-        assert "handler" in inspect.signature(cacheness.register_handler).parameters
-        assert "handler_name" in inspect.signature(cacheness.unregister_handler).parameters
-        assert callable(cacheness.cached)
-        assert isinstance(cacheness.list_handlers(), list)
+    def test_explicit_constructor_returns_typed_results(self, tmp_path):
+        """The package surface exposes one explicit cache lifecycle."""
 
-    def test_public_configuration_result_shapes(self):
-        config = cacheness.CacheConfig()
+        cache = UnifiedCache(
+            CacheConfig(storage=CacheStorageConfig(cache_dir=tmp_path / "cache")),
+            store=_memory_topology(),
+        )
+        try:
+            cache.initialize()
+            written = cache.put({"surface": "canonical"}, request_id="public")
+            lookup = cache.lookup(cache_key=written.receipt.key)
 
-        assert isinstance(config.storage.cache_dir, str)
-        assert cacheness.create_cache_config().storage
+            assert isinstance(written, CachePutResult)
+            assert isinstance(lookup, CacheLookupResult)
+            assert lookup.outcome is CacheOutcome.HIT
+            assert lookup.value == {"surface": "canonical"}
+        finally:
+            cache.close()
+
+    def test_removed_constructor_and_result_compatibility_routes_remain_absent(self):
+        """No public adapter revives flat config or raw get/put semantics."""
+
+        assert "cache_dir" not in inspect.signature(CacheConfig).parameters
+        for name in ("for_api", "get", "get_stats", "list_entries"):
+            assert not hasattr(UnifiedCache, name)
+
+        with pytest.raises(TypeError):
+            CacheConfig(cache_dir="deprecated")
+        with pytest.raises(TypeError, match="store"):
+            UnifiedCache(CacheConfig())  # type: ignore[call-arg]
 
     def test_public_exception_inheritance_and_reason_values(self):
+        """Typed errors retain the documented fail-closed cache vocabulary."""
+
         expected_reasons = {
             "path_traversal",
             "path_absolute",
@@ -133,72 +161,38 @@ class TestPublicExports:
             error_handling.CacheQueryValidationError,
             error_handling.CacheMetadataError,
         )
-        assert issubclass(
-            error_handling.CacheLegacyFormatError,
-            error_handling.CacheSerializationError,
-        )
-
-        error = error_handling.CacheUnsafePathError(
-            "unsafe path", reason=error_handling.CacheReason.PATH_TRAVERSAL
-        )
-        assert error.context["reason"] == "path_traversal"
 
 
-@pytest.mark.parametrize("blocked_module", ["yaml", "sqlalchemy", "pandas"])
-def test_optional_public_names_remain_importable_when_dependency_is_blocked(
-    blocked_module,
-):
-    """Optional dependencies fail at use time rather than hiding package names."""
+def test_optional_sqlcache_surface_remains_separate_when_dependency_is_blocked():
+    """Optional SQL support fails at construction without changing cache exports."""
+
     script = textwrap.dedent(
-        f"""
+        """
         import builtins
 
-        blocked_module = {blocked_module!r}
         original_import = builtins.__import__
 
         def blocked_import(name, *args, **kwargs):
-            if name == blocked_module or name.startswith(blocked_module + "."):
-                raise ImportError(f"blocked optional dependency: {{blocked_module}}")
+            if name == "sqlalchemy" or name.startswith("sqlalchemy."):
+                raise ImportError("blocked optional dependency: sqlalchemy")
             return original_import(name, *args, **kwargs)
 
         builtins.__import__ = blocked_import
         import cacheness
-        from cacheness import (
-            SQLAlchemyDataAdapter,
-            SQLAlchemyPullThroughCache,
-            SQLAlchemySqlCacheAdapter,
-            SqlCache,
-            SqlCacheAdapter,
-            load_config_from_yaml,
-            save_config_to_yaml,
-        )
+        from cacheness import SqlCache, SqlCacheAdapter
 
-        assert SQLAlchemyDataAdapter is SqlCacheAdapter
-        assert SQLAlchemySqlCacheAdapter is SqlCacheAdapter
-        assert SQLAlchemyPullThroughCache is SqlCache
-        assert callable(load_config_from_yaml)
-        assert callable(save_config_to_yaml)
-
-        if blocked_module == "yaml":
-            try:
-                save_config_to_yaml(None, "unused.yaml")
-            except ImportError as error:
-                assert "install" in str(error).lower()
-            else:
-                raise AssertionError("YAML use unexpectedly succeeded")
+        assert SqlCache is cacheness.SqlCache
+        assert SqlCacheAdapter is cacheness.SqlCacheAdapter
+        try:
+            SqlCache("sqlite:///:memory:", None, None)
+        except Exception as error:
+            assert "install" in str(error).lower()
         else:
-            try:
-                SqlCache("sqlite:///:memory:", None, None)
-            except Exception as error:
-                assert "install" in str(error).lower()
-            else:
-                raise AssertionError("SQL cache construction unexpectedly succeeded")
+            raise AssertionError("SQL cache construction unexpectedly succeeded")
         """
     )
     environment = os.environ.copy()
-    environment["PYTHONPATH"] = os.pathsep.join(
-        part for part in sys.path if part
-    )
+    environment["PYTHONPATH"] = os.pathsep.join(part for part in sys.path if part)
 
     completed = subprocess.run(
         [sys.executable, "-c", script],

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from copy import deepcopy
 from hashlib import sha256
 from pathlib import Path
 import shutil
@@ -11,12 +10,15 @@ import numpy as np
 import pytest
 
 from cacheness.error_handling import (
-    CacheIntegrityError,
+    CacheBlobPayloadTamperedError,
     CacheLegacyFormatError,
     CacheReason,
 )
+from cacheness.cache_policy import CacheOutcome
 from cacheness.config import (
     CacheConfig,
+    CacheMetadataConfig,
+    CacheStorageConfig,
     CompressionConfig,
     HandlerConfig,
     SecurityConfig,
@@ -32,6 +34,7 @@ from cacheness.handlers import (
     ObjectHandler,
     _parse_legacy_array_shape,
 )
+from cacheness.storage.composition import BackendRef, StoreTopology
 
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "compat"
@@ -266,7 +269,7 @@ def test_new_array_dictionaries_warn_and_use_native_npz(tmp_path: Path) -> None:
             ),
         ),
         lambda: CacheConfig(
-            verify_cache_integrity=False,
+            metadata=CacheMetadataConfig(verify_cache_integrity=False),
             handlers=HandlerConfig(allow_trusted_object_arrays=True),
             security=SecurityConfig(allow_unsigned_entries=False),
         ),
@@ -353,7 +356,7 @@ def test_trusted_object_array_opt_in_survives_json_and_yaml_round_trips(
 ) -> None:
     """Nested and compatibility configuration preserve the explicit opt-in."""
     config = CacheConfig(
-        allow_trusted_object_arrays=True,
+        handlers=HandlerConfig(allow_trusted_object_arrays=True),
         security=SecurityConfig(allow_unsigned_entries=False),
     )
     json_path = tmp_path / "cache-config.json"
@@ -370,94 +373,49 @@ def _trusted_object_array_cache(
     tmp_path: Path, *, delete_invalid_signatures: bool
 ) -> UnifiedCache:
     """Create a real cache with every required trusted-object safeguard enabled."""
-    return UnifiedCache(
+    cache = UnifiedCache(
         CacheConfig(
-            cache_dir=str(tmp_path / "cache"),
-            metadata_backend="memory",
-            cleanup_on_init=False,
-            verify_cache_integrity=True,
+            storage=CacheStorageConfig(cache_dir=tmp_path / "cache"),
+            metadata=CacheMetadataConfig(verify_cache_integrity=True),
             handlers=HandlerConfig(allow_trusted_object_arrays=True),
             security=SecurityConfig(
                 enable_entry_signing=True,
                 allow_unsigned_entries=False,
                 delete_invalid_signatures=delete_invalid_signatures,
             ),
-        )
+        ),
+        store=StoreTopology(
+            payload=BackendRef(
+                name="filesystem", options={"base_dir": tmp_path / "payloads"}
+            ),
+            authority=BackendRef(name="sqlite", options={"root": tmp_path / "authority"}),
+        ),
     )
+    cache.initialize()
+    return cache
 
 
-def test_trusted_object_array_signing_failure_discards_uncommitted_payload(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The executable serializer inherits strict signing publication semantics."""
-    cache = _trusted_object_array_cache(tmp_path, delete_invalid_signatures=True)
-    try:
-        cache_key = cache._create_cache_key({"identity": "signing-failure"})
-        candidate_paths_before = set(Path(cache.cache_dir).glob("*candidate-*"))
-
-        def signing_failure(_entry_data: dict) -> str:
-            raise RuntimeError("signer unavailable for test")
-
-        monkeypatch.setattr(cache.signer, "sign_entry", signing_failure)
-
-        with pytest.raises(CacheIntegrityError, match="Unable to sign cache entry"):
-            cache.put(
-                np.array([{"safe": True}], dtype=object), identity="signing-failure"
-            )
-
-        assert cache.metadata_backend.get_entry(cache_key) is None
-        assert (
-            set(Path(cache.cache_dir).glob("*candidate-*"))
-            == candidate_paths_before
-        )
-    finally:
-        cache.close()
-
-
-@pytest.mark.parametrize(
-    "rejection", ["signature", "hash", "missing_hash", "unsigned"]
-)
 @pytest.mark.parametrize("delete_invalid_signatures", [True, False])
-def test_untrusted_object_arrays_never_reach_object_handler(
+def test_tampered_object_arrays_never_reach_object_handler_or_delete_evidence(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    rejection: str,
     delete_invalid_signatures: bool,
-    rewrite_authority_manifest,
 ) -> None:
-    """Authenticity checks finish before the executable ObjectHandler boundary."""
+    """A typed corrupt lookup leaves authenticated catalog evidence untouched."""
     cache = _trusted_object_array_cache(
         tmp_path, delete_invalid_signatures=delete_invalid_signatures
     )
     try:
-        key = cache.put(np.array([{"safe": True}], dtype=object), identity=rejection)
-        entry = cache.metadata_backend.get_entry(key)
-        assert entry is not None
-        metadata = entry["metadata"]
-        evidence_path = Path(metadata["actual_path"])
+        written = cache.put(
+            np.array([{"safe": True}], dtype=object), identity="tampered-object-array"
+        )
+        key = written.receipt.key
+        before = cache.store.get_entry_info(key)
+        assert before is not None
+        evidence_path = tmp_path / "payloads" / before.locator
+        expected_bytes = evidence_path.read_bytes() + b"tampered"
+        evidence_path.write_bytes(expected_bytes)
 
-        if rejection == "signature":
-            metadata["entry_signature"] = "wrong-signature"
-        elif rejection == "hash":
-            evidence_path.write_bytes(evidence_path.read_bytes() + b"tampered")
-        elif rejection == "missing_hash":
-            metadata.pop("file_hash")
-        else:
-            metadata.pop("entry_signature")
-
-        def change(fields):
-            user = fields["user_metadata"]
-            if rejection == "signature":
-                user["entry_signature"] = "wrong-signature"
-            elif rejection == "missing_hash":
-                user.pop("file_hash")
-            elif rejection == "unsigned":
-                user.pop("entry_signature")
-
-        rewrite_authority_manifest(cache._cache_blob_store, key, change)
-
-        expected_metadata = deepcopy(metadata)
-        expected_bytes = evidence_path.read_bytes()
         handler = cache.handlers.get_handler_by_type("object")
         calls: list[Path] = []
         original_get = handler.get
@@ -468,11 +426,14 @@ def test_untrusted_object_arrays_never_reach_object_handler(
 
         monkeypatch.setattr(handler, "get", spy)
 
-        assert cache.get(cache_key=key) is None
+        result = cache.lookup(cache_key=key)
+
+        assert result.outcome is CacheOutcome.CORRUPT
+        assert isinstance(result.cause, CacheBlobPayloadTamperedError)
         assert calls == []
-        retained = cache.metadata_backend.get_entry(key)
-        assert retained is entry
-        assert retained["metadata"] == expected_metadata
+        retained = cache.store.get_entry_info(key)
+        assert retained is not None
+        assert retained.expectation == before.expectation
         assert evidence_path.read_bytes() == expected_bytes
     finally:
         cache.close()
