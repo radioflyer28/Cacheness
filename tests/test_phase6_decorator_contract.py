@@ -6,7 +6,6 @@ import ast
 import gc
 import inspect
 
-from cacheness.cache_policy import CacheOutcome
 from cacheness.config import CacheConfig
 from cacheness.core import UnifiedCache
 from cacheness.decorators import cached
@@ -105,7 +104,7 @@ def test_explicit_cache_normalizes_equivalent_function_call_forms(tmp_path) -> N
         cache.close()
 
 
-def test_decorator_module_has_no_implicit_lifecycle_owner(tmp_path) -> None:
+def test_explicit_decorator_module_has_no_implicit_lifecycle_owner(tmp_path) -> None:
     """Decorator construction only closes over a caller-supplied cache instance."""
 
     source = inspect.getsource(__import__("cacheness.decorators", fromlist=["cached"]))

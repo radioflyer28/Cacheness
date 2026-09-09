@@ -60,6 +60,7 @@ from .storage.catalog import (
     CatalogEntry,
     CatalogField,
     CatalogPage,
+    CatalogPredicate,
     CatalogQuery,
     CatalogSchema,
     CatalogStaleCursorError,
@@ -109,11 +110,12 @@ def _normalize_function_args(
     """Normalize equivalent function calling conventions for cache keys."""
 
     try:
-        bound = inspect.signature(func).bind(*args, **kwargs)
-        bound.apply_defaults()
-        return dict(bound.arguments)
+        signature = inspect.signature(func)
     except (TypeError, ValueError):
         return {**{f"__arg_{index}": value for index, value in enumerate(args)}, **kwargs}
+    bound = signature.bind(*args, **kwargs)
+    bound.apply_defaults()
+    return dict(bound.arguments)
 
 
 class UnifiedCache:
@@ -168,6 +170,36 @@ class UnifiedCache:
         """Return the deterministic public cache identity for ``params``."""
 
         return create_unified_cache_key(dict(params), self.config)
+
+    @staticmethod
+    def function_namespace(func: Callable) -> str:
+        """Return the stable, queryable namespace for one decorated function."""
+
+        target = inspect.unwrap(func)
+        module = getattr(target, "__module__", None)
+        qualname = getattr(target, "__qualname__", None)
+        if not isinstance(module, str) or not module:
+            raise TypeError("cached functions require a non-empty __module__")
+        if not isinstance(qualname, str) or not qualname:
+            raise TypeError("cached functions require a non-empty __qualname__")
+        return f"{module}.{qualname}"
+
+    def _function_cache_key(
+        self, func: Callable, args: tuple[Any, ...], kwargs: dict[str, Any]
+    ) -> tuple[str, str]:
+        """Derive one policy-owned key from function identity and bound arguments."""
+
+        namespace = self.function_namespace(func)
+        normalized = _normalize_function_args(func, args, kwargs)
+        return (
+            namespace,
+            self._create_cache_key(
+                {
+                    "__function_namespace__": namespace,
+                    "__function_arguments__": normalized,
+                }
+            ),
+        )
 
     def _get_cache_file_path(self, cache_key: str, prefix: str = "") -> Path:
         """Return an opaque path-like diagnostic identity, not a payload locator."""
@@ -752,34 +784,88 @@ class UnifiedCache:
 
         return self._run_size_maintenance(self._validate_maintenance_state(state))
 
-    @_clear_coordinated
-    def put(
-        self, data: Any, prefix: str = "", description: str = "", **kwargs: Any
+    def _put_for_cache_key(
+        self,
+        data: Any,
+        *,
+        cache_key: str,
+        prefix: str,
+        description: str,
+        key_params: Mapping[str, Any],
+        function_namespace: str | None = None,
     ) -> CachePutResult:
-        """Commit one value and return receipt plus one bounded policy outcome.
+        """Commit one value under a policy-owned key and catalog namespace.
 
         BlobStore commits the payload and catalog before policy maintenance
         begins.  The one returned policy step may be incomplete or retryable,
         but it cannot revoke, relabel, or roll back the committed generation.
         """
 
-        cache_key = self._create_cache_key(kwargs)
         metadata: dict[str, Any] = {"prefix": prefix, "description": description}
         if self.config.metadata.store_cache_key_params:
-            metadata["cache_key_params"] = self._canonical_cache_key_params(kwargs)
+            metadata["cache_key_params"] = self._canonical_cache_key_params(key_params)
+        catalog_values: dict[str, str] = {
+            "cache_namespace": _CACHE_NAMESPACE,
+            "cache_prefix": prefix,
+        }
+        if function_namespace is not None:
+            catalog_values["function_namespace"] = function_namespace
         self._cache_blob_store.handlers = self.handlers
         receipt = self._cache_blob_store.put_entry(
             data,
             key=cache_key,
             metadata=metadata,
             catalog_schema=_CACHE_POLICY_SCHEMA,
-            catalog_values={
-                "cache_namespace": _CACHE_NAMESPACE,
-                "cache_prefix": prefix,
-            },
+            catalog_values=catalog_values,
         )
         maintenance = self.maintain_size()
         return CachePutResult(receipt=receipt, maintenance=maintenance)
+
+    @_clear_coordinated
+    def put(
+        self, data: Any, prefix: str = "", description: str = "", **kwargs: Any
+    ) -> CachePutResult:
+        """Commit one value and return receipt plus one bounded policy outcome."""
+
+        return self._put_for_cache_key(
+            data,
+            cache_key=self._create_cache_key(kwargs),
+            prefix=prefix,
+            description=description,
+            key_params=kwargs,
+        )
+
+    @_clear_read_coordinated
+    def lookup_call(
+        self, func: Callable, args: tuple[Any, ...], kwargs: dict[str, Any]
+    ) -> CacheLookupResult:
+        """Look up one normalized decorated call through the shared policy boundary."""
+
+        _, cache_key = self._function_cache_key(func, args, kwargs)
+        return self.lookup(cache_key=cache_key)
+
+    @_clear_coordinated
+    def put_call(
+        self,
+        func: Callable,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        value: Any,
+    ) -> CachePutResult:
+        """Commit one decorated result with its authenticated function namespace."""
+
+        namespace, cache_key = self._function_cache_key(func, args, kwargs)
+        return self._put_for_cache_key(
+            value,
+            cache_key=cache_key,
+            prefix="",
+            description=f"Cached result for {namespace}",
+            key_params={
+                "__function_namespace__": namespace,
+                "__function_arguments__": _normalize_function_args(func, args, kwargs),
+            },
+            function_namespace=namespace,
+        )
 
     def _record_outcome(self, outcome: CacheOutcome) -> None:
         """Best-effort record an already-final lookup outcome.
@@ -921,6 +1007,30 @@ class UnifiedCache:
             candidates,
             complete=page.exhausted,
             continuation=page.cursor,
+        )
+
+    @_clear_coordinated
+    def invalidate_function(
+        self,
+        func: Callable,
+        *,
+        cursor: str | None = None,
+        page_size: int = _REMOVAL_PAGE_SIZE,
+        work_cap: int = _REMOVAL_WORK_CAP,
+    ) -> CacheRemovalReport:
+        """Remove one bounded page in a function's authoritative namespace."""
+
+        namespace = self.function_namespace(func)
+        return self.invalidate_where(
+            CatalogQuery(
+                predicates=(
+                    CatalogPredicate("function_namespace", "eq", namespace),
+                ),
+                page_size=page_size,
+            ),
+            cursor=cursor,
+            page_size=page_size,
+            work_cap=work_cap,
         )
 
     @_clear_coordinated
