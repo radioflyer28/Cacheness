@@ -46,6 +46,9 @@ def test_manifest_is_fixed_and_contains_the_strict_projection_node() -> None:
         "tests/test_lifecycle_authority_contract.py",
         "tests/test_supported_topologies.py",
     }
+    assert verifier.FIXED_REGRESSION_NODES == {
+        "CACH-07 SqlCache regression": ("tests/test_sql_cache.py",),
+    }
     assert verifier.REMOTE_EVIDENCE_LABEL == "mocked-candidate; BACK-05 remains Phase 8"
 
 

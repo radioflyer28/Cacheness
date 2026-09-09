@@ -58,6 +58,9 @@ CACH_REQUIREMENT_NODES = {
     "CACH-05": ("tests/test_phase6_statistics.py",),
     "CACH-06": ("tests/test_phase6_public_api_contract.py",),
 }
+FIXED_REGRESSION_NODES = {
+    "CACH-07 SqlCache regression": ("tests/test_sql_cache.py",),
+}
 ARCHITECTURE_MODULES = (
     "src/cacheness/core.py",
     "src/cacheness/cache_policy.py",
@@ -357,6 +360,10 @@ def verify_repository(root: Path) -> tuple[bool, tuple[str, ...]]:
         passed, evidence = _run_pytest(root, nodes, label=requirement)
         if not passed:
             errors.append(evidence)
+    for regression, nodes in FIXED_REGRESSION_NODES.items():
+        passed, evidence = _run_pytest(root, nodes, label=regression)
+        if not passed:
+            errors.append(evidence)
     passed, evidence = _run_pytest(
         root,
         (
@@ -384,8 +391,18 @@ def main(argv: list[str] | None = None) -> int:
     passed, errors = verify_repository(args.repo_root)
     print("Phase 6 fixed contract verifier")
     for requirement in CACH_REQUIREMENT_NODES:
-        print(f"{requirement}: {'PASS' if passed else 'see diagnostics'}")
-    print("SC-06 strict projection rejection: " + ("PASS" if passed else "see diagnostics"))
+        requirement_passed = not any(error.startswith(f"{requirement}:") for error in errors)
+        print(f"{requirement}: {'PASS' if requirement_passed else 'see diagnostics'}")
+    for regression in FIXED_REGRESSION_NODES:
+        regression_passed = not any(error.startswith(f"{regression}:") for error in errors)
+        print(f"{regression}: {'PASS' if regression_passed else 'see diagnostics'}")
+    projection_passed = not any(
+        error.startswith("SC-06 strict projection rejection:") for error in errors
+    )
+    print(
+        "SC-06 strict projection rejection: "
+        + ("PASS" if projection_passed else "see diagnostics")
+    )
     print(f"Remote evidence: {REMOTE_EVIDENCE_LABEL}")
     if errors:
         for error in errors:
