@@ -6,9 +6,17 @@ import ast
 import gc
 import inspect
 
+import pytest
+
+from cacheness.cache_policy import CacheLookupResult, CacheOutcome
 from cacheness.config import CacheConfig
 from cacheness.core import UnifiedCache
 from cacheness.decorators import cached
+from cacheness.error_handling import (
+    CacheBlobBackendError,
+    CacheBlobIntegrityError,
+    CacheBlobLifecycleConflictError,
+)
 from cacheness.storage.composition import BackendRef, StoreTopology
 
 
@@ -143,5 +151,171 @@ def test_explicit_decorator_module_has_no_implicit_lifecycle_owner(tmp_path) -> 
         del value
         gc.collect()
         assert close_calls == 0
+    finally:
+        cache.close()
+
+
+@pytest.mark.parametrize("outcome", (CacheOutcome.ABSENT, CacheOutcome.EXPIRED))
+def test_default_decorator_recomputes_only_normal_miss_outcomes(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, outcome: CacheOutcome
+) -> None:
+    """Default policy runs user code for absent and expired observations only."""
+
+    cache = _cache(tmp_path)
+    calls = 0
+    try:
+        monkeypatch.setattr(
+            cache,
+            "lookup_call",
+            lambda *_args, **_kwargs: CacheLookupResult(outcome),
+        )
+
+        @cached(cache=cache)
+        def value() -> str:
+            nonlocal calls
+            calls += 1
+            return outcome.value
+
+        assert value() == outcome.value
+        assert calls == 1
+        assert value.cache_last_lookup.outcome is outcome
+    finally:
+        cache.close()
+
+
+@pytest.mark.parametrize(
+    ("outcome", "cause"),
+    (
+        (CacheOutcome.CORRUPT, CacheBlobIntegrityError("descriptor corrupt")),
+        (CacheOutcome.CONFLICT, CacheBlobLifecycleConflictError("generation changed")),
+        (CacheOutcome.BACKEND_ERROR, CacheBlobBackendError("authority unavailable")),
+    ),
+)
+def test_default_decorator_preserves_failure_outcomes_without_recomputing(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    outcome: CacheOutcome,
+    cause: BaseException,
+) -> None:
+    """Failures retain their typed causes instead of silently executing user code."""
+
+    cache = _cache(tmp_path)
+    calls = 0
+    try:
+        result = CacheLookupResult(outcome, cause=cause)
+        monkeypatch.setattr(cache, "lookup_call", lambda *_args, **_kwargs: result)
+
+        @cached(cache=cache)
+        def should_not_run() -> str:
+            nonlocal calls
+            calls += 1
+            return "unexpected"
+
+        with pytest.raises(type(cause)) as raised:
+            should_not_run()
+        assert raised.value is cause
+        assert calls == 0
+        assert should_not_run.cache_last_lookup is result
+    finally:
+        cache.close()
+
+
+def test_explicit_failure_recompute_retains_the_original_lookup_result(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An opted-in fallback leaves the original typed outcome inspectable."""
+
+    cache = _cache(tmp_path)
+    cause = CacheBlobBackendError("temporary authority outage")
+    result = CacheLookupResult(CacheOutcome.BACKEND_ERROR, cause=cause)
+    calls = 0
+    try:
+        monkeypatch.setattr(cache, "lookup_call", lambda *_args, **_kwargs: result)
+
+        @cached(cache=cache, recompute_on=frozenset({CacheOutcome.BACKEND_ERROR}))
+        def fallback() -> str:
+            nonlocal calls
+            calls += 1
+            return "recomputed"
+
+        assert fallback() == "recomputed"
+        assert calls == 1
+        assert fallback.cache_last_lookup is result
+        assert fallback.cache_last_lookup.cause is cause
+    finally:
+        cache.close()
+
+
+def test_function_clear_is_exact_truthful_and_namespace_scoped(tmp_path) -> None:
+    """Function-scoped clearing returns BlobStore truth without cross-namespace deletion."""
+
+    cache = _cache(tmp_path)
+    first_calls = 0
+    second_calls = 0
+    try:
+        @cached(cache=cache)
+        def first(value: int) -> str:
+            nonlocal first_calls
+            first_calls += 1
+            return f"first:{value}"
+
+        @cached(cache=cache)
+        def second(value: int) -> str:
+            nonlocal second_calls
+            second_calls += 1
+            return f"second:{value}"
+
+        assert first(1) == "first:1"
+        assert first(2) == "first:2"
+        assert second(1) == "second:1"
+
+        report = first.cache_clear()
+
+        assert report.attempted == 2
+        assert report.removed == 2
+        assert report.conflicted == 0
+        assert report.failed == 0
+        assert report.complete is True
+        assert second(1) == "second:1"
+        assert second_calls == 1
+        assert first(1) == "first:1"
+        assert first_calls == 3
+    finally:
+        cache.close()
+
+
+def test_function_clear_preserves_a_concurrently_replaced_generation(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stale clear selection cannot delete the replacement generation."""
+
+    cache = _cache(tmp_path)
+    replaced = False
+    try:
+        @cached(cache=cache)
+        def value(identifier: int) -> str:
+            return f"old:{identifier}"
+
+        assert value(1) == "old:1"
+
+        def replace_before_delete_promotion(boundary: str) -> None:
+            nonlocal replaced
+            if boundary == "delete.intent_prepared" and not replaced:
+                replaced = True
+                cache.put_call(value.__wrapped__, (1,), {}, "new:1")
+
+        monkeypatch.setattr(
+            cache.store.lifecycle,
+            "test_hook",
+            replace_before_delete_promotion,
+        )
+
+        report = value.cache_clear()
+
+        assert report.attempted == 1
+        assert report.removed == 0
+        assert report.conflicted == 1
+        assert report.retryable == 1
+        assert value(1) == "new:1"
     finally:
         cache.close()
