@@ -86,6 +86,25 @@ def test_runner_rejects_a_live_module_symlink_before_pytest_selection(
         runner._validate_live_module_selection(tmp_path)
 
 
+def test_runner_rejects_a_symlinked_live_module_ancestor_outside_root(
+    tmp_path: Path,
+) -> None:
+    """A live-module parent cannot redirect exact exclusions beyond the repository."""
+
+    runner = _load_runner()
+    outside_root = tmp_path.parent / f"{tmp_path.name}-outside"
+    outside_root.mkdir()
+    for raw_path in runner.LIVE_QUALIFICATION_MODULES:
+        (outside_root / Path(raw_path).name).touch()
+
+    integration = tmp_path / "tests" / "integration"
+    integration.parent.mkdir(parents=True)
+    integration.symlink_to(outside_root, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="symlinked ancestor"):
+        runner._validate_live_module_selection(tmp_path)
+
+
 def test_runner_invokes_current_python_with_fixed_pytest_argv(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

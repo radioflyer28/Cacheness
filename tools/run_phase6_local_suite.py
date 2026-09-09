@@ -82,10 +82,30 @@ def _validate_live_module_selection(repo_root: Path) -> tuple[Path, ...]:
         raise ValueError("live qualification module selection is not the exact Phase 8 set")
 
     validated: list[Path] = []
+    resolved_root = repo_root.resolve()
     for raw_path in LIVE_QUALIFICATION_MODULES:
         relative_path = Path(raw_path)
         if relative_path.is_absolute() or ".." in relative_path.parts:
             raise ValueError(f"live qualification path must be repository-relative: {raw_path}")
+
+        ancestor = repo_root
+        for component in relative_path.parts[:-1]:
+            ancestor = ancestor / component
+            try:
+                ancestor_stat = ancestor.lstat()
+            except FileNotFoundError:
+                raise ValueError(f"live qualification module is missing: {raw_path}")
+            if stat.S_ISLNK(ancestor_stat.st_mode):
+                raise ValueError(
+                    "live qualification module must not have a symlinked ancestor: "
+                    f"{raw_path}"
+                )
+            if not stat.S_ISDIR(ancestor_stat.st_mode):
+                raise ValueError(
+                    "live qualification module ancestor must be a directory: "
+                    f"{raw_path}"
+                )
+
         candidate = repo_root / relative_path
         try:
             candidate_stat = candidate.lstat()
@@ -95,6 +115,13 @@ def _validate_live_module_selection(repo_root: Path) -> tuple[Path, ...]:
             raise ValueError(f"live qualification module must not be a symlink: {raw_path}")
         if not stat.S_ISREG(candidate_stat.st_mode):
             raise ValueError(f"live qualification module must be a regular file: {raw_path}")
+        try:
+            candidate.resolve(strict=True).relative_to(resolved_root)
+        except ValueError:
+            raise ValueError(
+                "live qualification module resolves outside repository root: "
+                f"{raw_path}"
+            )
         validated.append(candidate)
     return tuple(validated)
 
