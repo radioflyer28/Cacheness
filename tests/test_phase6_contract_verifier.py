@@ -160,3 +160,23 @@ def test_main_renders_a_failed_strict_projection_check_without_a_false_pass(
     assert exit_code == 1
     assert f"{verifier.STRICT_PROJECTION_LABEL}: see diagnostics" in output.out
     assert f"{verifier.STRICT_PROJECTION_LABEL}: PASS" not in output.out
+
+
+def test_main_renders_an_architecture_failure_without_a_false_cach_pass(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Mapped static diagnostics cannot contradict a CACH requirement label."""
+
+    verifier = _load_verifier()
+    monkeypatch.setattr(
+        verifier,
+        "verify_repository",
+        lambda _root: (False, ("second lifecycle engine: AlternateLifecycleEngine",)),
+    )
+
+    exit_code = verifier.main(["--repo-root", str(REPOSITORY_ROOT)])
+    output = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "CACH-01: see diagnostics" in output.out
+    assert "CACH-01: PASS" not in output.out

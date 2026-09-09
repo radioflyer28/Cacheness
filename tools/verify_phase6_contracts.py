@@ -97,6 +97,80 @@ _AUTHORITY_TRANSITIONS = frozenset(
 )
 
 
+def _static_diagnostic_requirements(error: str) -> tuple[str, ...]:
+    """Return the requirement labels invalidated by static verifier evidence.
+
+    Static checks cover architecture and public-surface constraints rather than
+    one pytest node.  Their diagnostics therefore need an explicit requirement
+    mapping before ``main`` renders the human-readable status labels.  If a
+    static source cannot be read, all Phase 6 requirement evidence is
+    incomplete; reporting a partial PASS would be misleading.
+    """
+    if error.startswith("manifest "):
+        for requirement, nodes in CACH_REQUIREMENT_NODES.items():
+            if any(node in error for node in nodes):
+                return (requirement,)
+        return tuple(CACH_REQUIREMENT_NODES)
+    if error.startswith(
+        (
+            "UnifiedCache does not import",
+            "UnifiedCache does not construct",
+            "UnifiedCache lacks",
+            "BlobStore does not construct",
+            "lifecycle module has unexpected",
+            "second lifecycle engine:",
+            "second lifecycle coordinator:",
+            "readiness registry:",
+            "lifecycle admission queue:",
+            "lifecycle lock:",
+            "compatibility projection authority in cache policy",
+            "cache policy invokes authority transition:",
+        )
+    ):
+        return ("CACH-01",)
+    if error.startswith("direct resource deletion from cache policy"):
+        return ("CACH-01", "CACH-03")
+    if error.startswith("unbounded cache catalog query"):
+        return ("CACH-02", "CACH-03")
+    if error.startswith(
+        (
+            "retired compatibility route:",
+            "hidden global cache:",
+            "hidden cache owner import:",
+            "cache contract ",
+        )
+    ):
+        return ("CACH-06",)
+    if error.startswith(f"{STRICT_PROJECTION_LABEL}:"):
+        return ("CACH-01",)
+    if error.startswith(
+        (
+            "unreadable source:",
+            "architecture source unreadable:",
+            "one-engine static contract unreadable:",
+            "cache contract unreadable:",
+        )
+    ):
+        return tuple(CACH_REQUIREMENT_NODES)
+    return ()
+
+
+def _labels_with_diagnostics(errors: Iterable[str]) -> frozenset[str]:
+    """Collect direct and mapped failing labels from verifier diagnostics."""
+    labels: set[str] = set()
+    known_labels = (
+        *CACH_REQUIREMENT_NODES,
+        *FIXED_REGRESSION_NODES,
+        STRICT_PROJECTION_LABEL,
+    )
+    for error in errors:
+        for label in known_labels:
+            if error.startswith(f"{label}:"):
+                labels.add(label)
+        labels.update(_static_diagnostic_requirements(error))
+    return frozenset(labels)
+
+
 def _dotted_name(node: ast.AST) -> str | None:
     """Return a static dotted name while refusing dynamic expressions."""
     if isinstance(node, ast.Name):
@@ -394,16 +468,15 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     passed, errors = verify_repository(args.repo_root)
+    diagnostic_labels = _labels_with_diagnostics(errors)
     print("Phase 6 fixed contract verifier")
     for requirement in CACH_REQUIREMENT_NODES:
-        requirement_passed = not any(error.startswith(f"{requirement}:") for error in errors)
+        requirement_passed = requirement not in diagnostic_labels
         print(f"{requirement}: {'PASS' if requirement_passed else 'see diagnostics'}")
     for regression in FIXED_REGRESSION_NODES:
-        regression_passed = not any(error.startswith(f"{regression}:") for error in errors)
+        regression_passed = regression not in diagnostic_labels
         print(f"{regression}: {'PASS' if regression_passed else 'see diagnostics'}")
-    projection_passed = not any(
-        error.startswith(f"{STRICT_PROJECTION_LABEL}:") for error in errors
-    )
+    projection_passed = STRICT_PROJECTION_LABEL not in diagnostic_labels
     print(
         f"{STRICT_PROJECTION_LABEL}: "
         + ("PASS" if projection_passed else "see diagnostics")
