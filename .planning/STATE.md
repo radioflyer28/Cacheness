@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 06
 current_phase_name: UnifiedCache Policy Composition
 status: verifying
-stopped_at: Completed 06-08-PLAN.md; Phase 06 verification pending CACH-07/full suite
-last_updated: "2026-09-09T04:42:17.195Z"
+stopped_at: Completed 06-09-PLAN.md
+last_updated: "2026-09-09T07:26:21.155Z"
 last_activity: 2026-09-09
 last_activity_desc: Phase 06 execution started
-state_head: b58de9c54fbacecdd4b839bec34603e969202ee1
+state_head: 2d4e06a862178626f413bc0678949cd05fa8414c
 progress:
   total_phases: 8
   completed_phases: 4
-  total_plans: 78
-  completed_plans: 77
+  total_plans: 81
+  completed_plans: 78
 milestone_name: milestone
 ---
 
@@ -160,6 +160,7 @@ Phase 03 rows in this historical table include superseded attempts and do not de
 | Phase 06 P06 | 13min | 2 tasks | 10 files |
 | Phase 06 P07 | 7min | 2 tasks | 5 files |
 | Phase 06 P08 | 25min | 2 tasks | 5 files |
+| Phase 06-unifiedcache-policy-composition P09 | 494s | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -337,6 +338,8 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - [Phase 06]: Examples use the qualified memory/memory topology so they make no remote-service claim.
 - [Phase 06]: Decorator examples preserve typed failures by default and expose explicit opt-in recomputation with cache_last_lookup.
 - [Phase 06]: Phase 6 fixed verification uses a root-safe fixed manifest plus narrow AST checks; missing pandas leaves CACH-07 and the full suite open without treating live PostgreSQL/S3 or Windows evidence as passed.
+- [Phase 06]: Phase 06 Plan 09: Persistent signing and object-array tests use the supported sqlite-filesystem topology.
+- [Phase 06]: Phase 06 Plan 09: Object-array tampering is a typed non-destructive cache outcome that never reaches ObjectHandler.
 
 ### Pending Todos
 
@@ -367,6 +370,6 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 
 ## Session Continuity
 
-Last session: 2026-09-09T04:42:17.032Z
-Stopped at: Completed 06-08-PLAN.md; Phase 06 verification pending CACH-07/full suite
+Last session: 2026-09-09T07:26:20.999Z
+Stopped at: Completed 06-09-PLAN.md
 Resume file: None
