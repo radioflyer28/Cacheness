@@ -8,9 +8,12 @@ current format can be reopened without a hidden runtime upgrade.
 from __future__ import annotations
 
 from pathlib import Path
+import stat
 
 import pytest
 
+from cacheness.config import CacheConfig, CacheStorageConfig
+from cacheness.core import UnifiedCache
 from cacheness.storage import (
     BackendRef,
     BlobStore,
@@ -48,6 +51,51 @@ def _tree_bytes(root: Path) -> dict[Path, bytes]:
         for path in root.rglob("*")
         if path.is_file()
     }
+
+
+def _tree_snapshot(root: Path) -> dict[Path, tuple[int, bytes | str | None]]:
+    """Capture every disposable fixture node without following symlinks."""
+    snapshot: dict[Path, tuple[int, bytes | str | None]] = {}
+    for path in sorted(root.rglob("*")):
+        relative = path.relative_to(root)
+        mode = path.lstat().st_mode
+        if stat.S_ISREG(mode):
+            content: bytes | str | None = path.read_bytes()
+        elif stat.S_ISLNK(mode):
+            content = path.readlink().as_posix()
+        else:
+            content = None
+        snapshot[relative] = (stat.S_IFMT(mode), content)
+    return snapshot
+
+
+def _memory_topology() -> StoreTopology:
+    """Create the explicitly same-process topology used for memory validation."""
+    return StoreTopology(
+        payload=BackendRef(name="memory"),
+        authority=BackendRef(name="memory"),
+    )
+
+
+def _open_unsupported_entry(store: BlobStore) -> None:
+    """Exercise the ordinary entry-open boundary for an unsupported store."""
+    with store.open_entry("ordinary-read"):
+        pass
+
+
+def _compose_unsupported_cache(root: Path, store: BlobStore) -> None:
+    """Exercise the policy facade without giving it migration authority."""
+    cache = UnifiedCache(
+        CacheConfig(storage=CacheStorageConfig(cache_dir=root)),
+        store=store,
+    )
+    try:
+        cache.initialize()
+        result = cache.lookup("ordinary-read")
+        assert result.cause is not None
+        assert isinstance(result.cause, CacheBlobMigrationRequiredError)
+    finally:
+        cache.close()
 
 
 def test_current_format_two_store_reopens_with_catalog_values_and_payload(tmp_path: Path) -> None:
@@ -142,3 +190,78 @@ def test_explicit_legacy_inspection_remains_separate_from_normal_open(tmp_path: 
         store.close()
 
     assert _tree_bytes(root) == before
+
+
+@pytest.mark.parametrize(
+    ("fixture_name", "relative_path", "contents"),
+    (
+        ("historical", "manifest.json", b'{"schema_version":1}'),
+        ("future", "store-format.json", b'{"store_format_version":99}'),
+        ("retired-scheduler", ".cacheness-clear-journal-v1.json", b"retired"),
+        ("corrupt-authority", AUTHORITY_RELATIVE_PATH, b"not a sqlite database"),
+        ("foreign-root", "foreign-payload.bin", b"foreign"),
+    ),
+)
+def test_ordinary_entry_points_never_adopt_or_modify_unsupported_roots(
+    tmp_path: Path,
+    fixture_name: str,
+    relative_path: Path | str,
+    contents: bytes,
+) -> None:
+    """Unsupported evidence stays byte-identical across all ordinary boundaries."""
+    root = tmp_path / fixture_name
+    path = root / relative_path
+    path.parent.mkdir(parents=True)
+    path.write_bytes(contents)
+    before = _tree_snapshot(root)
+
+    try:
+        store = BlobStore(_local_topology(root), cache_dir=root)
+    except CacheBlobMigrationRequiredError:
+        assert _tree_snapshot(root) == before
+        return
+
+    try:
+        assert _tree_snapshot(root) == before
+        for ordinary_operation in (
+            lambda: store.initialize(),
+            lambda: _open_unsupported_entry(store),
+            lambda: store.get("ordinary-read"),
+            lambda: store.reconcile(),
+        ):
+            with pytest.raises(CacheBlobMigrationRequiredError):
+                ordinary_operation()
+            assert _tree_snapshot(root) == before
+        _compose_unsupported_cache(root, store)
+        assert _tree_snapshot(root) == before
+    finally:
+        store.close()
+
+
+def test_initialized_current_memory_and_sqlite_stores_repeat_initialize_by_validation(
+    tmp_path: Path,
+) -> None:
+    """Current stores preserve canonical entries and bytes through repeat initialization."""
+    memory_store = BlobStore(_memory_topology(), cache_dir=tmp_path / "memory")
+    try:
+        memory_store.initialize()
+        memory_receipt = memory_store.put_entry({"answer": 42}, key="memory-entry")
+        memory_store.initialize()
+        assert memory_store.get(memory_receipt.key) == {"answer": 42}
+    finally:
+        memory_store.close()
+
+    root = tmp_path / "sqlite"
+    with BlobStore(_local_topology(root), cache_dir=root) as store:
+        store.initialize()
+        receipt = store.put_entry({"answer": 42}, key="sqlite-entry")
+        before = _tree_snapshot(root)
+        store.initialize()
+        assert store.get(receipt.key) == {"answer": 42}
+        assert _tree_snapshot(root) == before
+
+    before_reopen = _tree_snapshot(root)
+    with BlobStore(_local_topology(root), cache_dir=root) as reopened:
+        reopened.initialize()
+        assert reopened.get(receipt.key) == {"answer": 42}
+        assert _tree_snapshot(root) == before_reopen
