@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 07
 current_phase_name: Explicit Migration and Rebuild Cutover
 status: executing
-stopped_at: Completed 07-01-PLAN.md
-last_updated: "2026-09-09T22:52:10.999Z"
+stopped_at: Completed 07-02-PLAN.md
+last_updated: "2026-09-09T23:13:23.725Z"
 last_activity: 2026-09-09
 last_activity_desc: Phase 07 execution started
-state_head: e60636f5a83c7e012be58a61168343f7334455ae
+state_head: 015a9c079f0214611392bdb5472078f0c3ba8da1
 progress:
   total_phases: 8
   completed_phases: 5
   total_plans: 92
-  completed_plans: 81
+  completed_plans: 82
 milestone_name: milestone
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-09-06)
 ## Current Position
 
 Phase: 07 (Explicit Migration and Rebuild Cutover) — EXECUTING
-Plan: 2 of 11
+Plan: 3 of 11
 Status: Ready to execute
 Last activity: 2026-09-09 — Phase 07 execution started
 
@@ -164,6 +164,7 @@ Phase 03 rows in this historical table include superseded attempts and do not de
 | Phase 06 P10 | 7 min | 2 tasks | 4 files |
 | Phase 06 P11 | 12 min | 2 tasks | 7 files |
 | Phase 07 P01 | 1348s | 2 tasks | 6 files |
+| Phase 07 P02 | 125s | 3 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -351,6 +352,9 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - [Phase 07]: The tracer uses a test-only current-to-current compatibility edge, so it proves the generic path without manufacturing a production format version.
 - [Phase 07]: Maintenance evidence corroborates one explicit offline run, while authority activation alone selects visible store state.
 - [Phase 07]: UnifiedCache preserves an unsupported-store failure as a typed lookup cause rather than adopting or changing the store.
+- [Phase 07]: D-02 accepted via proceed D-02: each release supports current and immediately previous released layouts directly; older releases advance through declared steps.
+- [Phase 07]: D-08 accepted via proceed D-08: rebuild excludes nothing by default; each exact exclusion requires a newly generated and reconfirmed plan.
+- [Phase 07]: D-15 accepted via proceed D-15: finalize ends rollback; separately confirmed idempotent purge may remove the retained prior copy and leaves retryable cleanup debt on failure.
 
 ### Pending Todos
 
@@ -381,6 +385,6 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 
 ## Session Continuity
 
-Last session: 2026-09-09T22:52:10.713Z
-Stopped at: Completed 07-01-PLAN.md
+Last session: 2026-09-09T23:13:23.470Z
+Stopped at: Completed 07-02-PLAN.md
 Resume file: None
