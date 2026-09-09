@@ -70,6 +70,9 @@ def test_canonical_imports_run_one_explicit_cache_lifecycle(tmp_path) -> None:
     assert tuple(name for name in CANONICAL_PUBLIC_NAMES if name in namespace) == (
         CANONICAL_PUBLIC_NAMES
     )
+    assert namespace["CacheRemovalReport"] is CacheRemovalReport
+    assert namespace["CacheMaintenanceState"] is CacheMaintenanceState
+    assert namespace["CacheMaintenanceResult"] is CacheMaintenanceResult
 
     config = CacheConfig(
         storage=CacheStorageConfig(cache_dir=str(tmp_path / "cache")),
@@ -92,7 +95,7 @@ def test_canonical_imports_run_one_explicit_cache_lifecycle(tmp_path) -> None:
         cache.close()
 
 
-def test_cache_requires_an_explicit_blobstore_composition_before_io(tmp_path) -> None:
+def test_config_requires_an_explicit_blobstore_composition_before_io(tmp_path) -> None:
     """An omitted composition is rejected before the cache can initialize storage."""
 
     config = CacheConfig(storage=CacheStorageConfig(cache_dir=str(tmp_path / "cache")))
@@ -142,23 +145,50 @@ def test_optional_yaml_capability_fails_only_when_requested() -> None:
     assert completed.returncode == 0, completed.stderr
 
 
-def test_import_order_does_not_change_public_surface_or_store_identity(tmp_path) -> None:
+@pytest.mark.parametrize(
+    "first_import",
+    (
+        "import cacheness",
+        "import cacheness.storage\nimport cacheness",
+    ),
+)
+def test_ordering_does_not_change_public_surface_or_store_identity(
+    first_import: str,
+) -> None:
     """Optional storage import order cannot select a cache identity or alter exports."""
 
-    import cacheness.storage  # noqa: F401 - deliberate order probe
-
-    assert tuple(cacheness.__all__) == CANONICAL_PUBLIC_NAMES
-    cache = UnifiedCache(
-        CacheConfig(storage=CacheStorageConfig(cache_dir=str(tmp_path / "cache"))),
-        store=_memory_topology(),
+    script = (
+        f"{first_import}\n"
+        "from cacheness import CacheConfig, StoreTopology, UnifiedCache\n"
+        "from cacheness.storage.composition import BackendRef\n"
+        f"assert tuple(cacheness.__all__) == {CANONICAL_PUBLIC_NAMES!r}\n"
+        "cache = UnifiedCache(\n"
+        "    CacheConfig(),\n"
+        "    store=StoreTopology(\n"
+        "        payload=BackendRef(name='memory'),\n"
+        "        authority=BackendRef(name='memory'),\n"
+        "    ),\n"
+        ")\n"
+        "try:\n"
+        "    assert cache.store is cache._cache_blob_store\n"
+        "finally:\n"
+        "    cache.close()\n"
     )
-    try:
-        assert cache.store is cache._cache_blob_store
-    finally:
-        cache.close()
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = os.pathsep.join(part for part in sys.path if part)
+
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+
+    assert completed.returncode == 0, completed.stderr
 
 
-def test_sql_cache_remains_a_separate_supported_surface() -> None:
+def test_sqlcache_remains_a_separate_supported_surface() -> None:
     """SQL pull-through remains separately importable, never a UnifiedCache route."""
 
     assert SqlCache.__module__ == "cacheness.sql_cache"
