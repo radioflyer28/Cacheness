@@ -8,7 +8,7 @@ Configuration is split into focused sub-configurations for better maintainabilit
 
 import logging
 import math
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import Optional, List, Union
 from pathlib import Path
 
@@ -158,64 +158,6 @@ class CachePolicyConfig:
             raise ValueError("catalog_page_size exceeds the portable catalog bound")
         if self.maintenance_work_cap > 4_096:
             raise ValueError("maintenance_work_cap exceeds the portable catalog bound")
-
-
-@dataclass
-class CacheBlobConfig:
-    """Configuration for blob storage backend.
-    
-    This configures where and how cached data (blobs) are stored.
-    The blob backend is separate from metadata backend - metadata tracks
-    what's cached, while blob backend stores the actual cached data.
-    
-    Example:
-        # Use filesystem (default)
-        blob_config = CacheBlobConfig(blob_backend="filesystem")
-        
-        # Use S3 storage (requires custom registration)
-        blob_config = CacheBlobConfig(
-            blob_backend="s3",
-            blob_backend_options={
-                "bucket": "my-cache-bucket",
-                "region": "us-west-2"
-            }
-        )
-    """
-    
-    blob_backend: str = "filesystem"  # "filesystem", "memory", or custom registered backend
-    blob_backend_options: Optional[dict] = None  # Backend-specific options
-    
-    # Filesystem-specific options (used when blob_backend="filesystem")
-    use_atomic_writes: bool = True  # Use temp file + rename for atomic writes
-    create_subdirectories: bool = True  # Create subdirectories based on blob ID
-    
-    # Git-style directory sharding (applies to filesystem, S3, and compatible backends)
-    # Uses leading characters of blob ID as subdirectory, like Git's .git/objects/
-    # Example with shard_chars=2: "abc123..." -> "ab/abc123..."
-    shard_chars: int = 2  # Number of leading chars for directory sharding (0 to disable)
-    
-    # Streaming options
-    stream_threshold_bytes: int = 10 * 1024 * 1024  # 10MB - use streaming for larger blobs
-    
-    def __post_init__(self):
-        """Validate blob storage configuration."""
-        # Validate blob_backend_options is a dict if provided
-        if self.blob_backend_options is not None:
-            if not isinstance(self.blob_backend_options, dict):
-                raise ValueError("blob_backend_options must be a dictionary")
-        
-        if self.stream_threshold_bytes < 0:
-            raise ValueError("stream_threshold_bytes must be non-negative")
-        
-        if self.shard_chars < 0:
-            raise ValueError("shard_chars must be non-negative")
-        
-        if self.shard_chars > 8:
-            raise ValueError("shard_chars must be <= 8 (excessive sharding not recommended)")
-            
-        logger.debug(f"Blob backend configured: {self.blob_backend}")
-        if self.blob_backend_options:
-            logger.debug(f"Blob backend options: {list(self.blob_backend_options.keys())}")
 
 
 @dataclass
@@ -499,7 +441,6 @@ class CacheConfig:
     storage: CacheStorageConfig = field(default_factory=CacheStorageConfig)
     metadata: CacheMetadataConfig = field(default_factory=CacheMetadataConfig)
     policy: CachePolicyConfig = field(default_factory=CachePolicyConfig)
-    blob: CacheBlobConfig = field(default_factory=CacheBlobConfig)
     compression: CompressionConfig = field(default_factory=CompressionConfig)
     serialization: SerializationConfig = field(default_factory=SerializationConfig)
     handlers: HandlerConfig = field(default_factory=HandlerConfig)
@@ -514,57 +455,14 @@ class CacheConfig:
         storage: Optional[CacheStorageConfig] = None,
         metadata: Optional[CacheMetadataConfig] = None,
         policy: Optional[CachePolicyConfig] = None,
-        blob: Optional[CacheBlobConfig] = None,
         compression: Optional[CompressionConfig] = None,
         serialization: Optional[SerializationConfig] = None,
         handlers: Optional[HandlerConfig] = None,
         security: Optional[SecurityConfig] = None,
         lifecycle_limits: Optional[LifecycleLimits] = None,
         lifecycle_topology: Optional[LifecycleAuthorityTopology] = None,
-        # Backwards compatibility parameters
-        cache_dir: Optional[str] = None,
-        default_ttl_hours: Optional[float] = None,
-        verify_cache_integrity: Optional[bool] = None,
-        hash_path_content: Optional[bool] = None,
-        enable_collections: Optional[bool] = None,
-        enable_special_cases: Optional[bool] = None,
-        enable_basic_types: Optional[bool] = None,
-        max_tuple_recursive_length: Optional[int] = None,
-        max_collection_depth: Optional[int] = None,
-        enable_metadata: Optional[bool] = None,
-        max_cache_size_mb: Optional[int] = None,
-        cleanup_on_init: Optional[bool] = None,
-        store_cache_key_params: Optional[bool] = None,
-        # Blob backend parameters
-        blob_backend: Optional[str] = None,
-        blob_backend_options: Optional[dict] = None,
-        # Handler enable/disable flags
-        enable_pandas_dataframes: Optional[bool] = None,
-        enable_polars_dataframes: Optional[bool] = None,
-        enable_pandas_series: Optional[bool] = None,
-        enable_polars_series: Optional[bool] = None,
-        enable_numpy_arrays: Optional[bool] = None,
-        enable_object_pickle: Optional[bool] = None,
-        allow_trusted_object_arrays: Optional[bool] = None,
-        enable_tensorflow_tensors: Optional[bool] = None,
-        enable_dill_fallback: Optional[bool] = None,
-        # Additional useful parameters
-        enable_cache_stats: Optional[bool] = None,
-        auto_cleanup_expired: Optional[bool] = None,
-        compression_threshold_bytes: Optional[int] = None,
-        enable_parallel_compression: Optional[bool] = None,
-        # Security parameters
-        delete_invalid_signatures: Optional[bool] = None,
-        use_in_memory_key: Optional[bool] = None,
-        # Memory cache layer parameters (sits between application and disk backends)
-        enable_memory_cache: Optional[bool] = None,
-        memory_cache_type: Optional[str] = None,
-        memory_cache_maxsize: Optional[int] = None,
-        memory_cache_ttl_seconds: Optional[float] = None,
-        memory_cache_stats: Optional[bool] = None,
-        **kwargs,
     ):
-        """Initialize configuration with backwards compatibility support."""
+        """Initialize one ownership-aligned nested cache configuration."""
 
         # Initialize sub-configurations with defaults
         self.storage = storage or CacheStorageConfig()
@@ -572,7 +470,6 @@ class CacheConfig:
         if policy is not None and not isinstance(policy, CachePolicyConfig):
             raise ValueError("policy must be a CachePolicyConfig instance")
         self.policy = CachePolicyConfig() if policy is None else policy
-        self.blob = blob or CacheBlobConfig()
         self.compression = compression or CompressionConfig()
         self.serialization = serialization or SerializationConfig()
         self.handlers = handlers or HandlerConfig()
@@ -593,134 +490,6 @@ class CacheConfig:
             if lifecycle_topology is None
             else lifecycle_topology
         )
-
-        # Apply backwards compatibility mappings
-        if cache_dir is not None:
-            self.storage.cache_dir = cache_dir
-        if default_ttl_hours is not None:
-            self.metadata.default_ttl_hours = default_ttl_hours
-            self.policy = replace(
-                self.policy, default_ttl_hours=default_ttl_hours
-            )
-        if verify_cache_integrity is not None:
-            self.metadata.verify_cache_integrity = verify_cache_integrity
-        if hash_path_content is not None:
-            self.serialization.hash_path_content = hash_path_content
-        if enable_collections is not None:
-            self.serialization.enable_collections = enable_collections
-        if enable_special_cases is not None:
-            self.serialization.enable_special_cases = enable_special_cases
-        if enable_basic_types is not None:
-            self.serialization.enable_basic_types = enable_basic_types
-        if max_tuple_recursive_length is not None:
-            self.serialization.max_tuple_recursive_length = max_tuple_recursive_length
-        if max_collection_depth is not None:
-            self.serialization.max_collection_depth = max_collection_depth
-        if enable_metadata is not None:
-            self.metadata.enable_metadata = enable_metadata
-        if max_cache_size_mb is not None:
-            self.storage.max_cache_size_mb = max_cache_size_mb
-        if cleanup_on_init is not None:
-            self.storage.cleanup_on_init = cleanup_on_init
-        if store_cache_key_params is not None:
-            self.metadata.store_cache_key_params = store_cache_key_params
-
-        # Map blob backend parameters
-        if blob_backend is not None:
-            self.blob.blob_backend = blob_backend
-        if blob_backend_options is not None:
-            self.blob.blob_backend_options = blob_backend_options
-
-        # Map handler enable/disable flags
-        if enable_pandas_dataframes is not None:
-            self.handlers.enable_pandas_dataframes = enable_pandas_dataframes
-        if enable_polars_dataframes is not None:
-            self.handlers.enable_polars_dataframes = enable_polars_dataframes
-        if enable_pandas_series is not None:
-            self.handlers.enable_pandas_series = enable_pandas_series
-        if enable_polars_series is not None:
-            self.handlers.enable_polars_series = enable_polars_series
-        if enable_numpy_arrays is not None:
-            self.handlers.enable_numpy_arrays = enable_numpy_arrays
-        if enable_object_pickle is not None:
-            self.handlers.enable_object_pickle = enable_object_pickle
-        if allow_trusted_object_arrays is not None:
-            self.handlers.allow_trusted_object_arrays = allow_trusted_object_arrays
-        if enable_tensorflow_tensors is not None:
-            self.handlers.enable_tensorflow_tensors = enable_tensorflow_tensors
-        if enable_dill_fallback is not None:
-            self.handlers.enable_dill_fallback = enable_dill_fallback
-
-        # Map additional configuration parameters
-        if enable_cache_stats is not None:
-            self.metadata.enable_cache_stats = enable_cache_stats
-        if auto_cleanup_expired is not None:
-            self.metadata.auto_cleanup_expired = auto_cleanup_expired
-        if compression_threshold_bytes is not None:
-            self.compression.compression_threshold_bytes = compression_threshold_bytes
-        if enable_parallel_compression is not None:
-            self.compression.enable_parallel_compression = enable_parallel_compression
-
-        # Map security configuration parameters
-        if delete_invalid_signatures is not None:
-            self.security.delete_invalid_signatures = delete_invalid_signatures
-        if use_in_memory_key is not None:
-            self.security.use_in_memory_key = use_in_memory_key
-
-        # Map memory cache layer configuration parameters
-        if enable_memory_cache is not None:
-            self.metadata.enable_memory_cache = enable_memory_cache
-        if memory_cache_type is not None:
-            self.metadata.memory_cache_type = memory_cache_type
-        if memory_cache_maxsize is not None:
-            self.metadata.memory_cache_maxsize = memory_cache_maxsize
-        if memory_cache_ttl_seconds is not None:
-            self.metadata.memory_cache_ttl_seconds = memory_cache_ttl_seconds
-        if memory_cache_stats is not None:
-            self.metadata.memory_cache_stats = memory_cache_stats
-
-        # Handle handler configuration and compression parameters
-        for key, value in kwargs.items():
-            # Map handler parameters
-            if key in [
-                "enable_pandas_dataframes",
-                "enable_numpy_arrays",
-                "enable_polars_dataframes",
-            ]:
-                # These would be handled by handler priority configuration
-                logger.warning(
-                    f"Handler configuration parameter {key}={value} not fully supported in new config system"
-                )
-            elif key == "handler_priority":
-                # This would be mapped to handlers configuration
-                if hasattr(self.handlers, "handler_priority"):
-                    self.handlers.handler_priority = value
-                else:
-                    logger.warning(
-                        f"Handler priority configuration not available: {key}={value}"
-                    )
-            elif key in [
-                "npz_compression",
-                "parquet_compression",
-                "enable_object_introspection",
-            ]:
-                # Map compression parameters
-                if key == "npz_compression" and hasattr(self.compression, key):
-                    self.compression.npz_compression = value
-                elif key == "parquet_compression" and hasattr(self.compression, key):
-                    self.compression.parquet_compression = value
-                elif key == "enable_object_introspection" and hasattr(
-                    self.serialization, key
-                ):
-                    self.serialization.enable_object_introspection = value
-                else:
-                    logger.warning(
-                        f"Configuration parameter {key}={value} mapped but target attribute not found"
-                    )
-            else:
-                logger.warning(
-                    f"Unknown configuration parameter ignored: {key}={value}"
-                )
 
         self.__post_init__()
 
@@ -769,131 +538,6 @@ class CacheConfig:
                     f"{sorted(missing_fields)}"
                 )
 
-    # Add property accessors for backwards compatibility
-    @property
-    def cache_dir(self) -> str:
-        return self.storage.cache_dir
-
-    @property
-    def default_ttl_hours(self) -> float:
-        return self.metadata.default_ttl_hours
-
-    @property
-    def verify_cache_integrity(self) -> bool:
-        return self.metadata.verify_cache_integrity
-
-    @property
-    def hash_path_content(self) -> bool:
-        return self.serialization.hash_path_content
-
-    @property
-    def store_cache_key_params(self) -> bool:
-        return self.metadata.store_cache_key_params
-
-    @property
-    def blob_backend(self) -> str:
-        """Get the blob storage backend name."""
-        return self.blob.blob_backend
-
-    @property
-    def blob_backend_options(self) -> Optional[dict]:
-        """Get the blob storage backend options."""
-        return self.blob.blob_backend_options
-
-    @classmethod
-    def create_performance_optimized(cls) -> "CacheConfig":
-        """Create a configuration optimized for performance over file size."""
-        return cls(
-            compression=CompressionConfig(
-                parquet_compression="lz4",  # Fastest compression
-                pickle_compression_codec="lz4",
-                pickle_compression_level=1,  # Minimal compression
-                blosc2_array_codec="lz4",
-                blosc2_array_clevel=1,
-            ),
-            serialization=SerializationConfig(
-                hash_path_content=False,  # Faster path handling
-                max_collection_depth=5,  # Limit recursion for speed
-            ),
-        )
-
-    @classmethod
-    def create_size_optimized(cls) -> "CacheConfig":
-        """Create a configuration optimized for minimal file size."""
-        return cls(
-            compression=CompressionConfig(
-                parquet_compression="zstd",  # Best compression
-                pickle_compression_codec="zstd",
-                pickle_compression_level=9,  # Maximum compression
-                blosc2_array_codec="zstd",
-                blosc2_array_clevel=9,
-            ),
-            serialization=SerializationConfig(
-                hash_path_content=True,  # More accurate caching
-                max_collection_depth=15,  # Deep inspection for better caching
-            ),
-        )
-
-
-def create_cache_config(
-    cache_dir: Optional[Union[str, Path]] = None,
-    performance_mode: bool = False,
-    size_mode: bool = False,
-    **overrides,
-) -> CacheConfig:
-    """
-    Factory function for creating configurations with convenience parameters.
-
-    Args:
-        cache_dir: Directory for cache storage
-        performance_mode: If True, optimize for speed over size
-        size_mode: If True, optimize for size over speed
-        **overrides: Direct override values for any config parameters
-
-    Returns:
-        Configured CacheConfig instance
-    """
-    if performance_mode and size_mode:
-        raise ValueError("Cannot enable both performance_mode and size_mode")
-
-    # Start with appropriate base configuration
-    if performance_mode:
-        config = CacheConfig.create_performance_optimized()
-    elif size_mode:
-        config = CacheConfig.create_size_optimized()
-    else:
-        config = CacheConfig()
-
-    # Apply cache_dir if provided
-    if cache_dir is not None:
-        config.storage.cache_dir = str(cache_dir)
-
-    # Apply any overrides to sub-configurations
-    for key, value in overrides.items():
-        # Try to find the parameter in sub-configurations
-        found = False
-        for sub_config_name in [
-            "storage",
-            "metadata",
-            "policy",
-            "blob",
-            "compression",
-            "serialization",
-            "handlers",
-            "security",
-        ]:
-            sub_config = getattr(config, sub_config_name)
-            if hasattr(sub_config, key):
-                setattr(sub_config, key, value)
-                found = True
-                break
-
-        if not found:
-            logger.warning(f"Unknown configuration parameter ignored: {key}")
-
-    return config
-
-
 # =============================================================================
 # Configuration Validation (Phase 2.4)
 # =============================================================================
@@ -934,7 +578,9 @@ def validate_config(config: CacheConfig) -> List["ConfigValidationError"]:
         List of ConfigValidationError objects. Empty list means valid configuration.
         
     Example:
-        >>> config = CacheConfig(blob_backend="filesystem")
+        >>> config = CacheConfig(
+        ...     storage=CacheStorageConfig(cache_dir="./my_cache")
+        ... )
         >>> errors = validate_config(config)
         >>> if errors:
         ...     for error in errors:
@@ -992,26 +638,6 @@ def validate_config(config: CacheConfig) -> List["ConfigValidationError"]:
                     f"policy.{field}", str(error), getattr(config.policy, field, None)
                 )
             )
-    
-    # Validate blob configuration
-    if not isinstance(config.blob.blob_backend, str):
-        errors.append(ConfigValidationError(
-            "blob.blob_backend", "must be a string",
-            config.blob.blob_backend
-        ))
-    
-    if config.blob.blob_backend_options is not None:
-        if not isinstance(config.blob.blob_backend_options, dict):
-            errors.append(ConfigValidationError(
-                "blob.blob_backend_options", "must be a dictionary",
-                type(config.blob.blob_backend_options).__name__
-            ))
-    
-    if config.blob.stream_threshold_bytes < 0:
-        errors.append(ConfigValidationError(
-            "blob.stream_threshold_bytes", "must be non-negative",
-            config.blob.stream_threshold_bytes
-        ))
     
     # Validate compression configuration
     valid_parquet = {"snappy", "gzip", "lz4", "zstd", "none"}
@@ -1133,8 +759,7 @@ def load_config_from_dict(data: dict) -> CacheConfig:
     """
     Load configuration from a dictionary.
     
-    The dictionary can have either flat keys (backwards compatible)
-    or nested sub-configuration objects.
+    The dictionary must use ownership-aligned nested sub-configuration objects.
     
     Args:
         data: Dictionary with configuration values
@@ -1143,16 +768,9 @@ def load_config_from_dict(data: dict) -> CacheConfig:
         CacheConfig instance
         
     Example:
-        >>> # Flat format (backwards compatible)
-        >>> config = load_config_from_dict({
-        ...     "cache_dir": "./my_cache",
-        ...     "blob_backend": "filesystem"
-        ... })
-        >>> 
         >>> # Nested format
         >>> config = load_config_from_dict({
         ...     "storage": {"cache_dir": "./my_cache"},
-        ...     "blob": {"blob_backend": "filesystem"}
         ... })
     """
     # Check if nested format
@@ -1160,7 +778,6 @@ def load_config_from_dict(data: dict) -> CacheConfig:
         "storage",
         "metadata",
         "policy",
-        "blob",
         "compression",
         "serialization",
         "handlers",
@@ -1175,7 +792,6 @@ def load_config_from_dict(data: dict) -> CacheConfig:
         storage = CacheStorageConfig(**data.get("storage", {})) if "storage" in data else None
         metadata = CacheMetadataConfig(**data.get("metadata", {})) if "metadata" in data else None
         policy = CachePolicyConfig(**data.get("policy", {})) if "policy" in data else None
-        blob = CacheBlobConfig(**data.get("blob", {})) if "blob" in data else None
         compression = CompressionConfig(**data.get("compression", {})) if "compression" in data else None
         serialization = SerializationConfig(**data.get("serialization", {})) if "serialization" in data else None
         handlers = HandlerConfig(**data.get("handlers", {})) if "handlers" in data else None
@@ -1195,7 +811,6 @@ def load_config_from_dict(data: dict) -> CacheConfig:
             storage=storage,
             metadata=metadata,
             policy=policy,
-            blob=blob,
             compression=compression,
             serialization=serialization,
             handlers=handlers,
@@ -1203,9 +818,7 @@ def load_config_from_dict(data: dict) -> CacheConfig:
             lifecycle_limits=lifecycle_limits,
             lifecycle_topology=lifecycle_topology,
         )
-    else:
-        # Flat format - use CacheConfig's backwards compatibility
-        return CacheConfig(**data)
+    raise ValueError("Cache configuration must use nested ownership sections")
 
 
 def load_config_from_json(path: Union[str, Path]) -> CacheConfig:
@@ -1226,7 +839,6 @@ def load_config_from_json(path: Union[str, Path]) -> CacheConfig:
         >>> # cache_config.json:
         >>> # {
         >>> #   "storage": {"cache_dir": "./my_cache"},
-        >>> #   "blob": {"blob_backend": "filesystem"}
         >>> # }
         >>> config = load_config_from_json("cache_config.json")
     """
@@ -1260,8 +872,6 @@ def load_config_from_yaml(path: Union[str, Path]) -> CacheConfig:
         >>> # cache_config.yaml:
         >>> # storage:
         >>> #   cache_dir: ./my_cache
-        >>> # blob:
-        >>> #   blob_backend: filesystem
         >>> config = load_config_from_yaml("cache_config.yaml")
     """
     try:
@@ -1289,7 +899,7 @@ def save_config_to_json(config: CacheConfig, path: Union[str, Path], indent: int
         indent: JSON indentation level (default: 2)
         
     Example:
-        >>> config = CacheConfig(cache_dir="./my_cache")
+        >>> config = CacheConfig(storage=CacheStorageConfig(cache_dir="./my_cache"))
         >>> save_config_to_json(config, "cache_config.json")
     """
     import json
@@ -1298,7 +908,6 @@ def save_config_to_json(config: CacheConfig, path: Union[str, Path], indent: int
     data = {
         "storage": asdict(config.storage),
         "metadata": asdict(config.metadata),
-        "blob": asdict(config.blob),
         "compression": asdict(config.compression),
         "serialization": asdict(config.serialization),
         "handlers": asdict(config.handlers),
@@ -1326,7 +935,7 @@ def save_config_to_yaml(config: CacheConfig, path: Union[str, Path]) -> None:
         ImportError: If PyYAML is not installed
         
     Example:
-        >>> config = CacheConfig(cache_dir="./my_cache")
+        >>> config = CacheConfig(storage=CacheStorageConfig(cache_dir="./my_cache"))
         >>> save_config_to_yaml(config, "cache_config.yaml")
     """
     try:
@@ -1342,7 +951,6 @@ def save_config_to_yaml(config: CacheConfig, path: Union[str, Path]) -> None:
     data = {
         "storage": asdict(config.storage),
         "metadata": asdict(config.metadata),
-        "blob": asdict(config.blob),
         "compression": asdict(config.compression),
         "serialization": asdict(config.serialization),
         "handlers": asdict(config.handlers),

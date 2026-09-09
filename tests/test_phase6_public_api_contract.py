@@ -30,7 +30,9 @@ from cacheness import (
     cached,
 )
 from cacheness.config import CacheStorageConfig
+from cacheness.error_handling import CacheMigrationOrRebuildRequiredError
 from cacheness.storage.composition import BackendRef
+from cacheness.storage.manifest import StoreVersionDimensions
 
 
 CANONICAL_PUBLIC_NAMES = (
@@ -243,3 +245,19 @@ def test_removed_cache_compatibility_methods_and_flat_config_are_absent() -> Non
 
     with pytest.raises(TypeError):
         CacheConfig(cache_dir="deprecated")
+
+
+def test_explicit_version_dimensions_reject_unsupported_store_layouts() -> None:
+    """Current records retain version facts and refuse implicit layout upgrades."""
+
+    current = StoreVersionDimensions()
+    assert set(current.to_mapping()) == {
+        "manifest_schema_version",
+        "payload_format_version",
+        "sqlite_user_version",
+        "store_epoch",
+        "store_format_version",
+    }
+
+    with pytest.raises(CacheMigrationOrRebuildRequiredError, match="offline"):
+        StoreVersionDimensions(store_format_version=current.store_format_version + 1)

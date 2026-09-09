@@ -18,7 +18,7 @@ from functools import wraps
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Union
 
-from cacheness.config import CacheConfig, CompressionConfig
+from cacheness.config import CacheConfig, CacheStorageConfig, CompressionConfig
 from cacheness.error_handling import (
     CacheBlobBackendError,
     CacheBlobLifecycleConflictError,
@@ -204,7 +204,7 @@ class BlobStore:
         self.compression_level = compression_level
         self.content_addressable = content_addressable
         self.config = config or CacheConfig(
-            cache_dir=self.cache_dir,
+            storage=CacheStorageConfig(cache_dir=self.cache_dir),
             compression=CompressionConfig(
                 pickle_compression_codec=compression,
                 pickle_compression_level=compression_level,

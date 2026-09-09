@@ -38,7 +38,6 @@ from .cache_policy import (
 from .config import (
     CacheConfig,
     _DEFAULT_TTL,
-    create_cache_config,
     validate_config_strict,
 )
 from .error_handling import (
@@ -1080,51 +1079,6 @@ class UnifiedCache:
             work_cap=work_cap,
         )
 
-    @_clear_read_coordinated
-    def list_entries(self) -> list[dict[str, Any]]:
-        """List cache-policy views rendered from canonical BlobStore snapshots."""
-
-        entries: list[dict[str, Any]] = []
-        for cache_key in self._cache_blob_store.list():
-            snapshot, entry = self._authority_snapshot_entry(cache_key)
-            if snapshot is None or entry is None:
-                continue
-            entries.append(
-                {
-                    "cache_key": cache_key,
-                    "data_type": entry["data_type"],
-                    "description": entry["description"],
-                    "metadata": entry["metadata"],
-                    "created": entry["created_at"],
-                    "last_accessed": entry["created_at"],
-                    "size_mb": round(entry["file_size"] / (1024 * 1024), 3),
-                    "expired": self._is_expired(cache_key, entry=entry),
-                }
-            )
-        return entries
-
-    @_clear_read_coordinated
-    def get_stats(self) -> dict[str, Any]:
-        """Return cache policy counters plus canonical BlobStore inventory."""
-
-        entries = self.list_entries()
-        statistics = self.statistics()
-        return {
-            "cache_hits": statistics.hit,
-            "cache_misses": statistics.misses,
-            "total_entries": len(entries),
-            "dataframe_entries": sum(
-                entry["data_type"] == "dataframe" for entry in entries
-            ),
-            "array_entries": sum(entry["data_type"] == "array" for entry in entries),
-            "total_size_mb": round(sum(entry["size_mb"] for entry in entries), 2),
-            "hit_rate": statistics.hit_rate,
-            "cache_dir": str(self.cache_dir),
-            "max_size_mb": self.config.policy.max_authoritative_bytes / (1024 * 1024),
-            "default_ttl_hours": self.config.policy.default_ttl_hours,
-            "backend_type": self.actual_backend,
-        }
-
     def close(self) -> None:
         """Close only a cache-created store and then close this policy facade.
 
@@ -1151,45 +1105,3 @@ class UnifiedCache:
             self.close()
         except Exception:
             pass
-
-    @classmethod
-    def for_api(
-        cls,
-        cache_dir: Optional[str] = None,
-        ttl_hours: int = 6,
-        ignore_errors: bool = True,
-        **kwargs: Any,
-    ) -> "UnifiedCache":
-        """Create a cache with API-oriented TTL and compression defaults."""
-
-        del ignore_errors
-        config = create_cache_config(
-            cache_dir=cache_dir or "./cache",
-            default_ttl_hours=ttl_hours,
-            pickle_compression_codec="zstd",
-            pickle_compression_level=3,
-            **kwargs,
-        )
-        return cls(config)
-
-
-_global_cache: Optional[UnifiedCache] = None
-
-
-def get_cache(config: Optional[CacheConfig] = None) -> UnifiedCache:
-    """Return the process-global policy facade, creating it once."""
-
-    global _global_cache
-    if _global_cache is None:
-        _global_cache = UnifiedCache(config)
-    return _global_cache
-
-
-def reset_cache(config: Optional[CacheConfig] = None) -> UnifiedCache:
-    """Replace and close the process-global policy facade."""
-
-    global _global_cache
-    if _global_cache is not None:
-        _global_cache.close()
-    _global_cache = UnifiedCache(config)
-    return _global_cache

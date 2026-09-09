@@ -9,7 +9,7 @@ import inspect
 import pytest
 
 from cacheness.cache_policy import CacheLookupResult, CacheOutcome
-from cacheness.config import CacheConfig
+from cacheness.config import CacheConfig, CacheStorageConfig
 from cacheness.core import UnifiedCache
 from cacheness.decorators import cached
 from cacheness.error_handling import (
@@ -32,7 +32,10 @@ def _memory_topology() -> StoreTopology:
 def _cache(tmp_path) -> UnifiedCache:
     """Create and initialize an explicitly owned cache policy instance."""
 
-    cache = UnifiedCache(CacheConfig(cache_dir=tmp_path), store=_memory_topology())
+    cache = UnifiedCache(
+        CacheConfig(storage=CacheStorageConfig(cache_dir=tmp_path)),
+        store=_memory_topology(),
+    )
     cache.initialize()
     return cache
 

@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from cacheness.config import CacheConfig
+from cacheness.config import CacheConfig, CacheStorageConfig
 from cacheness.core import UnifiedCache
 from cacheness.error_handling import CacheBlobStoreClosedError
 from cacheness.storage.blob_store import BlobStore
@@ -92,7 +92,7 @@ def test_local_profiles_share_one_explicit_cache_lifecycle(
     """Local profiles use the same initialized policy/store lifecycle."""
 
     cache = UnifiedCache(
-        CacheConfig(cache_dir=tmp_path / profile),
+        CacheConfig(storage=CacheStorageConfig(cache_dir=tmp_path / profile)),
         store=_local_topology(profile, tmp_path / profile / "payloads"),
     )
     try:
@@ -121,7 +121,10 @@ def test_deterministic_remote_candidate_uses_the_same_policy_call_graph(
         cache_dir=tmp_path / "candidate-store",
         manifest_key_provider=_SharedRemoteManifestKey(),
     )
-    cache = UnifiedCache(CacheConfig(cache_dir=tmp_path / "cache"), store=store)
+    cache = UnifiedCache(
+        CacheConfig(storage=CacheStorageConfig(cache_dir=tmp_path / "cache")),
+        store=store,
+    )
     try:
         store.initialize()
         stored = cache.put({"profile": "candidate"}, request_id="candidate")
@@ -185,7 +188,10 @@ def test_unsupported_topology_rejects_before_participant_construction(
     )
 
     with pytest.raises(ValueError, match="Unsupported topology pairing"):
-        UnifiedCache(CacheConfig(cache_dir=tmp_path / "cache"), store=topology)
+        UnifiedCache(
+            CacheConfig(storage=CacheStorageConfig(cache_dir=tmp_path / "cache")),
+            store=topology,
+        )
 
     assert constructed == []
 
@@ -200,7 +206,10 @@ def test_injected_store_remains_caller_initialized_and_caller_owned(
         cache_dir=tmp_path / "store",
     )
     store.initialize()
-    cache = UnifiedCache(CacheConfig(cache_dir=tmp_path / "cache"), store=store)
+    cache = UnifiedCache(
+        CacheConfig(storage=CacheStorageConfig(cache_dir=tmp_path / "cache")),
+        store=store,
+    )
     initialize_calls = 0
     close_calls = 0
 
@@ -249,10 +258,16 @@ def test_cache_close_closes_the_facade_boundary_without_releasing_injected_store
     if store_form == "injected":
         store = BlobStore(topology, cache_dir=tmp_path / "caller-store")
         store.initialize()
-        cache = UnifiedCache(CacheConfig(cache_dir=tmp_path / "cache"), store=store)
+        cache = UnifiedCache(
+            CacheConfig(storage=CacheStorageConfig(cache_dir=tmp_path / "cache")),
+            store=store,
+        )
     else:
         store = None
-        cache = UnifiedCache(CacheConfig(cache_dir=tmp_path / "cache"), store=topology)
+        cache = UnifiedCache(
+            CacheConfig(storage=CacheStorageConfig(cache_dir=tmp_path / "cache")),
+            store=topology,
+        )
         cache.initialize()
 
     cache.close()

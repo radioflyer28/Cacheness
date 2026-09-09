@@ -7,7 +7,7 @@ from contextlib import contextmanager
 import pytest
 
 from cacheness.cache_policy import CacheOutcome
-from cacheness.config import CacheConfig
+from cacheness.config import CacheConfig, CacheStorageConfig
 from cacheness.core import UnifiedCache
 from cacheness.error_handling import (
     CacheBlobBackendError,
@@ -30,7 +30,10 @@ def _memory_topology() -> StoreTopology:
 def test_explicit_memory_composition_returns_hit_for_cached_none(tmp_path):
     """A stored None remains a presence-bearing cache hit."""
 
-    cache = UnifiedCache(CacheConfig(cache_dir=tmp_path), store=_memory_topology())
+    cache = UnifiedCache(
+        CacheConfig(storage=CacheStorageConfig(cache_dir=tmp_path)),
+        store=_memory_topology(),
+    )
     cache.initialize()
     cache_key = cache.put(None, request_id="cached-none").receipt.key
 
@@ -47,7 +50,10 @@ def test_lookup_observes_blob_store_once_for_absent_and_present_none(
 ):
     """Presence comes from exactly one BlobStore.open_entry observation."""
 
-    cache = UnifiedCache(CacheConfig(cache_dir=tmp_path), store=_memory_topology())
+    cache = UnifiedCache(
+        CacheConfig(storage=CacheStorageConfig(cache_dir=tmp_path)),
+        store=_memory_topology(),
+    )
     cache.initialize()
     cache_key = "missing-key"
     if stored:
@@ -78,14 +84,18 @@ def test_existing_store_is_retained_and_topology_creates_one_store(tmp_path):
 
     topology = _memory_topology()
     caller_store = BlobStore(topology, cache_dir=tmp_path / "caller-store")
-    cache = UnifiedCache(CacheConfig(cache_dir=tmp_path), store=caller_store)
+    cache = UnifiedCache(
+        CacheConfig(storage=CacheStorageConfig(cache_dir=tmp_path)),
+        store=caller_store,
+    )
 
     assert cache.store is caller_store
     cache.close()
     assert caller_store.lifecycle_authority is not None
 
     topology_cache = UnifiedCache(
-        CacheConfig(cache_dir=tmp_path / "owned-cache"), store=_memory_topology()
+        CacheConfig(storage=CacheStorageConfig(cache_dir=tmp_path / "owned-cache")),
+        store=_memory_topology(),
     )
     assert isinstance(topology_cache.store, BlobStore)
     assert topology_cache.store.lifecycle is topology_cache.store._authority_lifecycle
@@ -114,7 +124,10 @@ def test_lookup_classifies_declared_storage_failures_without_cleanup(
 ):
     """Declared direct-read failures retain their category and exact cause."""
 
-    cache = UnifiedCache(CacheConfig(cache_dir=tmp_path), store=_memory_topology())
+    cache = UnifiedCache(
+        CacheConfig(storage=CacheStorageConfig(cache_dir=tmp_path)),
+        store=_memory_topology(),
+    )
     cache.initialize()
     delete_calls = 0
 
@@ -142,7 +155,10 @@ def test_lookup_classifies_declared_storage_failures_without_cleanup(
 def test_lookup_propagates_unclassified_programming_errors(tmp_path, monkeypatch):
     """Lookup never converts arbitrary control-flow errors into cache outcomes."""
 
-    cache = UnifiedCache(CacheConfig(cache_dir=tmp_path), store=_memory_topology())
+    cache = UnifiedCache(
+        CacheConfig(storage=CacheStorageConfig(cache_dir=tmp_path)),
+        store=_memory_topology(),
+    )
     cache.initialize()
 
     @contextmanager

@@ -7,7 +7,7 @@ from contextlib import contextmanager
 import pytest
 
 from cacheness.cache_policy import CacheOutcome, CacheRemovalReport
-from cacheness.config import CacheConfig
+from cacheness.config import CacheConfig, CacheStorageConfig
 from cacheness.core import UnifiedCache
 from cacheness.error_handling import CacheBlobBackendError
 from cacheness.storage.catalog import (
@@ -30,7 +30,10 @@ def _memory_topology() -> StoreTopology:
 def _cache(tmp_path) -> UnifiedCache:
     """Create and initialize one explicit policy/store composition."""
 
-    cache = UnifiedCache(CacheConfig(cache_dir=tmp_path), store=_memory_topology())
+    cache = UnifiedCache(
+        CacheConfig(storage=CacheStorageConfig(cache_dir=tmp_path)),
+        store=_memory_topology(),
+    )
     cache.initialize()
     return cache
 

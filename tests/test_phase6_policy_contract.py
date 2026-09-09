@@ -12,7 +12,7 @@ from cacheness.cache_policy import (
     CachePutResult,
     CacheRemovalReport,
 )
-from cacheness.config import CacheConfig, CachePolicyConfig
+from cacheness.config import CacheConfig, CachePolicyConfig, CacheStorageConfig
 from cacheness.core import _CACHE_NAMESPACE, _CACHE_POLICY_SCHEMA, UnifiedCache
 from cacheness.error_handling import (
     CacheBlobBackendError,
@@ -36,7 +36,7 @@ def _cache(tmp_path, *, byte_limit: int = 0) -> UnifiedCache:
     """Create one initialized cache with deliberately tiny policy budgets."""
 
     config = CacheConfig(
-        cache_dir=tmp_path,
+        storage=CacheStorageConfig(cache_dir=tmp_path),
         policy=CachePolicyConfig(
             max_authoritative_bytes=byte_limit,
             catalog_page_size=1,
