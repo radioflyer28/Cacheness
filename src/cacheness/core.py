@@ -9,9 +9,14 @@ authority.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import inspect
+import json
 import logging
+import secrets
 from collections.abc import Mapping
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 from pathlib import Path
@@ -19,6 +24,9 @@ from typing import Any, Callable, Optional
 
 from .cache_policy import (
     CacheLookupResult,
+    CacheMaintenancePhase,
+    CacheMaintenanceResult,
+    CacheMaintenanceState,
     CacheOutcome,
     CacheRemovalReport,
     CacheStatistics,
@@ -26,7 +34,12 @@ from .cache_policy import (
     _CacheRemovalCandidate,
     execute_exact_removals,
 )
-from .config import CacheConfig, _DEFAULT_TTL, create_cache_config
+from .config import (
+    CacheConfig,
+    _DEFAULT_TTL,
+    create_cache_config,
+    validate_config_strict,
+)
 from .error_handling import (
     CacheBlobBackendError,
     CacheBlobIntegrityError,
@@ -117,11 +130,13 @@ class UnifiedCache:
 
         if not isinstance(config, CacheConfig):
             raise TypeError("config must be a CacheConfig")
+        validate_config_strict(config)
         self.config = config
         self.cache_dir = Path(self.config.storage.cache_dir)
         self.handlers = HandlerRegistry(self.config)
         self._closed = False
         self._outcome_recorder = _CacheOutcomeRecorder()
+        self._maintenance_secret = secrets.token_bytes(32)
         self._owns_store = isinstance(store, StoreTopology)
         if isinstance(store, BlobStore):
             self.store = store
@@ -324,7 +339,7 @@ class UnifiedCache:
         if ttl_hours is None:
             return False
         ttl = (
-            self.config.metadata.default_ttl_hours
+            self.config.policy.default_ttl_hours
             if ttl_hours is _DEFAULT_TTL
             else ttl_hours
         )
@@ -364,7 +379,7 @@ class UnifiedCache:
             page_size=page_size,
             work_cap=work_cap,
         )
-        ttl = self.config.metadata.default_ttl_hours
+        ttl = self.config.policy.default_ttl_hours
         candidates = tuple(
             self._candidate_from_catalog_entry(entry)
             for entry in page.entries
@@ -405,39 +420,336 @@ class UnifiedCache:
             work_cap=work_cap,
         )
 
-    def _enforce_size_limit(self) -> None:
-        """Keep policy size eviction above storage without a second catalog."""
+    def _maintenance_composition_fingerprint(self) -> str:
+        """Bind policy continuation to this store without making it authority."""
 
-        max_size_mb = self.config.storage.max_cache_size_mb
-        if max_size_mb is None:
-            return
-        candidates: list[tuple[str, str, Any, int]] = []
-        total_size = 0
-        for cache_key in self._cache_blob_store.list():
-            try:
-                snapshot, entry = self._authority_snapshot_entry(cache_key)
-            except CacheBlobLifecycleConflictError:
-                continue
-            if snapshot is None or entry is None:
-                continue
-            size = entry["file_size"] if entry["file_size"] > 0 else 0
-            total_size += size
-            candidates.append(
-                (str(entry.get("created_at") or ""), cache_key, snapshot, size)
+        source = ":".join(
+            (
+                self._cache_blob_store.projection_store_id,
+                self.actual_backend,
+                _CACHE_POLICY_SCHEMA.fingerprint,
             )
-        limit = int(max_size_mb * 1024 * 1024)
-        if total_size <= limit:
-            return
-        target = int(limit * 0.8)
-        removed = 0
-        for _, cache_key, snapshot, size in sorted(candidates):
-            if total_size <= target:
-                break
-            if self._retire_exact_authority_snapshot(cache_key, snapshot):
-                total_size -= size
-                removed += 1
-        if removed:
-            logger.info("Cache size policy evicted %s entries", removed)
+        )
+        return hashlib.sha256(source.encode("utf-8")).hexdigest()
+
+    def _maintenance_configuration_fingerprint(self) -> str:
+        """Bind continuation evidence to the exact finite policy configuration."""
+
+        policy = self.config.policy
+        payload = {
+            "catalog_page_size": policy.catalog_page_size,
+            "default_ttl_hours": policy.default_ttl_hours,
+            "maintenance_work_cap": policy.maintenance_work_cap,
+            "max_authoritative_bytes": policy.max_authoritative_bytes,
+            "max_maintenance_state_bytes": policy.max_maintenance_state_bytes,
+        }
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+        return hashlib.sha256(encoded).hexdigest()
+
+    def _seal_maintenance_state(
+        self,
+        *,
+        phase: CacheMaintenancePhase,
+        authority_revision: int | None,
+        cursor: str | None,
+        observed_bytes: int = 0,
+        excess_bytes: int = 0,
+        candidate_key: str | None = None,
+        candidate_expectation: Any | None = None,
+        candidate_byte_size: int | None = None,
+    ) -> CacheMaintenanceState:
+        """Create bounded, instance-signed continuation evidence.
+
+        Signing protects the opaque policy token from accidental or malicious
+        modification.  It does not authorize storage work on its own: every
+        later operation still validates authoritative catalog facts and routes
+        mutation through ``BlobStore.delete(expected=...)``.
+        """
+
+        unsigned = CacheMaintenanceState(
+            phase=phase,
+            composition_fingerprint=self._maintenance_composition_fingerprint(),
+            configuration_fingerprint=self._maintenance_configuration_fingerprint(),
+            authority_revision=authority_revision,
+            cursor=cursor,
+            observed_bytes=observed_bytes,
+            excess_bytes=excess_bytes,
+            candidate_key=candidate_key,
+            candidate_expectation=candidate_expectation,
+            candidate_byte_size=candidate_byte_size,
+            signature="0" * 64,
+        )
+        if unsigned.encoded_size > self.config.policy.max_maintenance_state_bytes:
+            raise CacheBlobIntegrityError(
+                "Cache maintenance continuation exceeds its configured byte bound"
+            )
+        signature = hmac.new(
+            self._maintenance_secret,
+            unsigned.encoded.encode("ascii"),
+            hashlib.sha256,
+        ).hexdigest()
+        return replace(unsigned, signature=signature)
+
+    def _validate_maintenance_state(
+        self, state: CacheMaintenanceState
+    ) -> CacheMaintenanceState:
+        """Reject foreign or modified continuation evidence before authority I/O."""
+
+        if not isinstance(state, CacheMaintenanceState):
+            raise ValueError("maintenance state must be a CacheMaintenanceState")
+        if state.composition_fingerprint != self._maintenance_composition_fingerprint():
+            raise ValueError("maintenance state belongs to another cache composition")
+        if state.configuration_fingerprint != self._maintenance_configuration_fingerprint():
+            raise ValueError("maintenance state does not match the active policy configuration")
+        if state.encoded_size > self.config.policy.max_maintenance_state_bytes:
+            raise ValueError("maintenance state exceeds the configured byte bound")
+        expected_signature = hmac.new(
+            self._maintenance_secret,
+            state.encoded.encode("ascii"),
+            hashlib.sha256,
+        ).hexdigest()
+        if not hmac.compare_digest(state.signature, expected_signature):
+            raise ValueError("maintenance state signature is invalid")
+        return state
+
+    @staticmethod
+    def _maintenance_restart(
+        cause: BaseException,
+        removal: CacheRemovalReport | None = None,
+    ) -> CacheMaintenanceResult:
+        """Return a typed restart outcome without claiming size completion."""
+
+        return CacheMaintenanceResult(
+            complete=False,
+            retryable=True,
+            removal=CacheRemovalReport() if removal is None else removal,
+            cause=cause,
+        )
+
+    def _maintenance_pending(
+        self,
+        *,
+        phase: CacheMaintenancePhase,
+        authority_revision: int | None,
+        cursor: str | None,
+        observed_bytes: int = 0,
+        excess_bytes: int = 0,
+        candidate_key: str | None = None,
+        candidate_expectation: Any | None = None,
+        candidate_byte_size: int | None = None,
+        removal: CacheRemovalReport | None = None,
+    ) -> CacheMaintenanceResult:
+        """Return one caller-driven continuation after exactly this work step."""
+
+        state = self._seal_maintenance_state(
+            phase=phase,
+            authority_revision=authority_revision,
+            cursor=cursor,
+            observed_bytes=observed_bytes,
+            excess_bytes=excess_bytes,
+            candidate_key=candidate_key,
+            candidate_expectation=candidate_expectation,
+            candidate_byte_size=candidate_byte_size,
+        )
+        report = CacheRemovalReport() if removal is None else removal
+        report = replace(report, complete=False, continuation=state.encoded)
+        return CacheMaintenanceResult(
+            complete=False,
+            retryable=True,
+            removal=report,
+            state=state,
+        )
+
+    def _maintenance_page(self, cursor: str | None) -> CatalogPage:
+        """Read one policy-bounded authenticated catalog page."""
+
+        policy = self.config.policy
+        return self._query_cache_catalog(
+            CatalogQuery(page_size=policy.catalog_page_size),
+            cursor=cursor,
+            page_size=policy.catalog_page_size,
+            work_cap=policy.maintenance_work_cap,
+        )
+
+    @staticmethod
+    def _require_maintenance_revision(
+        page: CatalogPage, expected_revision: int | None
+    ) -> int:
+        """Treat changed authority facts as a typed restart, never stale input."""
+
+        if expected_revision is not None and page.revision != expected_revision:
+            raise CacheBlobLifecycleConflictError(
+                "Authoritative catalog revision changed during size maintenance"
+            )
+        return page.revision
+
+    def _maintenance_candidate_and_size(
+        self, entry: CatalogEntry
+    ) -> tuple[_CacheRemovalCandidate, int]:
+        """Extract only authenticated intrinsic facts for one eviction choice."""
+
+        candidate = self._candidate_from_catalog_entry(entry)
+        if entry.byte_size is None or entry.byte_size < 0:
+            self._raise_malformed_policy_facts(
+                "Catalog entry has no authenticated byte size"
+            )
+        return candidate, entry.byte_size
+
+    def _scan_size_maintenance(
+        self, state: CacheMaintenanceState, *, verify: bool
+    ) -> CacheMaintenanceResult:
+        """Run one bounded inventory or verification page.
+
+        A complete scan transitions to a separate fresh verification scan
+        before making a completion claim.  No scan follows a continuation or
+        mutation cursor after the current method returns.
+        """
+
+        page = self._maintenance_page(state.cursor)
+        revision = self._require_maintenance_revision(page, state.authority_revision)
+        observed_bytes = state.observed_bytes
+        for entry in page.entries:
+            _, byte_size = self._maintenance_candidate_and_size(entry)
+            observed_bytes += byte_size
+        if not page.exhausted:
+            return self._maintenance_pending(
+                phase=state.phase,
+                authority_revision=revision,
+                cursor=page.cursor,
+                observed_bytes=observed_bytes,
+                excess_bytes=state.excess_bytes,
+            )
+
+        limit = self.config.policy.max_authoritative_bytes
+        if verify:
+            if observed_bytes <= limit:
+                return CacheMaintenanceResult(
+                    complete=True,
+                    retryable=False,
+                    removal=CacheRemovalReport(),
+                )
+            return self._maintenance_pending(
+                phase=CacheMaintenancePhase.EVICT,
+                authority_revision=revision,
+                cursor=None,
+                excess_bytes=observed_bytes - limit,
+            )
+
+        if observed_bytes <= limit:
+            return self._maintenance_pending(
+                phase=CacheMaintenancePhase.VERIFY,
+                authority_revision=revision,
+                cursor=None,
+            )
+        return self._maintenance_pending(
+            phase=CacheMaintenancePhase.EVICT,
+            authority_revision=revision,
+            cursor=None,
+            excess_bytes=observed_bytes - limit,
+        )
+
+    def _evict_size_maintenance(
+        self, state: CacheMaintenanceState
+    ) -> CacheMaintenanceResult:
+        """Select or exact-delete at most one candidate in canonical page order."""
+
+        if state.candidate_key is not None:
+            candidate = _CacheRemovalCandidate(
+                state.candidate_key, state.candidate_expectation
+            )
+            report = self._remove_exact_candidates((candidate,))
+            if report.failed:
+                return self._maintenance_restart(report.failures[0].cause, report)
+            if report.conflicted or report.removed != 1:
+                return self._maintenance_restart(
+                    CacheBlobLifecycleConflictError(
+                        "Exact cache eviction candidate changed before deletion"
+                    ),
+                    report,
+                )
+            remaining = max(0, state.excess_bytes - state.candidate_byte_size)
+            return self._maintenance_pending(
+                phase=(
+                    CacheMaintenancePhase.VERIFY
+                    if remaining == 0
+                    else CacheMaintenancePhase.EVICT
+                ),
+                authority_revision=None,
+                cursor=None,
+                excess_bytes=remaining,
+                removal=report,
+            )
+
+        page = self._maintenance_page(state.cursor)
+        revision = self._require_maintenance_revision(page, state.authority_revision)
+        for entry in page.entries:
+            candidate, byte_size = self._maintenance_candidate_and_size(entry)
+            if byte_size > 0:
+                return self._maintenance_pending(
+                    phase=CacheMaintenancePhase.EVICT,
+                    authority_revision=revision,
+                    cursor=page.cursor,
+                    excess_bytes=state.excess_bytes,
+                    candidate_key=candidate.key,
+                    candidate_expectation=candidate.expectation,
+                    candidate_byte_size=byte_size,
+                )
+        if page.exhausted:
+            return self._maintenance_restart(
+                CacheBlobIntegrityError(
+                    "Authoritative size inventory cannot satisfy a positive eviction excess"
+                )
+            )
+        return self._maintenance_pending(
+            phase=CacheMaintenancePhase.EVICT,
+            authority_revision=revision,
+            cursor=page.cursor,
+            excess_bytes=state.excess_bytes,
+        )
+
+    def _run_size_maintenance(self, state: CacheMaintenanceState) -> CacheMaintenanceResult:
+        """Execute one finite inventory, eviction, or verification step only."""
+
+        try:
+            if state.phase is CacheMaintenancePhase.INVENTORY:
+                return self._scan_size_maintenance(state, verify=False)
+            if state.phase is CacheMaintenancePhase.EVICT:
+                return self._evict_size_maintenance(state)
+            if state.phase is CacheMaintenancePhase.VERIFY:
+                return self._scan_size_maintenance(state, verify=True)
+            raise ValueError("maintenance state contains an unsupported phase")
+        except (
+            CacheBlobBackendError,
+            CacheBlobIntegrityError,
+            CacheBlobLifecycleConflictError,
+            CacheBlobLifecycleTimeoutError,
+            CacheBlobStoreClosedError,
+            CatalogStaleCursorError,
+        ) as error:
+            return self._maintenance_restart(error)
+
+    @_clear_coordinated
+    def maintain_size(self) -> CacheMaintenanceResult:
+        """Start one bounded size-maintenance step from canonical catalog order."""
+
+        state = self._seal_maintenance_state(
+            phase=CacheMaintenancePhase.INVENTORY,
+            authority_revision=None,
+            cursor=None,
+        )
+        return self._run_size_maintenance(state)
+
+    @_clear_coordinated
+    def resume_maintenance(self, state: CacheMaintenanceState) -> CacheMaintenanceResult:
+        """Resume exactly one validated policy-maintenance step.
+
+        This method neither schedules background work nor loops through later
+        pages.  Callers decide whether and when to submit the returned state.
+        """
+
+        return self._run_size_maintenance(self._validate_maintenance_state(state))
 
     @_clear_coordinated
     def put(
@@ -464,11 +776,6 @@ class UnifiedCache:
                 "cache_prefix": prefix,
             },
         )
-        if not self._closed:
-            try:
-                self._enforce_size_limit()
-            except Exception as error:  # policy follow-up never rolls back a commit
-                logger.warning("Blob committed; cache size policy remains pending: %s", error)
         return cache_key
 
     def _record_outcome(self, outcome: CacheOutcome) -> None:
@@ -670,8 +977,8 @@ class UnifiedCache:
             "total_size_mb": round(sum(entry["size_mb"] for entry in entries), 2),
             "hit_rate": statistics.hit_rate,
             "cache_dir": str(self.cache_dir),
-            "max_size_mb": self.config.storage.max_cache_size_mb,
-            "default_ttl_hours": self.config.metadata.default_ttl_hours,
+            "max_size_mb": self.config.policy.max_authoritative_bytes / (1024 * 1024),
+            "default_ttl_hours": self.config.policy.default_ttl_hours,
             "backend_type": self.actual_backend,
         }
 

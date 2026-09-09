@@ -8,7 +8,7 @@ Configuration is split into focused sub-configurations for better maintainabilit
 
 import logging
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Optional, List, Union
 from pathlib import Path
 
@@ -96,6 +96,68 @@ class CacheMetadataConfig:
         logger.debug(f"Store cache_key_params: {self.store_cache_key_params}")
         if self.memory_cache_type and self.enable_memory_cache:
             logger.debug(f"Memory cache layer: {self.memory_cache_type} (maxsize={self.memory_cache_maxsize}, ttl={self.memory_cache_ttl_seconds}s)")
+
+
+@dataclass(frozen=True)
+class CachePolicyConfig:
+    """Finite cache-policy limits independent of BlobStore composition.
+
+    These values control cache semantics only.  They neither select a payload
+    backend nor authorize lifecycle transitions; ``BlobStore`` continues to
+    own every payload and authoritative catalog mutation.
+    """
+
+    default_ttl_hours: float | None = 24.0
+    max_authoritative_bytes: int = 2_000 * 1024 * 1024
+    catalog_page_size: int = 100
+    maintenance_work_cap: int = 100
+    max_maintenance_state_bytes: int = 16_384
+
+    def __post_init__(self) -> None:
+        """Reject unbounded maintenance policy before any storage access."""
+
+        if self.default_ttl_hours is not None and (
+            isinstance(self.default_ttl_hours, bool)
+            or not isinstance(self.default_ttl_hours, (int, float))
+            or not math.isfinite(self.default_ttl_hours)
+            or self.default_ttl_hours <= 0
+        ):
+            raise ValueError("default_ttl_hours must be a positive finite number or None")
+        if (
+            not isinstance(self.max_authoritative_bytes, int)
+            or isinstance(self.max_authoritative_bytes, bool)
+            or self.max_authoritative_bytes < 0
+        ):
+            raise ValueError("max_authoritative_bytes must be a non-negative integer")
+        if (
+            not isinstance(self.catalog_page_size, int)
+            or isinstance(self.catalog_page_size, bool)
+            or self.catalog_page_size <= 0
+        ):
+            raise ValueError("catalog_page_size must be a positive integer")
+        if (
+            not isinstance(self.maintenance_work_cap, int)
+            or isinstance(self.maintenance_work_cap, bool)
+            or self.maintenance_work_cap <= 0
+        ):
+            raise ValueError("maintenance_work_cap must be a positive integer")
+        if self.catalog_page_size > self.maintenance_work_cap:
+            raise ValueError("catalog_page_size cannot exceed maintenance_work_cap")
+        if (
+            not isinstance(self.max_maintenance_state_bytes, int)
+            or isinstance(self.max_maintenance_state_bytes, bool)
+            or not 512 <= self.max_maintenance_state_bytes <= 65_536
+        ):
+            raise ValueError(
+                "max_maintenance_state_bytes must be an integer between 512 and 65536"
+            )
+
+        # Keep policy limits inside the portable catalog contract without
+        # importing storage modules while this configuration module initializes.
+        if self.catalog_page_size > 256:
+            raise ValueError("catalog_page_size exceeds the portable catalog bound")
+        if self.maintenance_work_cap > 4_096:
+            raise ValueError("maintenance_work_cap exceeds the portable catalog bound")
 
 
 @dataclass
@@ -436,6 +498,7 @@ class CacheConfig:
 
     storage: CacheStorageConfig = field(default_factory=CacheStorageConfig)
     metadata: CacheMetadataConfig = field(default_factory=CacheMetadataConfig)
+    policy: CachePolicyConfig = field(default_factory=CachePolicyConfig)
     blob: CacheBlobConfig = field(default_factory=CacheBlobConfig)
     compression: CompressionConfig = field(default_factory=CompressionConfig)
     serialization: SerializationConfig = field(default_factory=SerializationConfig)
@@ -450,6 +513,7 @@ class CacheConfig:
         self,
         storage: Optional[CacheStorageConfig] = None,
         metadata: Optional[CacheMetadataConfig] = None,
+        policy: Optional[CachePolicyConfig] = None,
         blob: Optional[CacheBlobConfig] = None,
         compression: Optional[CompressionConfig] = None,
         serialization: Optional[SerializationConfig] = None,
@@ -505,6 +569,9 @@ class CacheConfig:
         # Initialize sub-configurations with defaults
         self.storage = storage or CacheStorageConfig()
         self.metadata = metadata or CacheMetadataConfig()
+        if policy is not None and not isinstance(policy, CachePolicyConfig):
+            raise ValueError("policy must be a CachePolicyConfig instance")
+        self.policy = CachePolicyConfig() if policy is None else policy
         self.blob = blob or CacheBlobConfig()
         self.compression = compression or CompressionConfig()
         self.serialization = serialization or SerializationConfig()
@@ -532,6 +599,9 @@ class CacheConfig:
             self.storage.cache_dir = cache_dir
         if default_ttl_hours is not None:
             self.metadata.default_ttl_hours = default_ttl_hours
+            self.policy = replace(
+                self.policy, default_ttl_hours=default_ttl_hours
+            )
         if verify_cache_integrity is not None:
             self.metadata.verify_cache_integrity = verify_cache_integrity
         if hash_path_content is not None:
@@ -656,6 +726,8 @@ class CacheConfig:
 
     def __post_init__(self):
         """Validate overall configuration consistency."""
+        if not isinstance(self.policy, CachePolicyConfig):
+            raise ValueError("policy must be a CachePolicyConfig instance")
         self._validate_trusted_object_array_configuration()
         
         logger.info("Cache configuration initialized with focused sub-configurations")
@@ -803,6 +875,7 @@ def create_cache_config(
         for sub_config_name in [
             "storage",
             "metadata",
+            "policy",
             "blob",
             "compression",
             "serialization",
@@ -871,9 +944,9 @@ def validate_config(config: CacheConfig) -> List["ConfigValidationError"]:
     errors = []
     
     # Validate storage configuration
-    if not isinstance(config.storage.cache_dir, str):
+    if not isinstance(config.storage.cache_dir, (str, Path)):
         errors.append(ConfigValidationError(
-            "storage.cache_dir", "must be a string", config.storage.cache_dir
+            "storage.cache_dir", "must be a string or Path", config.storage.cache_dir
         ))
     
     if config.storage.max_cache_size_mb is not None:
@@ -900,6 +973,25 @@ def validate_config(config: CacheConfig) -> List["ConfigValidationError"]:
                 "metadata.default_ttl_hours", "must be positive",
                 config.metadata.default_ttl_hours
             ))
+
+    if not isinstance(config.policy, CachePolicyConfig):
+        errors.append(ConfigValidationError("policy", "must be a CachePolicyConfig"))
+    else:
+        try:
+            CachePolicyConfig(
+                default_ttl_hours=config.policy.default_ttl_hours,
+                max_authoritative_bytes=config.policy.max_authoritative_bytes,
+                catalog_page_size=config.policy.catalog_page_size,
+                maintenance_work_cap=config.policy.maintenance_work_cap,
+                max_maintenance_state_bytes=config.policy.max_maintenance_state_bytes,
+            )
+        except ValueError as error:
+            field = str(error).split(" ", 1)[0]
+            errors.append(
+                ConfigValidationError(
+                    f"policy.{field}", str(error), getattr(config.policy, field, None)
+                )
+            )
     
     # Validate blob configuration
     if not isinstance(config.blob.blob_backend, str):
@@ -1067,6 +1159,7 @@ def load_config_from_dict(data: dict) -> CacheConfig:
     sub_config_names = {
         "storage",
         "metadata",
+        "policy",
         "blob",
         "compression",
         "serialization",
@@ -1081,6 +1174,7 @@ def load_config_from_dict(data: dict) -> CacheConfig:
         # Nested format - create sub-configs
         storage = CacheStorageConfig(**data.get("storage", {})) if "storage" in data else None
         metadata = CacheMetadataConfig(**data.get("metadata", {})) if "metadata" in data else None
+        policy = CachePolicyConfig(**data.get("policy", {})) if "policy" in data else None
         blob = CacheBlobConfig(**data.get("blob", {})) if "blob" in data else None
         compression = CompressionConfig(**data.get("compression", {})) if "compression" in data else None
         serialization = SerializationConfig(**data.get("serialization", {})) if "serialization" in data else None
@@ -1100,6 +1194,7 @@ def load_config_from_dict(data: dict) -> CacheConfig:
         return CacheConfig(
             storage=storage,
             metadata=metadata,
+            policy=policy,
             blob=blob,
             compression=compression,
             serialization=serialization,
