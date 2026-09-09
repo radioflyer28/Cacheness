@@ -227,7 +227,7 @@ def test_put_preserves_receipt_when_one_maintenance_step_reports_complete(
         removal=CacheRemovalReport(),
     )
     try:
-        monkeypatch.setattr(cache, "maintain_size", lambda: complete)
+        monkeypatch.setattr(cache, "_start_size_maintenance", lambda: complete)
 
         result = cache.put({"payload": "complete"}, request_id="post-commit-complete")
 
