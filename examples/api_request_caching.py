@@ -1,116 +1,141 @@
+"""Cache deterministic transport results with an explicit policy facade.
+
+This deliberately does not contact an HTTP service. A caller injects the
+transport and cache, then owns closing the cache after the demonstration.
 """
-API Request Caching Example
 
-This example demonstrates how to use cacheness to cache expensive API requests
-with intelligent TTL management and ETag-based validation.
-"""
+from __future__ import annotations
 
-import requests
-from cacheness import cached, cacheness, CacheConfig
+from tempfile import TemporaryDirectory
 
-
-# Initialize cache for API responses
-config = CacheConfig(
-    cache_dir="./api_cache",
-    default_ttl_hours=24,  # Cache API responses for 24 hours
-    metadata_backend="sqlite"
+from cacheness import (
+    CacheConfig,
+    CacheLookupResult,
+    CacheOutcome,
+    CachePolicyConfig,
+    StoreTopology,
+    UnifiedCache,
+    cached,
 )
-api_cache = cacheness(config)
+from cacheness.config import CacheStorageConfig
+from cacheness.error_handling import CacheBlobBackendError
+from cacheness.storage import BackendRef
 
 
-class WeatherAPI:
-    """Example API client with intelligent caching."""
-    
-    def __init__(self, api_key):
-        self.api_key = api_key
-        self.base_url = "https://api.weatherapi.com/v1"
-    
-    @cached(cache_instance=api_cache, ttl_hours=6, key_prefix="weather")
-    def get_current_weather(self, city, units="metric"):
-        """Get current weather with 6-hour caching."""
-        url = f"{self.base_url}/current.json"
-        params = {
-            "key": self.api_key,
-            "q": city,
-            "units": units
-        }
-        
-        print(f"Making API request for {city}...")  # Only prints on cache miss
-        response = requests.get(url, params=params)
-        response.raise_for_status()
-        return response.json()
-    
-    @cached(cache_instance=api_cache, ttl_hours=168, key_prefix="forecast")  # 1 week
-    def get_7_day_forecast(self, city, include_hourly=False):
-        """Get 7-day forecast with weekly caching."""
-        url = f"{self.base_url}/forecast.json"
-        params = {
-            "key": self.api_key,
-            "q": city,
-            "days": 7,
-            "hourly": 1 if include_hourly else 0
-        }
-        
-        print(f"Making forecast API request for {city}...")
-        response = requests.get(url, params=params)
-        response.raise_for_status()
-        return response.json()
-    
-    @cached(cache_instance=api_cache, ttl_hours=8760, key_prefix="historical")  # 1 year
-    def get_historical_weather(self, city, date):
-        """Get historical weather data with long-term caching."""
-        url = f"{self.base_url}/history.json"
-        params = {
-            "key": self.api_key,
-            "q": city,
-            "dt": date  # YYYY-MM-DD format
-        }
-        
-        print(f"Making historical API request for {city} on {date}...")
-        response = requests.get(url, params=params)
-        response.raise_for_status()
-        return response.json()
+class DeterministicTransport:
+    """A supplied transport whose optional response is intentionally ``None``."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def fetch_optional_profile(self, user_id: str) -> None:
+        """Return one known absent profile without opening a socket."""
+
+        self.calls += 1
+        assert user_id == "ada"
+        return None
 
 
-def main():
-    """Demonstrate API caching functionality."""
-    
-    # Initialize weather client (replace with your API key)
-    weather_client = WeatherAPI("your_api_key_here")
-    
-    print("=== Weather API Caching Demo ===\n")
-    
-    # Current weather - first call makes API request
-    print("1. Getting current weather for London (first time):")
-    current = weather_client.get_current_weather("London", units="imperial")
-    print(f"   Temperature: {current['current']['temp_f']}°F")
-    
-    # Second call uses cache (no API request)
-    print("\n2. Getting current weather for London (cached):")
-    current_cached = weather_client.get_current_weather("London", units="imperial")
-    print(f"   Temperature: {current_cached['current']['temp_f']}°F")
-    
-    # Different parameters = different cache entry
-    print("\n3. Getting current weather for London in Celsius (new cache entry):")
-    current_metric = weather_client.get_current_weather("London", units="metric")
-    print(f"   Temperature: {current_metric['current']['temp_c']}°C")
-    
-    # Long-term forecast caching
-    print("\n4. Getting 7-day forecast (cached for 1 week):")
-    forecast = weather_client.get_7_day_forecast("London", include_hourly=True)
-    print(f"   Forecast days: {len(forecast['forecast']['forecastday'])}")
-    
-    # Historical data cached for a full year
-    print("\n5. Getting historical data (cached for 1 year):")
-    historical = weather_client.get_historical_weather("London", "2023-12-25")
-    print(f"   Historical date: {historical['forecast']['forecastday'][0]['date']}")
-    
-    # Cache statistics
-    print("\n=== Cache Statistics ===")
-    stats = api_cache.get_stats()
-    print(f"Total entries: {stats['total_entries']}")
-    print(f"Cache size: {stats['total_size_mb']:.2f} MB")
-    print(f"Hit rate: {stats.get('hit_rate', 0):.1%}")
+def memory_topology() -> StoreTopology:
+    """Build the explicitly supported same-process topology."""
+
+    return StoreTopology(
+        payload=BackendRef(name="memory"),
+        authority=BackendRef(name="memory"),
+    )
+
+
+def main() -> None:
+    """Show misses, cached ``None``, failure policy, and bounded clearing."""
+
+    with TemporaryDirectory(prefix="cacheness-api-example-") as directory:
+        config = CacheConfig(
+            storage=CacheStorageConfig(cache_dir=directory),
+            policy=CachePolicyConfig(
+                max_authoritative_bytes=1_024,
+                catalog_page_size=8,
+                maintenance_work_cap=8,
+            ),
+        )
+        cache = UnifiedCache(config, store=memory_topology())
+        transport = DeterministicTransport()
+        try:
+            cache.initialize()
+
+            @cached(cache=cache)
+            def optional_profile(user_id: str) -> None:
+                return transport.fetch_optional_profile(user_id)
+
+            assert optional_profile("ada") is None
+            first_lookup = optional_profile.cache_last_lookup
+            assert first_lookup is not None
+            assert first_lookup.outcome is CacheOutcome.ABSENT
+            assert optional_profile("ada") is None
+            assert optional_profile.cache_last_lookup.outcome is CacheOutcome.HIT
+            assert transport.calls == 1
+            print(f"DEFAULT_RECOMPUTE_OUTCOME={first_lookup.outcome.value}")
+            print("DEFAULT_RECOMPUTE_SET=absent,expired")
+            print(
+                "STORED_NONE_HIT="
+                f"outcome:{optional_profile.cache_last_lookup.outcome.value},"
+                f"transport_calls:{transport.calls}"
+            )
+
+            # This local injection proves default policy preserves typed failures.
+            backend_error = CacheBlobBackendError("demonstration authority outage")
+            forced_lookup = CacheLookupResult(
+                CacheOutcome.BACKEND_ERROR,
+                cause=backend_error,
+            )
+            original_lookup_call = cache.lookup_call
+            cache.lookup_call = lambda *_args, **_kwargs: forced_lookup  # type: ignore[method-assign]
+            default_failure_calls = 0
+            try:
+                @cached(cache=cache)
+                def default_failure() -> str:
+                    nonlocal default_failure_calls
+                    default_failure_calls += 1
+                    return "must not run"
+
+                try:
+                    default_failure()
+                except CacheBlobBackendError as error:
+                    assert error is backend_error
+                else:  # pragma: no cover - documents the required policy.
+                    raise AssertionError("default failure policy unexpectedly recomputed")
+                assert default_failure_calls == 0
+                print("DEFAULT_FAILURE_OUTCOME=backend_error")
+                print("DEFAULT_FAILURE_RECOMPUTED=False")
+
+                @cached(
+                    cache=cache,
+                    recompute_on=frozenset({CacheOutcome.BACKEND_ERROR}),
+                )
+                def opted_in_failure() -> str:
+                    return "caller-chosen-fallback"
+
+                assert opted_in_failure() == "caller-chosen-fallback"
+                assert opted_in_failure.cache_last_lookup is forced_lookup
+                assert opted_in_failure.cache_last_lookup.cause is backend_error
+                print(
+                    "OPT_IN_FAILURE="
+                    f"outcome:{opted_in_failure.cache_last_lookup.outcome.value},"
+                    f"cause:{type(backend_error).__name__}"
+                )
+            finally:
+                cache.lookup_call = original_lookup_call  # type: ignore[method-assign]
+
+            report = optional_profile.cache_clear()
+            print(
+                "FUNCTION_CACHE_CLEAR="
+                f"attempted:{report.attempted},removed:{report.removed},"
+                f"complete:{report.complete},retryable:{report.retryable}"
+            )
+            print(f"STATISTICS_HITS={cache.statistics().hit}")
+        finally:
+            cache.close()
+
+    print("CANONICAL_FUNCTION_CACHE_EXAMPLE_OK")
 
 
 if __name__ == "__main__":
