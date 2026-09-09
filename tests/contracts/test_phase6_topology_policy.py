@@ -14,6 +14,7 @@ import pytest
 
 from cacheness.config import CacheConfig
 from cacheness.core import UnifiedCache
+from cacheness.error_handling import CacheBlobStoreClosedError
 from cacheness.storage.blob_store import BlobStore
 from cacheness.storage.backends.blob_backends import InMemoryBlobBackend
 from cacheness.storage.composition import (
@@ -236,3 +237,31 @@ def test_cache_ownership_uses_constructor_form_not_a_boolean_flag() -> None:
     ).read_text(encoding="utf-8")
 
     assert "_owns_store" not in source
+
+
+@pytest.mark.parametrize("store_form", ("injected", "topology"))
+def test_cache_close_closes_the_facade_boundary_without_releasing_injected_store(
+    tmp_path: Path, store_form: str
+) -> None:
+    """Close blocks policy observers while preserving caller-owned storage."""
+
+    topology = _local_topology("memory-memory", tmp_path / "payloads")
+    if store_form == "injected":
+        store = BlobStore(topology, cache_dir=tmp_path / "caller-store")
+        store.initialize()
+        cache = UnifiedCache(CacheConfig(cache_dir=tmp_path / "cache"), store=store)
+    else:
+        store = None
+        cache = UnifiedCache(CacheConfig(cache_dir=tmp_path / "cache"), store=topology)
+        cache.initialize()
+
+    cache.close()
+
+    with pytest.raises(CacheBlobStoreClosedError, match="Cache is closed"):
+        cache.statistics()
+
+    if store is not None:
+        try:
+            assert store.get("missing") is None
+        finally:
+            store.close()
