@@ -66,6 +66,49 @@ FIXED_REGRESSION_NODES = {
         "tests/test_cache_key_consistency.py",
     ),
 }
+CANONICAL_CUTOVER_NODES = (
+    "tests/test_blob_manifest.py",
+    "tests/test_filesystem_containment.py",
+    "tests/test_cache_signing.py",
+    "tests/test_legacy_array_security.py",
+    "tests/test_public_api_contract.py",
+    "tests/test_query_meta.py",
+    "tests/test_store_cache_key_params_config.py",
+    "tests/test_query_meta_security.py",
+    "tests/test_phase1_quality_gates.py",
+    "tests/test_phase6_suite_isolation.py",
+    "tests/test_full_suite_environment.py",
+    "tests/test_phase3_gap_acceptance.py",
+)
+_EXPECTED_CANONICAL_CUTOVER_NODES = frozenset(CANONICAL_CUTOVER_NODES)
+_CUTOVER_REQUIREMENT_LABELS = (
+    *CACH_REQUIREMENT_NODES,
+    "CACH-07 SqlCache regression",
+)
+_CACHE_CONFIG_KEYWORDS = frozenset(
+    {
+        "storage",
+        "metadata",
+        "blob",
+        "compression",
+        "serialization",
+        "handlers",
+        "security",
+        "auto_validate",
+    }
+)
+_RETIRED_CACHE_SURFACES = frozenset(
+    {
+        "get",
+        "query_meta",
+        "get_metadata",
+        "get_stats",
+        "stats",
+        "list",
+        "list_entries",
+        "list_keys",
+    }
+)
 ARCHITECTURE_MODULES = (
     "src/cacheness/core.py",
     "src/cacheness/cache_policy.py",
@@ -111,6 +154,8 @@ def _static_diagnostic_requirements(error: str) -> tuple[str, ...]:
             if any(node in error for node in nodes):
                 return (requirement,)
         return tuple(CACH_REQUIREMENT_NODES)
+    if error.startswith("canonical cutover "):
+        return _CUTOVER_REQUIREMENT_LABELS
     if error.startswith(
         (
             "UnifiedCache does not import",
@@ -193,6 +238,115 @@ def _assignment_names(node: ast.Assign | ast.AnnAssign) -> tuple[str, ...]:
     """Return straightforward assignment targets for structural diagnostics."""
     targets = node.targets if isinstance(node, ast.Assign) else (node.target,)
     return tuple(target.id for target in targets if isinstance(target, ast.Name))
+
+
+def _is_type_error_raises(node: ast.withitem) -> bool:
+    """Return whether one context manager is ``pytest.raises(TypeError)``."""
+    context = node.context_expr
+    if not isinstance(context, ast.Call) or _call_name(context) != "raises":
+        return False
+    if not context.args:
+        return False
+    error_type = _dotted_name(context.args[0])
+    return error_type == "TypeError"
+
+
+def _is_explicit_absence_assertion(node: ast.AST) -> bool:
+    """Recognize explicit ``hasattr`` and signature absence assertions only."""
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+        return isinstance(node.operand, ast.Call) and _call_name(node.operand) == "hasattr"
+    if not isinstance(node, ast.Compare) or not any(
+        isinstance(operator, ast.NotIn) for operator in node.ops
+    ):
+        return False
+    return any(
+        isinstance(candidate, ast.Call)
+        and _call_name(candidate) == "signature"
+        for candidate in ast.walk(node)
+    )
+
+
+class _CutoverVisitor(ast.NodeVisitor):
+    """Reject executable use of intentionally removed cache APIs in migrated tests."""
+
+    def __init__(self, filename: str) -> None:
+        self.filename = PurePosixPath(filename).as_posix()
+        self.findings: list[str] = []
+        self._negative_depth = 0
+        self._known_cache_names: set[str] = {"cache", "unified_cache"}
+
+    def _add(self, finding: str) -> None:
+        rendered = f"canonical cutover audit: {self.filename}: {finding}"
+        if rendered not in self.findings:
+            self.findings.append(rendered)
+
+    @property
+    def _is_deliberate_negative(self) -> bool:
+        return self._negative_depth > 0
+
+    def visit_With(self, node: ast.With) -> None:
+        is_negative = any(_is_type_error_raises(item) for item in node.items)
+        self._negative_depth += int(is_negative)
+        self.generic_visit(node)
+        self._negative_depth -= int(is_negative)
+
+    def visit_AsyncWith(self, node: ast.AsyncWith) -> None:
+        self.visit_With(node)
+
+    def visit_Assert(self, node: ast.Assert) -> None:
+        if _is_explicit_absence_assertion(node.test):
+            self._negative_depth += 1
+            self.generic_visit(node)
+            self._negative_depth -= 1
+            return
+        self.generic_visit(node)
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        if isinstance(node.value, ast.Call) and _call_name(node.value) == "UnifiedCache":
+            self._known_cache_names.update(_assignment_names(node))
+        self.generic_visit(node)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        if isinstance(node.value, ast.Call) and _call_name(node.value) == "UnifiedCache":
+            self._known_cache_names.update(_assignment_names(node))
+        self.generic_visit(node)
+
+    def visit_Call(self, node: ast.Call) -> None:
+        call_name = _call_name(node)
+        if not self._is_deliberate_negative and call_name == "CacheConfig":
+            retired_keywords = sorted(
+                keyword.arg
+                for keyword in node.keywords
+                if keyword.arg is not None and keyword.arg not in _CACHE_CONFIG_KEYWORDS
+            )
+            for keyword in retired_keywords:
+                self._add(f"retired CacheConfig keyword: {keyword}")
+
+        if not self._is_deliberate_negative and call_name == "UnifiedCache":
+            keywords = {keyword.arg for keyword in node.keywords if keyword.arg}
+            if "store" not in keywords:
+                self._add("UnifiedCache construction omits store=")
+
+        if not self._is_deliberate_negative and isinstance(node.func, ast.Attribute):
+            receiver = node.func.value
+            receiver_name = _dotted_name(receiver)
+            receiver_is_cache = (
+                isinstance(receiver, ast.Call) and _call_name(receiver) == "UnifiedCache"
+            ) or (receiver_name in self._known_cache_names)
+            if receiver_is_cache and node.func.attr in _RETIRED_CACHE_SURFACES:
+                self._add(f"removed UnifiedCache surface: {node.func.attr}()")
+        self.generic_visit(node)
+
+
+def audit_cutover_source(source: str, filename: str) -> tuple[str, ...]:
+    """Audit one fixed migrated-test module without treating prose as code."""
+    try:
+        tree = ast.parse(source, filename=filename)
+    except SyntaxError as error:
+        return (f"canonical cutover audit: {filename}: unreadable source: {error.msg}",)
+    visitor = _CutoverVisitor(filename)
+    visitor.visit(tree)
+    return tuple(visitor.findings)
 
 
 class _ArchitectureVisitor(ast.NodeVisitor):
@@ -371,7 +525,11 @@ def _verify_static_composition(root: Path) -> tuple[str, ...]:
 def _validate_manifest(root: Path) -> tuple[str, ...]:
     """Ensure every fixed path/node is valid before pytest receives it."""
     errors: list[str] = []
-    for node in (*PHASE6_CONTRACT_NODES, *RETAINED_LIFECYCLE_NODES):
+    for node in (
+        *PHASE6_CONTRACT_NODES,
+        *RETAINED_LIFECYCLE_NODES,
+        *CANONICAL_CUTOVER_NODES,
+    ):
         path = node.split("::", maxsplit=1)[0]
         candidate = PurePosixPath(path)
         if candidate.is_absolute() or ".." in candidate.parts:
@@ -379,6 +537,21 @@ def _validate_manifest(root: Path) -> tuple[str, ...]:
         elif not (root / candidate).is_file():
             errors.append(f"manifest test is missing: {node}")
     return tuple(errors)
+
+
+def _validate_cutover_inventory() -> tuple[str, ...]:
+    """Reject a duplicate, missing, or extra migrated cutover test node."""
+    actual = tuple(CANONICAL_CUTOVER_NODES)
+    if len(actual) != len(set(actual)):
+        return ("canonical cutover inventory contains duplicate test nodes",)
+    if frozenset(actual) == _EXPECTED_CANONICAL_CUTOVER_NODES:
+        return ()
+    missing = sorted(_EXPECTED_CANONICAL_CUTOVER_NODES - frozenset(actual))
+    unexpected = sorted(frozenset(actual) - _EXPECTED_CANONICAL_CUTOVER_NODES)
+    return (
+        "canonical cutover inventory differs from the fixed Plan 09-11 set: "
+        f"missing={missing!r}, unexpected={unexpected!r}",
+    )
 
 
 def _run_pytest(root: Path, nodes: Iterable[str], *, label: str) -> tuple[bool, str]:
@@ -418,6 +591,7 @@ def verify_repository(root: Path) -> tuple[bool, tuple[str, ...]]:
     errors: list[str] = []
     root = root.resolve()
     errors.extend(_validate_manifest(root))
+    errors.extend(_validate_cutover_inventory())
     for relative_path in ARCHITECTURE_MODULES:
         path = root / relative_path
         try:
@@ -435,6 +609,14 @@ def verify_repository(root: Path) -> tuple[bool, tuple[str, ...]]:
         except OSError as error:
             errors.append(f"cache contract unreadable: {relative_path}: {error}")
 
+    for node in CANONICAL_CUTOVER_NODES:
+        relative_path = node.split("::", maxsplit=1)[0]
+        path = root / relative_path
+        try:
+            errors.extend(audit_cutover_source(path.read_text(encoding="utf-8"), relative_path))
+        except OSError as error:
+            errors.append(f"canonical cutover audit unreadable: {relative_path}: {error}")
+
     for requirement, nodes in CACH_REQUIREMENT_NODES.items():
         passed, evidence = _run_pytest(root, nodes, label=requirement)
         if not passed:
@@ -443,6 +625,13 @@ def verify_repository(root: Path) -> tuple[bool, tuple[str, ...]]:
         passed, evidence = _run_pytest(root, nodes, label=regression)
         if not passed:
             errors.append(evidence)
+    passed, evidence = _run_pytest(
+        root,
+        CANONICAL_CUTOVER_NODES,
+        label="canonical cutover and suite-order regressions",
+    )
+    if not passed:
+        errors.append(evidence)
     passed, evidence = _run_pytest(
         root,
         (

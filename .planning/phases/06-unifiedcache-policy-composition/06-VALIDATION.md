@@ -1,42 +1,48 @@
 ---
 phase: 06
 slug: unifiedcache-policy-composition
-status: executed-with-open-gates
-nyquist_compliant: false
+status: executed
+nyquist_compliant: true
 wave_0_complete: true
-executed: 2026-09-09
+executed: 2026-09-09T08:10:40Z
 ---
 
 # Phase 6 — Validation Strategy and Executed Evidence
 
-> This ledger records commands actually run on 2026-09-09. It deliberately
-> distinguishes fixed local contract evidence from optional-package, native
-> platform, and live-service qualification. An `OPEN` row is not a pass.
+> This ledger records the final local commands actually run on 2026-09-09. It
+> deliberately distinguishes deterministic local evidence from native-platform
+> and real-service qualification. `PASS` below never credits a mock, skip, or
+> local collection result as PostgreSQL, Amazon S3, or Windows qualification.
 
 ## Environment and Boundaries
 
 | Item | Observed value | Disposition |
 | --- | --- | --- |
 | Python | CPython 3.13.15 | Current host only; Python-version qualification remains Phase 8. |
-| Default environment | `uv run --frozen` | Does not contain optional `pandas`; this blocks SQL collection. |
-| PostgreSQL/Amazon S3 | No live resources or credentials used | `UNAVAILABLE`; deterministic candidate evidence is not BACK-05 qualification. |
-| Native Windows | Not run on this macOS host | `UNAVAILABLE`; no native-Windows claim. |
+| Local dependency environment | `uv run --isolated --all-extras --group dev --frozen` | Locked all-extras local environment; no package or lockfile mutation. |
+| PostgreSQL/Amazon S3 | No live resources or credentials used | `UNAVAILABLE`/`NOT_QUALIFIED`; deterministic candidate evidence is not BACK-05 qualification. |
+| Native Windows | Not run on this macOS host | `UNAVAILABLE`/`NOT_QUALIFIED`; no native-Windows claim. |
 | Packaging, coverage, performance | Not run as Phase 6 acceptance | Explicitly deferred to Phase 8. |
 
 ## Executed Commands
 
 | Command | Actual result | Status |
 | --- | --- | --- |
-| `uv run --frozen pytest -q tests/test_phase6_contract_verifier.py -o log_cli=false` | `13 passed` | PASS |
-| `uv run --frozen pytest -q tests/test_catalog_projection.py::test_json_projection_rejects_incompatible_derived_documents -o log_cli=false` | `1 passed` | PASS |
-| `uv run --frozen ruff check` over the Phase 6 production, test, and verifier files | `All checks passed!` | PASS |
-| `uv run --frozen python tools/verify_phase6_contracts.py --repo-root .` | CACH-01 through CACH-06 and SC-06 printed `PASS`; fixed CACH-07 SQL regression exited `2` because `tests/test_sql_cache.py` cannot import `pandas`. | OPEN |
-| `uv run --frozen pytest -q --tb=no -o log_cli=false` | Collection interrupted with exactly `3 errors`: `tests/test_sql_cache.py`, `tests/test_sql_cache_documentation.py`, and `tests/test_sql_cache_failure_contract.py` each raised `ModuleNotFoundError: No module named 'pandas'`. | OPEN |
+| `uv run --isolated --all-extras --group dev --frozen pytest -q tests/test_phase6_contract_verifier.py -o log_cli=false` | `18 passed` | PASS |
+| `uv run --isolated --all-extras --group dev --frozen python tools/run_phase6_local_suite.py --repo-root .` | Exit `0`; exact three live-path exclusions; `1232` collected local nodes, `1223 passed`, `9 skipped`, `0 failed`. | PASS |
+| `uv run --isolated --all-extras --group dev --frozen python tools/verify_phase6_contracts.py --repo-root .` | Exit `0`; CACH-01 through CACH-07, strict projection, canonical cutover/suite-order, and retained Phase 3–5 groups all passed. | PASS |
+| `uv run --isolated --all-extras --group dev --frozen ruff check` over the 15 Plan 09–11 Python paths named in `06-11-PLAN.md` | `All checks passed!` | PASS |
 
-The fixed verifier was also run from `/private/tmp` with an explicit
-`--repo-root` before the default virtual environment was rebuilt; that
-provisioned invocation passed its then-installed fixed manifest. It is not used
-to override the current default-environment CACH-07 failure above.
+The local runner printed only these exclusions:
+
+- `tests/integration/test_postgresql_authority.py`
+- `tests/integration/test_s3_generation.py`
+- `tests/integration/test_remote_topology.py`
+
+The passing runner and verifier are recorded at `2026-09-09T08:10:40Z`.
+Their concrete artifacts are [the root-safe runner](../../../tools/run_phase6_local_suite.py),
+[the fixed verifier](../../../tools/verify_phase6_contracts.py), and
+[its adversarial contract tests](../../../tests/test_phase6_contract_verifier.py).
 
 ## Requirement Evidence
 
@@ -48,7 +54,7 @@ to override the current default-environment CACH-07 failure above.
 | CACH-04 | `tests/test_phase6_lookup_contract.py`, `tests/test_phase6_decorator_contract.py` | CACH-04 printed `PASS` | PASS |
 | CACH-05 | `tests/test_phase6_statistics.py` | CACH-05 printed `PASS` | PASS |
 | CACH-06 | `tests/test_phase6_public_api_contract.py`, `tests/test_phase6_decorator_contract.py`, contract-text check | CACH-06 printed `PASS` | PASS |
-| CACH-07 regression | `tests/test_sql_cache.py` is fixed in the manifest | Cannot collect without optional `pandas` in the default environment | OPEN |
+| CACH-07 regression | `tests/test_sql_cache.py` is fixed in the manifest and ordered isolation probes | Printed `CACH-07 SqlCache regression: PASS`; local suite exited `0` | PASS |
 
 ## Strict Derived-Projection Evidence
 
@@ -97,28 +103,19 @@ to override the current default-environment CACH-07 failure above.
 
 ## Retained Storage Regression Evidence
 
-`tools/verify_phase6_contracts.py` explicitly names retained Phase 3–5 local
-lifecycle, integrity, recovery, authority, and topology nodes. The provisioned
-fixed-verifier run passed that finite group. The current default rerun reaches
-the same local checks but returns nonzero only at the separately named CACH-07
-SQL collection gate. No live service result is credited here.
+`tools/verify_phase6_contracts.py` now contains the literal Plan 09–11
+canonical-cutover inventory, audits each migrated source AST, and explicitly
+names retained Phase 3–5 local lifecycle, integrity, recovery, authority, and
+topology nodes. The final fixed-verifier run passed that finite group and the
+separate SqlCache regression. No live service result is credited here.
 
 ## Open Gates
 
-1. **CACH-07 default-environment SQL collection:** `pandas` is absent from the
-   default `uv run --frozen` environment, so the fixed SqlCache regression and
-   full suite cannot collect. This is an optional dependency/packaging
-   qualification gap; no package was installed during this plan.
-2. **BACK-05 live remote qualification:** PostgreSQL and Amazon S3 were not
+1. **BACK-05 live remote qualification:** PostgreSQL and Amazon S3 were not
    contacted. Mocked/deterministic remote-candidate coverage is not release
    evidence. Phase 8 retains the non-substitutable live gate.
-3. **Native Windows:** no native Windows execution occurred. Existing skipped
+2. **Native Windows:** no native Windows execution occurred. Existing skipped
    Windows evidence is not counted as Phase 6 qualification.
-4. **Broader historical-suite failures:** an earlier fully provisioned run
-   reached additional stale direct-cache/metadata and live-fixture failures.
-   They were not masked or repaired by restoring removed public APIs. Resolving
-   them requires a separately scoped canonical test migration and/or Phase 8
-   environment qualification.
 
 ## Validation Sign-Off
 
@@ -127,9 +124,9 @@ SQL collection gate. No live service result is credited here.
 - [x] Wave 0 Phase 6 contract files exist and are exercised by the fixed manifest.
 - [x] No watch-mode flags were used.
 - [x] Scoped Ruff passed for Phase 6 production/test/tool files.
-- [ ] Current-environment full suite is green — OPEN: optional `pandas` missing.
-- [ ] Fixed verifier is fully green — OPEN: CACH-07 collection requires `pandas`.
-- [ ] `nyquist_compliant: true` — withheld until the two preceding gates close.
+- [x] Current-environment non-live local suite is green under the locked all-extras environment.
+- [x] Fixed verifier is fully green, including CACH-07 collection and ordered-isolation coverage.
+- [x] `nyquist_compliant: true` for the finite Phase 6 local gate.
 
-**Approval:** not claimed. This ledger is reproducible local Phase 6 evidence
-with explicit open environment and live-qualification gates.
+**Approval:** local Phase 6 evidence is complete. PostgreSQL/Amazon-S3 and
+native-Windows qualification remain explicitly open for Phase 8/backlog.

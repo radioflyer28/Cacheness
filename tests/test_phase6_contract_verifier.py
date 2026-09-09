@@ -53,7 +53,82 @@ def test_manifest_is_fixed_and_contains_the_strict_projection_node() -> None:
             "tests/test_cache_key_consistency.py",
         ),
     }
+    assert verifier.CANONICAL_CUTOVER_NODES == (
+        "tests/test_blob_manifest.py",
+        "tests/test_filesystem_containment.py",
+        "tests/test_cache_signing.py",
+        "tests/test_legacy_array_security.py",
+        "tests/test_public_api_contract.py",
+        "tests/test_query_meta.py",
+        "tests/test_store_cache_key_params_config.py",
+        "tests/test_query_meta_security.py",
+        "tests/test_phase1_quality_gates.py",
+        "tests/test_phase6_suite_isolation.py",
+        "tests/test_full_suite_environment.py",
+        "tests/test_phase3_gap_acceptance.py",
+    )
     assert verifier.REMOTE_EVIDENCE_LABEL == "mocked-candidate; BACK-05 remains Phase 8"
+
+
+def test_cutover_audit_rejects_positive_legacy_calls() -> None:
+    """Migrated nodes cannot silently reintroduce a retired cache route."""
+    verifier = _load_verifier()
+
+    findings = verifier.audit_cutover_source(
+        """
+config = CacheConfig(cache_dir='legacy')
+cache = UnifiedCache(config)
+cache.get('entry')
+""",
+        "tests/test_cache_signing.py",
+    )
+
+    assert findings == (
+        "canonical cutover audit: tests/test_cache_signing.py: retired CacheConfig "
+        "keyword: cache_dir",
+        "canonical cutover audit: tests/test_cache_signing.py: UnifiedCache "
+        "construction omits store=",
+        "canonical cutover audit: tests/test_cache_signing.py: removed UnifiedCache "
+        "surface: get()",
+    )
+
+
+def test_cutover_audit_allows_only_structural_negative_assertions() -> None:
+    """TypeError and explicit signature-absence negatives remain legal evidence."""
+    verifier = _load_verifier()
+
+    findings = verifier.audit_cutover_source(
+        """
+import inspect
+import pytest
+
+with pytest.raises(TypeError):
+    CacheConfig(cache_dir='legacy')
+with pytest.raises(TypeError):
+    UnifiedCache(CacheConfig())
+assert 'cache_dir' not in inspect.signature(CacheConfig).parameters
+""",
+        "tests/test_public_api_contract.py",
+    )
+
+    assert findings == ()
+
+
+def test_cutover_inventory_rejects_an_omitted_migration_node(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fixed Plan 09-11 inventory cannot shrink without a verifier failure."""
+    verifier = _load_verifier()
+    monkeypatch.setattr(
+        verifier,
+        "CANONICAL_CUTOVER_NODES",
+        verifier.CANONICAL_CUTOVER_NODES[:-1],
+    )
+
+    assert verifier._validate_cutover_inventory() == (
+        "canonical cutover inventory differs from the fixed Plan 09-11 set: "
+        "missing=['tests/test_phase3_gap_acceptance.py'], unexpected=[]",
+    )
 
 
 @pytest.mark.parametrize(
