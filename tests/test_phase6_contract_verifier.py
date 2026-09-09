@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
@@ -18,6 +19,16 @@ def _load_verifier():
     assert spec is not None and spec.loader is not None
     module = module_from_spec(spec)
     spec.loader.exec_module(module)
+    return module
+
+
+def _load_verifier_source(source: str) -> ModuleType:
+    """Execute a source-mutated verifier as import-time inventory evidence."""
+
+    verifier_path = REPOSITORY_ROOT / "tools" / "verify_phase6_contracts.py"
+    module = ModuleType("phase6_contract_verifier_source_mutation")
+    module.__file__ = str(verifier_path)
+    exec(compile(source, str(verifier_path), "exec"), module.__dict__)
     return module
 
 
@@ -114,15 +125,19 @@ assert 'cache_dir' not in inspect.signature(CacheConfig).parameters
     assert findings == ()
 
 
-def test_cutover_inventory_rejects_an_omitted_migration_node(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The fixed Plan 09-11 inventory cannot shrink without a verifier failure."""
-    verifier = _load_verifier()
-    monkeypatch.setattr(
-        verifier,
-        "CANONICAL_CUTOVER_NODES",
-        verifier.CANONICAL_CUTOVER_NODES[:-1],
+def test_cutover_inventory_rejects_an_omitted_migration_node() -> None:
+    """An import-time execution omission remains distinct from the Plan oracle."""
+
+    verifier_path = REPOSITORY_ROOT / "tools" / "verify_phase6_contracts.py"
+    source = verifier_path.read_text(encoding="utf-8")
+    original = "CANONICAL_CUTOVER_NODES = tuple(_PLAN_09_11_CANONICAL_CUTOVER_NODES)"
+    assert original in source
+    verifier = _load_verifier_source(
+        source.replace(
+            original,
+            "CANONICAL_CUTOVER_NODES = _PLAN_09_11_CANONICAL_CUTOVER_NODES[:-1]",
+            1,
+        )
     )
 
     assert verifier._validate_cutover_inventory() == (

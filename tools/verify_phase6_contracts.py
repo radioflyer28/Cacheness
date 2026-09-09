@@ -66,7 +66,10 @@ FIXED_REGRESSION_NODES = {
         "tests/test_cache_key_consistency.py",
     ),
 }
-CANONICAL_CUTOVER_NODES = (
+# Keep this Plan 09-11 inventory separate from the execution tuple below.
+# The verifier must reject a shortened execution inventory instead of deriving
+# its own oracle from the same mutable value.
+_PLAN_09_11_CANONICAL_CUTOVER_NODES = (
     "tests/test_blob_manifest.py",
     "tests/test_filesystem_containment.py",
     "tests/test_cache_signing.py",
@@ -80,7 +83,7 @@ CANONICAL_CUTOVER_NODES = (
     "tests/test_full_suite_environment.py",
     "tests/test_phase3_gap_acceptance.py",
 )
-_EXPECTED_CANONICAL_CUTOVER_NODES = frozenset(CANONICAL_CUTOVER_NODES)
+CANONICAL_CUTOVER_NODES = tuple(_PLAN_09_11_CANONICAL_CUTOVER_NODES)
 _CUTOVER_REQUIREMENT_LABELS = (
     *CACH_REQUIREMENT_NODES,
     "CACH-07 SqlCache regression",
@@ -542,12 +545,13 @@ def _validate_manifest(root: Path) -> tuple[str, ...]:
 def _validate_cutover_inventory() -> tuple[str, ...]:
     """Reject a duplicate, missing, or extra migrated cutover test node."""
     actual = tuple(CANONICAL_CUTOVER_NODES)
+    expected = frozenset(_PLAN_09_11_CANONICAL_CUTOVER_NODES)
     if len(actual) != len(set(actual)):
         return ("canonical cutover inventory contains duplicate test nodes",)
-    if frozenset(actual) == _EXPECTED_CANONICAL_CUTOVER_NODES:
+    if frozenset(actual) == expected:
         return ()
-    missing = sorted(_EXPECTED_CANONICAL_CUTOVER_NODES - frozenset(actual))
-    unexpected = sorted(frozenset(actual) - _EXPECTED_CANONICAL_CUTOVER_NODES)
+    missing = sorted(expected - frozenset(actual))
+    unexpected = sorted(frozenset(actual) - expected)
     return (
         "canonical cutover inventory differs from the fixed Plan 09-11 set: "
         f"missing={missing!r}, unexpected={unexpected!r}",
