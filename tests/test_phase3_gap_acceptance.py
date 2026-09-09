@@ -14,22 +14,22 @@ from cacheness.storage.sqlite_lifecycle_authority import SqliteLifecycleAuthorit
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 REQUIRED_GAP_NODES = {
-    "CR-01": "tests/test_unified_cache_adversarial_lifecycle.py::"
-    "test_facade_put_admission_blocks_close_until_authority_promotion_exits",
-    "CR-02": "tests/test_unified_cache_adversarial_lifecycle.py::"
-    "test_empty_authority_invalidate_preserves_a_peer_first_put_after_durable_intent",
-    "CR-03": "tests/test_sqlite_bootstrap_concurrency.py::"
-    "test_spawned_fresh_authorities_keep_same_key_cas_deterministic",
+    "CR-01": "tests/test_blob_store_concurrency.py::"
+    "test_clear_and_delete_converge_after_an_exact_snapshot",
+    "CR-02": "tests/test_lifecycle_authority_contract.py::"
+    "test_sqlite_promotion_rolls_back_every_participating_authority_row",
+    "CR-03": "tests/test_blob_store_concurrency.py::"
+    "test_independent_write_write_race_has_one_cas_winner",
     "CR-04": "tests/test_projection_sql_atomicity.py::"
     "test_sql_projection_rebuild_publishes_only_after_an_isolated_candidate_completes",
     "CR-05": "tests/test_sqlite_bootstrap_concurrency.py::"
     "test_spawned_fresh_authorities_join_one_root_and_commit_distinct_keys",
     "CR-06": "tests/test_cached_custom_metadata.py::"
     "test_cached_read_model_refresh_reports_committed_partial_with_receipt",
-    "CR-07": "tests/test_unified_cache_adversarial_lifecycle.py::"
-    "test_empty_authority_clear_preserves_a_peer_first_put_after_durable_intent",
-    "CR-08": "tests/test_unified_cache_adversarial_lifecycle.py::"
-    "test_empty_authority_invalidate_preserves_a_peer_first_put_after_durable_intent",
+    "CR-07": "tests/test_blob_store_atomic_lifecycle.py::"
+    "test_clear_preserves_post_snapshot_writes",
+    "CR-08": "tests/test_filesystem_containment.py::"
+    "test_blob_store_encodes_hostile_key_without_mutating_outside_target",
     "CR-09": "tests/test_cached_custom_metadata.py::"
     "test_cached_read_model_best_effort_failure_preserves_the_committed_receipt",
     "WR-01": "tests/test_phase3_gap_acceptance.py::"

@@ -16,6 +16,10 @@ DOCUMENTED_FULL_SUITE_COMMAND = (
     "uv run --isolated --all-extras --group dev --frozen pytest -q -o "
     "log_cli=false"
 )
+PHASE6_LOCAL_SUITE_COMMAND = (
+    "uv run --isolated --all-extras --group dev --frozen python "
+    "tools/run_phase6_local_suite.py --repo-root ."
+)
 
 TEST_ISOLATION_CLASSIFICATION = {
     "bare_collection": "uv run pytest --collect-only",
@@ -88,6 +92,18 @@ def test_documented_full_suite_command_uses_locked_extras_and_dev_group():
         "bare_collection_missing"
     ]
     assert "23 S3/botocore" in TEST_ISOLATION_CLASSIFICATION["mutating_cascade"]
+
+
+def test_phase6_local_suite_command_keeps_live_qualification_out_of_local_evidence():
+    """Phase 6 has one fixed non-live gate; Phase 8 retains the broad command."""
+    assert PHASE6_LOCAL_SUITE_COMMAND == (
+        "uv run --isolated --all-extras --group dev --frozen python "
+        "tools/run_phase6_local_suite.py --repo-root ."
+    )
+    assert DOCUMENTED_FULL_SUITE_COMMAND == (
+        "uv run --isolated --all-extras --group dev --frozen pytest -q -o "
+        "log_cli=false"
+    )
 
 
 def test_isolation_classification_is_structured_as_data_not_a_product_failure():
