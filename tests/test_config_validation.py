@@ -1,688 +1,121 @@
-"""
-Tests for Phase 2.4: Configuration Schema & Validation
+"""Nested configuration validation for the post-cutover public API."""
 
-Tests the configuration validation system and file loading capabilities.
-"""
+from __future__ import annotations
+
+import json
 
 import pytest
-import tempfile
-import json
-from pathlib import Path
 
-# Import configuration classes and functions
 from cacheness.config import (
     CacheConfig,
-    CacheBlobConfig,
     CacheMetadataConfig,
+    CachePolicyConfig,
     CacheStorageConfig,
-    LifecycleLimits,
+    CompressionConfig,
     ConfigValidationError,
-    validate_config,
-    validate_config_strict,
+    HandlerConfig,
+    LifecycleLimits,
+    SecurityConfig,
+    SerializationConfig,
     load_config_from_dict,
     load_config_from_json,
     save_config_to_json,
-    create_cache_config,
+    validate_config,
+    validate_config_strict,
 )
 
-# Import module-level API
-import cacheness
+
+def test_default_nested_configuration_is_valid() -> None:
+    """The current constructor provides only ownership-aligned sections."""
+
+    config = CacheConfig()
+
+    assert validate_config(config) == []
+    validate_config_strict(config)
+    assert isinstance(config.storage, CacheStorageConfig)
+    assert isinstance(config.policy, CachePolicyConfig)
 
 
-# =============================================================================
-# Test Fixtures
-# =============================================================================
+@pytest.mark.parametrize(
+    "factory",
+    (
+        lambda: CachePolicyConfig(catalog_page_size=0),
+        lambda: CompressionConfig(pickle_compression_level=20),
+        lambda: SerializationConfig(max_collection_depth=0),
+        lambda: SecurityConfig(signature_version=0),
+        lambda: LifecycleLimits(authority_busy_timeout_seconds=0),
+        lambda: HandlerConfig(handler_priority=["not-a-handler"]),
+    ),
+)
+def test_invalid_nested_values_are_rejected_at_their_owner(factory) -> None:
+    """Each policy section rejects malformed values before storage composition."""
 
-@pytest.fixture
-def temp_dir():
-    """Provide a temporary directory for config files."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        yield Path(tmpdir)
-
-
-@pytest.fixture
-def valid_config():
-    """Provide a valid configuration instance."""
-    return CacheConfig()
-
-
-# =============================================================================
-# Test CacheBlobConfig
-# =============================================================================
-
-class TestCacheBlobConfig:
-    """Test the new CacheBlobConfig dataclass."""
-    
-    def test_default_values(self):
-        """Test default blob config values."""
-        config = CacheBlobConfig()
-        assert config.blob_backend == "filesystem"
-        assert config.blob_backend_options is None
-        assert config.use_atomic_writes is True
-        assert config.create_subdirectories is True
-        assert config.stream_threshold_bytes == 10 * 1024 * 1024
-    
-    def test_custom_blob_backend(self):
-        """Test setting custom blob backend."""
-        config = CacheBlobConfig(
-            blob_backend="s3",
-            blob_backend_options={"bucket": "my-cache", "region": "us-west-2"}
-        )
-        assert config.blob_backend == "s3"
-        assert config.blob_backend_options == {"bucket": "my-cache", "region": "us-west-2"}
-    
-    def test_invalid_blob_backend_options_type(self):
-        """Test that non-dict blob_backend_options raises error."""
-        with pytest.raises(ValueError, match="must be a dictionary"):
-            CacheBlobConfig(blob_backend_options="not a dict")
-    
-    def test_invalid_stream_threshold(self):
-        """Test that negative stream_threshold_bytes raises error."""
-        with pytest.raises(ValueError, match="must be non-negative"):
-            CacheBlobConfig(stream_threshold_bytes=-1)
+    with pytest.raises(ValueError):
+        factory()
 
 
-class TestCacheConfigBlobIntegration:
-    """Test CacheConfig integration with blob configuration."""
-    
-    def test_blob_config_accessible(self):
-        """Test that blob config is accessible from CacheConfig."""
-        config = CacheConfig()
-        assert hasattr(config, "blob")
-        assert isinstance(config.blob, CacheBlobConfig)
-    
-    def test_blob_backend_parameter(self):
-        """Test blob_backend top-level parameter."""
-        config = CacheConfig(blob_backend="memory")
-        assert config.blob.blob_backend == "memory"
-        assert config.blob_backend == "memory"  # Via property
-    
-    def test_blob_backend_options_parameter(self):
-        """Test blob_backend_options top-level parameter."""
-        options = {"bucket": "test-bucket"}
-        config = CacheConfig(blob_backend_options=options)
-        assert config.blob.blob_backend_options == options
-        assert config.blob_backend_options == options  # Via property
-    
-    def test_full_config_with_blob_options(self):
-        """Test storage configuration preserves explicit blob options."""
-        config = CacheConfig(
-            cache_dir="./test_cache",
-            blob_backend="filesystem",
-            blob_backend_options={"use_atomic_writes": True},
-        )
-        
-        assert config.storage.cache_dir == "./test_cache"
-        assert config.blob.blob_backend == "filesystem"
-        assert config.blob.blob_backend_options["use_atomic_writes"] is True
+def test_validate_config_reports_mutated_storage_and_metadata_errors() -> None:
+    """Validation remains useful for configurations changed after construction."""
+
+    config = CacheConfig(metadata=CacheMetadataConfig())
+    config.storage.cache_dir = 42
+    config.metadata.memory_cache_maxsize = 0
+
+    errors = validate_config(config)
+
+    assert {error.field for error in errors} >= {
+        "storage.cache_dir",
+        "metadata.memory_cache_maxsize",
+    }
+    with pytest.raises(ValueError, match="storage.cache_dir"):
+        validate_config_strict(config)
 
 
-# =============================================================================
-# Test LifecycleLimits
-# =============================================================================
+def test_config_validation_error_has_actionable_text() -> None:
+    """Individual validation facts retain their field and rejected value."""
 
-class TestLifecycleLimits:
-    """Test caller-owned lifecycle policy and BlobStore identity handoff."""
+    error = ConfigValidationError("policy.catalog_page_size", "must be positive", 0)
 
-    def test_defaults_exports_and_blobstore_identity(self, temp_dir):
-        """One config-owned limits instance reaches the direct storage facade unchanged."""
-        limits = LifecycleLimits()
-        assert limits.max_operation_record_bytes == 131_072
-        assert limits.max_operation_field_bytes == 8_192
-        assert limits.manifest_page_size == 256
-        assert limits.operation_page_size == 32
-        assert limits.max_reconcile_actions == 32
-        assert limits.authority_busy_timeout_seconds == 5.0
-        assert limits.orphan_grace_seconds == 300.0
-        assert limits.close_wait_seconds == 30.0
-        assert cacheness.LifecycleLimits is LifecycleLimits
+    assert error.field == "policy.catalog_page_size"
+    assert "must be positive" in str(error)
+    assert "0" in repr(error)
 
-        config = CacheConfig(cache_dir=str(temp_dir / "configured"), lifecycle_limits=limits)
-        from cacheness.storage import BlobStore
-        from cacheness.storage.composition import BackendRef, StoreTopology
 
-        root = temp_dir / "configured"
-        store = BlobStore(
-            StoreTopology(
-                payload=BackendRef(name="filesystem", options={"base_dir": root}),
-                authority=BackendRef(
-                    name="sqlite",
-                    options={"root": root, "lifecycle_limits": limits},
-                ),
-            ),
-            cache_dir=root,
-            config=config,
-        )
-        try:
-            assert config.lifecycle_limits is limits
-            assert store.config is config
-            assert store.lifecycle_limits is limits
-            assert store.lifecycle.lifecycle_limits is limits
-        finally:
-            store.close()
+def test_nested_mapping_loader_rejects_retired_flat_configuration() -> None:
+    """The cutover fails explicitly instead of rebuilding removed flat options."""
 
-    def test_authority_busy_timeout_policy_accepts_explicit_shorter_override(self):
-        """The runtime busy bound is caller-owned and independent of benchmark JSON."""
-        limits = LifecycleLimits(authority_busy_timeout_seconds=0.04)
+    with pytest.raises(ValueError, match="nested ownership sections"):
+        load_config_from_dict({"cache_dir": "./retired"})
 
-        assert limits.authority_busy_timeout_seconds == 0.04
-
-    @pytest.mark.parametrize(
-        ("field", "value"),
-        (
-            ("max_operation_record_bytes", True),
-            ("max_operation_field_bytes", 0),
-            ("manifest_page_size", -1),
-            ("operation_page_size", False),
-            ("max_reconcile_actions", 0),
-            ("orphan_grace_seconds", float("nan")),
-            ("close_wait_seconds", float("inf")),
-            ("authority_busy_timeout_seconds", False),
-            ("authority_busy_timeout_seconds", 0),
-        ),
+    loaded = load_config_from_dict(
+        {
+            "storage": {"cache_dir": "./current"},
+            "policy": {"default_ttl_hours": 4.0},
+            "handlers": {"enable_object_pickle": False},
+        }
     )
-    def test_invalid_lifecycle_limit_values_are_rejected(self, field, value):
-        """Boolean, non-finite, and non-positive policy values never normalize."""
-        with pytest.raises(ValueError, match=field):
-            LifecycleLimits(**{field: value})
+
+    assert loaded.storage.cache_dir == "./current"
+    assert loaded.policy.default_ttl_hours == 4.0
+    assert loaded.handlers.enable_object_pickle is False
 
 
-# =============================================================================
-# Test Configuration Validation
-# =============================================================================
+def test_json_round_trip_preserves_nested_configuration(tmp_path) -> None:
+    """JSON persistence preserves the authored nested cache configuration."""
 
-class TestValidateConfig:
-    """Test the validate_config function."""
-    
-    def test_valid_config_no_errors(self, valid_config):
-        """Test that valid config returns no errors."""
-        errors = validate_config(valid_config)
-        assert errors == []
-    
-    def test_invalid_storage_cache_dir_type(self):
-        """Test validation of cache_dir type."""
-        config = CacheConfig()
-        config.storage.cache_dir = 123  # Invalid type
-        
-        errors = validate_config(config)
-        assert len(errors) == 1
-        assert errors[0].field == "storage.cache_dir"
-        assert "must be a string" in errors[0].message
-    
-    def test_retired_storage_size_setting_is_rejected(self):
-        """Size limits belong to CachePolicyConfig, not storage configuration."""
-
-        with pytest.raises(TypeError):
-            CacheStorageConfig(max_cache_size_mb=100)
-    
-    def test_retired_metadata_ttl_setting_is_rejected(self):
-        """TTL belongs to CachePolicyConfig, not metadata observers."""
-
-        with pytest.raises(TypeError):
-            CacheMetadataConfig(default_ttl_hours=5)
-    
-    def test_invalid_blob_backend_options_type(self):
-        """Test validation of blob_backend_options type."""
-        config = CacheConfig()
-        config.blob.blob_backend_options = "not a dict"
-        
-        errors = validate_config(config)
-        assert any(e.field == "blob.blob_backend_options" for e in errors)
-    
-    def test_invalid_compression_codec(self):
-        """Test validation of compression codec."""
-        config = CacheConfig()
-        config.compression.pickle_compression_codec = "invalid"
-        
-        errors = validate_config(config)
-        assert any(e.field == "compression.pickle_compression_codec" for e in errors)
-    
-    def test_invalid_compression_level(self):
-        """Test validation of compression level range."""
-        config = CacheConfig()
-        config.compression.pickle_compression_level = 100
-        
-        errors = validate_config(config)
-        assert any(e.field == "compression.pickle_compression_level" for e in errors)
-    
-    def test_invalid_serialization_depth(self):
-        """Test validation of max_collection_depth."""
-        config = CacheConfig()
-        config.serialization.max_collection_depth = 0
-        
-        errors = validate_config(config)
-        assert any(e.field == "serialization.max_collection_depth" for e in errors)
-    
-    def test_invalid_security_version(self):
-        """Test validation of signature_version."""
-        config = CacheConfig()
-        config.security.signature_version = 0
-        
-        errors = validate_config(config)
-        assert any(e.field == "security.signature_version" for e in errors)
-    
-    def test_invalid_signed_fields(self):
-        """Test validation of custom_signed_fields."""
-        config = CacheConfig()
-        config.security.custom_signed_fields = ["invalid_field"]
-        
-        errors = validate_config(config)
-        assert any(e.field == "security.custom_signed_fields" for e in errors)
-    
-    def test_invalid_memory_cache_type(self):
-        """Test validation of memory_cache_type."""
-        config = CacheConfig()
-        config.metadata.memory_cache_type = "invalid"
-        
-        errors = validate_config(config)
-        assert any(e.field == "metadata.memory_cache_type" for e in errors)
-    
-    def test_multiple_errors(self):
-        """Test that multiple errors are collected."""
-        config = CacheConfig()
-        config.storage.cache_dir = 123
-        config.metadata.memory_cache_type = "invalid"
-        config.compression.pickle_compression_level = 100
-        
-        errors = validate_config(config)
-        assert len(errors) >= 3
-
-
-class TestValidateConfigStrict:
-    """Test the validate_config_strict function."""
-    
-    def test_valid_config_no_exception(self, valid_config):
-        """Test that valid config doesn't raise."""
-        validate_config_strict(valid_config)  # Should not raise
-    
-    def test_invalid_config_raises_valueerror(self):
-        """Test that invalid config raises ValueError."""
-        config = CacheConfig()
-        config.storage.cache_dir = 123
-        
-        with pytest.raises(ValueError, match="Invalid configuration"):
-            validate_config_strict(config)
-    
-    def test_error_message_contains_details(self):
-        """Test that error message contains field details."""
-        config = CacheConfig()
-        config.storage.cache_dir = 123
-        
-        with pytest.raises(ValueError) as exc_info:
-            validate_config_strict(config)
-        
-        assert "storage.cache_dir" in str(exc_info.value)
-
-
-class TestConfigValidationError:
-    """Test the ConfigValidationError class."""
-    
-    def test_error_repr(self):
-        """Test error representation."""
-        error = ConfigValidationError("field.name", "must be positive", -5)
-        repr_str = repr(error)
-        
-        assert "field.name" in repr_str
-        assert "must be positive" in repr_str
-        assert "-5" in repr_str
-    
-    def test_error_str(self):
-        """Test error string representation."""
-        error = ConfigValidationError("field.name", "must be positive", -5)
-        str_repr = str(error)
-        
-        assert "field.name" in str_repr
-        assert "must be positive" in str_repr
-    
-    def test_error_without_value(self):
-        """Test error without value."""
-        error = ConfigValidationError("field.name", "is required")
-        
-        assert error.value is None
-        assert "is required" in str(error)
-
-
-# =============================================================================
-# Test Configuration Loading
-# =============================================================================
-
-class TestLoadConfigFromDict:
-    """Test the load_config_from_dict function."""
-    
-    def test_flat_format(self):
-        """Test loading flat dictionary format."""
-        data = {
-            "cache_dir": "./cache",  # Use "./cache" which is preserved as-is
-            "blob_backend": "memory"
-        }
-        
-        config = load_config_from_dict(data)
-        
-        assert config.storage.cache_dir == "./cache"
-        assert config.blob.blob_backend == "memory"
-    
-    def test_nested_format(self):
-        """Test loading nested dictionary format."""
-        data = {
-            "storage": {"cache_dir": "./cache"},  # Use "./cache" which is preserved as-is
-            "blob": {"blob_backend": "memory"}
-        }
-        
-        config = load_config_from_dict(data)
-        
-        # Note: CacheStorageConfig converts non-./cache relative paths to absolute
-        assert config.storage.cache_dir == "./cache"
-        assert config.blob.blob_backend == "memory"
-    
-    def test_nested_blob_options(self):
-        """Test nested storage options remain serializable."""
-        data = {
-            "blob": {
-                "blob_backend": "filesystem",
-                "blob_backend_options": {"use_atomic_writes": True},
-            }
-        }
-        
-        config = load_config_from_dict(data)
-        
-        assert config.blob.blob_backend == "filesystem"
-        assert config.blob.blob_backend_options["use_atomic_writes"] is True
-    
-    def test_partial_nested_format(self):
-        """Test partial nested format with defaults."""
-        data = {
-            "storage": {"cache_dir": "./cache"}  # Use "./cache" which is preserved as-is
-        }
-        
-        config = load_config_from_dict(data)
-        
-        assert config.storage.cache_dir == "./cache"
-        # Other configs should have defaults
-        assert config.blob.blob_backend == "filesystem"
-
-
-class TestLoadConfigFromJson:
-    """Test the load_config_from_json function."""
-    
-    def test_load_flat_json(self, temp_dir):
-        """Test loading flat JSON config."""
-        config_file = temp_dir / "config.json"
-        config_file.write_text(json.dumps({
-            "cache_dir": "./cache"  # Use "./cache" which is preserved as-is
-        }))
-        
-        config = load_config_from_json(config_file)
-        
-        assert config.storage.cache_dir == "./cache"
-    
-    def test_load_nested_json(self, temp_dir):
-        """Test loading nested JSON config."""
-        config_file = temp_dir / "config.json"
-        config_file.write_text(json.dumps({
-            "storage": {"cache_dir": "./cache"},  # Use "./cache" which is preserved as-is
-            "blob": {"blob_backend": "memory"}
-        }))
-        
-        config = load_config_from_json(config_file)
-        
-        assert config.storage.cache_dir == "./cache"
-        assert config.blob.blob_backend == "memory"
-    
-    def test_file_not_found(self, temp_dir):
-        """Test loading nonexistent file."""
-        with pytest.raises(FileNotFoundError):
-            load_config_from_json(temp_dir / "nonexistent.json")
-
-
-class TestSaveConfigToJson:
-    """Test the save_config_to_json function."""
-
-    @pytest.mark.parametrize(
-        "cache_dir",
-        ["./cache", "./yaml_cache", "relative/cache", "../parent-cache"],
+    path = tmp_path / "config.json"
+    config = CacheConfig(
+        storage=CacheStorageConfig(cache_dir="relative-cache"),
+        policy=CachePolicyConfig(default_ttl_hours=None),
+        handlers=HandlerConfig(enable_numpy_arrays=False),
     )
-    def test_authored_relative_cache_dir_round_trips_exactly(self, temp_dir, cache_dir):
-        """Serialized configuration retains the caller's original path string."""
-        original = CacheConfig(cache_dir=cache_dir)
-        config_file = temp_dir / "relative-path.json"
 
-        save_config_to_json(original, config_file)
-        loaded = load_config_from_json(config_file)
+    save_config_to_json(config, path)
+    loaded = load_config_from_json(path)
 
-        with config_file.open(encoding="utf-8") as config_handle:
-            serialized = json.load(config_handle)
-
-        assert original.storage.cache_dir == cache_dir
-        assert serialized["storage"]["cache_dir"] == cache_dir
-        assert loaded.storage.cache_dir == cache_dir
-    
-    def test_save_and_reload(self, temp_dir):
-        """Test saving and reloading config."""
-        original = CacheConfig(
-            cache_dir="./cache",  # Use "./cache" which is preserved as-is
-            blob_backend="memory"
-        )
-        
-        config_file = temp_dir / "saved_config.json"
-        save_config_to_json(original, config_file)
-        
-        loaded = load_config_from_json(config_file)
-        
-        # Both should have the same cache_dir
-        assert loaded.storage.cache_dir == original.storage.cache_dir
-        assert loaded.blob.blob_backend == original.blob.blob_backend
-    
-    def test_json_is_valid(self, temp_dir):
-        """Test that saved JSON is valid."""
-        config = CacheConfig()
-        config_file = temp_dir / "config.json"
-        
-        save_config_to_json(config, config_file)
-        
-        # Should parse without error
-        with config_file.open() as f:
-            data = json.load(f)
-        
-        assert "storage" in data
-        assert "metadata" in data
-        assert "blob" in data
-
-
-# =============================================================================
-# Test Module-Level API
-# =============================================================================
-
-class TestModuleLevelConfigAPI:
-    """Test module-level configuration API exports."""
-    
-    def test_config_classes_exported(self):
-        """Test that config classes are exported."""
-        assert hasattr(cacheness, "CacheConfig")
-        assert hasattr(cacheness, "CacheBlobConfig")
-        assert hasattr(cacheness, "CacheStorageConfig")
-        assert hasattr(cacheness, "CompressionConfig")
-        assert hasattr(cacheness, "SerializationConfig")
-        assert hasattr(cacheness, "HandlerConfig")
-        assert hasattr(cacheness, "SecurityConfig")
-    
-    def test_validation_functions_exported(self):
-        """Test that validation functions are exported."""
-        assert hasattr(cacheness, "ConfigValidationError")
-        assert hasattr(cacheness, "validate_config")
-        assert hasattr(cacheness, "validate_config_strict")
-    
-    def test_loading_functions_exported(self):
-        """Test that loading functions are exported."""
-        assert hasattr(cacheness, "load_config_from_dict")
-        assert hasattr(cacheness, "load_config_from_json")
-        assert hasattr(cacheness, "save_config_to_json")
-        assert hasattr(cacheness, "create_cache_config")
-    
-    def test_module_level_validation_works(self, valid_config):
-        """Test module-level validate_config works."""
-        errors = cacheness.validate_config(valid_config)
-        assert errors == []
-    
-    def test_module_level_loading_works(self):
-        """Test module-level load_config_from_dict works."""
-        config = cacheness.load_config_from_dict({"cache_dir": "./test"})
-        assert config.storage.cache_dir == "./test"
-
-
-# =============================================================================
-# Test create_cache_config Factory
-# =============================================================================
-
-class TestCreateCacheConfig:
-    """Test the create_cache_config factory function."""
-    
-    def test_basic_creation(self):
-        """Test basic config creation."""
-        config = create_cache_config()
-        assert isinstance(config, CacheConfig)
-    
-    def test_with_cache_dir(self):
-        """Test creation with cache_dir."""
-        config = create_cache_config(cache_dir="./factory_cache")
-        assert config.storage.cache_dir == "./factory_cache"
-    
-    def test_performance_mode(self):
-        """Test performance mode."""
-        config = create_cache_config(performance_mode=True)
-        assert config.compression.pickle_compression_codec == "lz4"
-        assert config.compression.pickle_compression_level == 1
-    
-    def test_size_mode(self):
-        """Test size optimization mode."""
-        config = create_cache_config(size_mode=True)
-        assert config.compression.pickle_compression_codec == "zstd"
-        assert config.compression.pickle_compression_level == 9
-    
-    def test_cannot_combine_modes(self):
-        """Test that performance_mode and size_mode cannot be combined."""
-        with pytest.raises(ValueError, match="Cannot enable both"):
-            create_cache_config(performance_mode=True, size_mode=True)
-    
-    def test_with_overrides(self):
-        """Test creation with overrides."""
-        config = create_cache_config(
-            cache_dir="./override_cache",
-            blob_backend="memory"
-        )
-        assert config.storage.cache_dir == "./override_cache"
-        assert config.blob.blob_backend == "memory"
-
-
-# =============================================================================
-# Integration Tests
-# =============================================================================
-
-class TestConfigIntegration:
-    """Integration tests for configuration system."""
-    
-    def test_full_workflow(self, temp_dir):
-        """Test complete workflow: create, validate, save, load."""
-        # Create config
-        config = CacheConfig(
-            cache_dir=str(temp_dir / "cache"),
-            blob_backend="filesystem",
-            blob_backend_options={"use_atomic_writes": True}
-        )
-        
-        # Validate
-        errors = validate_config(config)
-        assert errors == []
-        
-        # Save
-        config_file = temp_dir / "config.json"
-        save_config_to_json(config, config_file)
-        
-        # Load
-        loaded = load_config_from_json(config_file)
-        
-        # Verify
-        assert loaded.storage.cache_dir == str(temp_dir / "cache")
-        assert loaded.blob.blob_backend == "filesystem"
-    
-    def test_invalid_config_caught_by_validation(self):
-        """Test that invalid config is caught by validation."""
-        config = CacheConfig()
-        
-        # Make it invalid
-        config.compression.pickle_compression_level = 999
-        config.metadata.memory_cache_maxsize = -1
-        
-        errors = validate_config(config)
-        assert len(errors) >= 2
-        
-        # strict validation should raise
-        with pytest.raises(ValueError):
-            validate_config_strict(config)
-
-
-# =============================================================================
-# YAML Tests (optional)
-# =============================================================================
-
-class TestYamlConfig:
-    """Test YAML configuration loading (requires PyYAML)."""
-    
-    @pytest.fixture
-    def yaml_available(self):
-        """Check if PyYAML is available."""
-        try:
-            import yaml
-            return yaml is not None
-        except ImportError:
-            pytest.skip("PyYAML not installed")
-    
-    def test_load_yaml_config(self, temp_dir, yaml_available):
-        """Test loading YAML config."""
-        from cacheness.config import load_config_from_yaml
-        
-        config_file = temp_dir / "config.yaml"
-        config_file.write_text("""
-storage:
-  cache_dir: ./yaml_cache
-blob:
-  blob_backend: memory
-""")
-        
-        config = load_config_from_yaml(config_file)
-        
-        assert config.storage.cache_dir == "./yaml_cache"
-        assert config.blob.blob_backend == "memory"
-    
-    def test_save_yaml_config(self, temp_dir, yaml_available):
-        """Test saving YAML config."""
-        from cacheness.config import save_config_to_yaml, load_config_from_yaml
-        
-        original = CacheConfig(
-            cache_dir="./saved_yaml",
-            blob_backend="filesystem"
-        )
-        
-        config_file = temp_dir / "config.yaml"
-        save_config_to_yaml(original, config_file)
-        
-        loaded = load_config_from_yaml(config_file)
-        
-        assert loaded.storage.cache_dir == original.storage.cache_dir
-
-    @pytest.mark.parametrize(
-        "cache_dir", ["./yaml_cache", "relative/yaml_cache", "../yaml-parent"]
+    assert json.loads(path.read_text(encoding="utf-8"))["storage"]["cache_dir"] == (
+        "relative-cache"
     )
-    def test_authored_relative_cache_dir_yaml_round_trips_exactly(
-        self, temp_dir, yaml_available, cache_dir
-    ):
-        """YAML round trips preserve the authored storage string without resolution."""
-        from cacheness.config import load_config_from_yaml, save_config_to_yaml
-
-        original = CacheConfig(cache_dir=cache_dir)
-        config_file = temp_dir / "relative-path.yaml"
-
-        save_config_to_yaml(original, config_file)
-        loaded = load_config_from_yaml(config_file)
-
-        assert original.storage.cache_dir == cache_dir
-        assert loaded.storage.cache_dir == cache_dir
+    assert loaded.storage.cache_dir == "relative-cache"
+    assert loaded.policy.default_ttl_hours is None
+    assert loaded.handlers.enable_numpy_arrays is False
