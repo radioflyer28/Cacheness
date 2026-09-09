@@ -55,10 +55,10 @@ def _record_outcome_schedule(cache, monkeypatch, outcomes):
         if outcome is CacheOutcome.ABSENT:
             assert cache.lookup(cache_key="absent-key").outcome is outcome
         elif outcome is CacheOutcome.HIT:
-            key = cache.put("present", request_id="hit")
+            key = cache.put("present", request_id="hit").receipt.key
             assert cache.lookup(cache_key=key).outcome is outcome
         elif outcome is CacheOutcome.EXPIRED:
-            key = cache.put("expired", request_id="expired")
+            key = cache.put("expired", request_id="expired").receipt.key
             with monkeypatch.context() as patch:
                 patch.setattr(cache, "_is_expired", lambda *_args, **_kwargs: True)
                 assert cache.lookup(cache_key=key).outcome is outcome

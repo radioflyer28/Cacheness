@@ -40,7 +40,7 @@ def test_expired_lookup_reports_the_exact_lifecycle_removal(tmp_path) -> None:
 
     cache = _cache(tmp_path)
     try:
-        key = cache.put({"generation": "expired"}, request_id="expired")
+        key = cache.put({"generation": "expired"}, request_id="expired").receipt.key
 
         result = cache.lookup(cache_key=key, ttl_hours=-1)
 
@@ -63,7 +63,7 @@ def test_expired_lookup_preserves_a_replacement_and_reports_conflict(
 
     cache = _cache(tmp_path)
     try:
-        key = cache.put({"generation": "old"}, request_id="replacement")
+        key = cache.put({"generation": "old"}, request_id="replacement").receipt.key
         replaced = False
 
         def replace_before_delete_promotion(boundary: str) -> None:
@@ -100,7 +100,7 @@ def test_malformed_expiry_facts_fail_closed_without_deletion(
 
     cache = _cache(tmp_path)
     try:
-        key = cache.put({"generation": "protected"}, request_id="malformed")
+        key = cache.put({"generation": "protected"}, request_id="malformed").receipt.key
         original_open = cache.store.open_entry
         delete_calls = 0
 
@@ -135,7 +135,7 @@ def test_single_key_invalidation_returns_a_truthful_report(tmp_path) -> None:
 
     cache = _cache(tmp_path)
     try:
-        key = cache.put({"generation": "one"}, request_id="one")
+        key = cache.put({"generation": "one"}, request_id="one").receipt.key
 
         report = cache.invalidate(cache_key=key)
 
@@ -152,7 +152,9 @@ def test_single_key_invalidation_preserves_backend_failure_details(
 
     cache = _cache(tmp_path)
     try:
-        key = cache.put({"generation": "unavailable"}, request_id="unavailable")
+        key = cache.put(
+            {"generation": "unavailable"}, request_id="unavailable"
+        ).receipt.key
         failure = CacheBlobBackendError("authority unavailable")
         monkeypatch.setattr(
             cache.store,

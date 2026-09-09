@@ -28,6 +28,7 @@ from .cache_policy import (
     CacheMaintenanceResult,
     CacheMaintenanceState,
     CacheOutcome,
+    CachePutResult,
     CacheRemovalReport,
     CacheStatistics,
     _CacheOutcomeRecorder,
@@ -754,11 +755,12 @@ class UnifiedCache:
     @_clear_coordinated
     def put(
         self, data: Any, prefix: str = "", description: str = "", **kwargs: Any
-    ) -> str:
-        """Store data and return its cache-policy key.
+    ) -> CachePutResult:
+        """Commit one value and return receipt plus one bounded policy outcome.
 
-        BlobStore commits the payload and catalog. A subsequent eviction error
-        is policy debt and cannot revoke that committed generation.
+        BlobStore commits the payload and catalog before policy maintenance
+        begins.  The one returned policy step may be incomplete or retryable,
+        but it cannot revoke, relabel, or roll back the committed generation.
         """
 
         cache_key = self._create_cache_key(kwargs)
@@ -766,7 +768,7 @@ class UnifiedCache:
         if self.config.metadata.store_cache_key_params:
             metadata["cache_key_params"] = self._canonical_cache_key_params(kwargs)
         self._cache_blob_store.handlers = self.handlers
-        self._cache_blob_store.put_entry(
+        receipt = self._cache_blob_store.put_entry(
             data,
             key=cache_key,
             metadata=metadata,
@@ -776,7 +778,8 @@ class UnifiedCache:
                 "cache_prefix": prefix,
             },
         )
-        return cache_key
+        maintenance = self.maintain_size()
+        return CachePutResult(receipt=receipt, maintenance=maintenance)
 
     def _record_outcome(self, outcome: CacheOutcome) -> None:
         """Best-effort record an already-final lookup outcome.

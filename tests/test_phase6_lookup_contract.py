@@ -32,7 +32,7 @@ def test_explicit_memory_composition_returns_hit_for_cached_none(tmp_path):
 
     cache = UnifiedCache(CacheConfig(cache_dir=tmp_path), store=_memory_topology())
     cache.initialize()
-    cache_key = cache.put(None, request_id="cached-none")
+    cache_key = cache.put(None, request_id="cached-none").receipt.key
 
     result = cache.lookup(cache_key=cache_key)
 
@@ -51,7 +51,7 @@ def test_lookup_observes_blob_store_once_for_absent_and_present_none(
     cache.initialize()
     cache_key = "missing-key"
     if stored:
-        cache_key = cache.put(None, request_id="present-none")
+        cache_key = cache.put(None, request_id="present-none").receipt.key
 
     calls = 0
     original_open_entry = cache.store.open_entry

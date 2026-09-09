@@ -16,6 +16,7 @@ from .error_handling import (
     CacheBlobRecoverableCleanupError,
     CacheBlobStoreClosedError,
 )
+from .storage.read_contract import BlobReceipt
 
 
 class CacheOutcome(str, Enum):
@@ -186,6 +187,30 @@ class CacheMaintenanceResult:
             raise ValueError("maintenance continuation must be native state")
         if self.cause is not None and not isinstance(self.cause, BaseException):
             raise ValueError("maintenance restart cause must be an exception")
+
+
+@dataclass(frozen=True, slots=True)
+class CachePutResult:
+    """One committed BlobStore receipt plus one bounded policy outcome.
+
+    The receipt remains the canonical result of the storage lifecycle.  The
+    maintenance report is separate derived policy truth, so a pending or
+    retryable follow-up can never relabel a generation that BlobStore already
+    committed.
+    """
+
+    receipt: BlobReceipt
+    maintenance: CacheMaintenanceResult
+
+    def __post_init__(self) -> None:
+        """Require the native immutable facts that make up a put result."""
+
+        if not isinstance(self.receipt, BlobReceipt):
+            raise ValueError("cache put results require a native BlobReceipt")
+        if not isinstance(self.maintenance, CacheMaintenanceResult):
+            raise ValueError(
+                "cache put results require a native CacheMaintenanceResult"
+            )
 
 
 @dataclass(frozen=True)
