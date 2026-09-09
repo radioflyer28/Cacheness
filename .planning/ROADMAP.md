@@ -363,7 +363,7 @@ Plans:
   5. Statistics use one documented aggregate/result model that separately identifies absent, expired, corrupt, conflict, and backend-error outcomes; legacy counter shapes are not a compatibility requirement.
   6. Preserve optional-export warnings and typed committed-partial errors for explicitly requested external metadata, including post-engine cache close. Canonical corruption is non-destructive; strict direct projection observations still reject malformed evidence. Cached-None policy uses explicit entry presence rather than recreating storage reads.
 
-**Plans**: 10/11 plans executed
+**Plans**: 11/11 plans executed
 
 - [x] 06-01-PLAN.md
 - [x] 06-02-PLAN.md
@@ -375,7 +375,7 @@ Plans:
 - [x] 06-08-PLAN.md
 - [x] 06-09-PLAN.md — Migrate retained format, containment, signing, array-security, and public-contract tests to canonical cache construction/results.
 - [x] 06-10-PLAN.md — Move retired metadata-query and key-parameter tests to bounded BlobStore catalog contracts.
-- [ ] 06-11-PLAN.md — Isolate the complete non-live local suite and extend the fixed Phase 6 verifier/evidence ledger.
+- [x] 06-11-PLAN.md — Isolate the complete non-live local suite and extend the fixed Phase 6 verifier/evidence ledger.
 
 **Wave 1**
 
@@ -412,7 +412,7 @@ Plans:
 **Wave 9** *(gap closure; blocked on Wave 8 completion)*
 
 - [x] 06-09: Canonical format/security/public test migration
-- [ ] 06-10: Canonical catalog/query test migration
+- [x] 06-10: Canonical catalog/query test migration
 
 **Wave 10** *(blocked on both Wave 9 plans)*
 
@@ -458,7 +458,7 @@ Plans:
 | 3. Atomic Lifecycle and Recovery Engine | 24/24 | Complete — direct qualification | 2026-09-06 |
 | 4. Metadata Composition and Topology Contracts | 14/14 | Complete    | 2026-09-08 |
 | 5. Payload Backends and Supported Topology Qualification | 9/9 | Complete    | 2026-09-08 |
-| 6. UnifiedCache Policy Composition | 10/11 | In Progress|  |
+| 6. UnifiedCache Policy Composition | 11/11 | In Progress|  |
 | 7. Explicit Migration and Rebuild Cutover | 0/TBD | Not started | - |
 | 8. Production Gates and Performance Stabilization | 0/TBD | Not started | - |
 
