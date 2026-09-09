@@ -107,21 +107,36 @@ def test_runner_propagates_any_pytest_failure_status(
     assert runner.run_local_suite(REPOSITORY_ROOT) == returncode
 
 
-@pytest.mark.parametrize(
-    "nodes",
+ORDER_ISOLATION_NODE_ORDERS = (
     (
-        (
-            "tests/test_public_api_contract.py",
-            "tests/test_phase6_public_api_contract.py",
-            "tests/test_sql_cache.py",
-        ),
-        (
-            "tests/test_phase6_public_api_contract.py",
-            "tests/test_sql_cache.py",
-            "tests/test_public_api_contract.py",
-        ),
+        "tests/test_public_api_contract.py",
+        "tests/test_phase6_public_api_contract.py",
+        "tests/test_sql_cache.py",
+    ),
+    (
+        "tests/test_sql_cache.py",
+        "tests/test_phase6_public_api_contract.py",
+        "tests/test_public_api_contract.py",
     ),
 )
+
+
+def test_canonical_public_and_sqlcache_pairs_run_in_both_orders() -> None:
+    """Every public/SqlCache pair is exercised in each relative order."""
+
+    for first, second in (
+        ("tests/test_public_api_contract.py", "tests/test_phase6_public_api_contract.py"),
+        ("tests/test_public_api_contract.py", "tests/test_sql_cache.py"),
+        ("tests/test_phase6_public_api_contract.py", "tests/test_sql_cache.py"),
+    ):
+        relative_orders = {
+            nodes.index(first) < nodes.index(second)
+            for nodes in ORDER_ISOLATION_NODE_ORDERS
+        }
+        assert relative_orders == {False, True}
+
+
+@pytest.mark.parametrize("nodes", ORDER_ISOLATION_NODE_ORDERS)
 def test_canonical_public_and_sqlcache_nodes_are_order_isolated(
     nodes: tuple[str, ...],
 ) -> None:
