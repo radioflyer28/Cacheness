@@ -19,6 +19,97 @@ _EVIDENCE_VERSION = 1
 _EVIDENCE_DOMAIN = b"cacheness-maintenance-evidence-v1\x00"
 _MAX_EVIDENCE_BYTES = 65_536
 _MAX_TEXT_BYTES = 512
+_MAX_CANONICAL_DEPTH = 16
+_MAX_CANONICAL_NODES = 16_384
+_MAX_CANONICAL_ITEMS = 4_096
+
+
+def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    """Reject duplicate JSON object keys before a plan can reinterpret them."""
+    record: dict[str, object] = {}
+    for key, value in pairs:
+        if key in record:
+            raise ValueError("canonical JSON cannot contain duplicate keys")
+        record[key] = value
+    return record
+
+
+def _parse_canonical_int(raw: str) -> int:
+    """Accept only the spelling emitted by the canonical JSON encoder."""
+    value = int(raw)
+    if str(value) != raw:
+        raise ValueError("canonical JSON integer is non-canonical")
+    return value
+
+
+def _reject_float(raw: str) -> object:
+    raise ValueError(f"canonical JSON does not permit floating-point values: {raw}")
+
+
+def _reject_constant(raw: str) -> object:
+    raise ValueError(f"canonical JSON does not permit constants: {raw}")
+
+
+def _validate_canonical_value(
+    value: object, *, depth: int, nodes: list[int], max_text_bytes: int
+) -> None:
+    """Apply allocation bounds before callers construct semantic plan values."""
+    nodes[0] += 1
+    if nodes[0] > _MAX_CANONICAL_NODES or depth > _MAX_CANONICAL_DEPTH:
+        raise ValueError("canonical JSON exceeds structural bounds")
+    if value is None or isinstance(value, (bool, int)):
+        return
+    if isinstance(value, str):
+        if len(value.encode("utf-8")) > max_text_bytes:
+            raise ValueError("canonical JSON string exceeds the byte bound")
+        return
+    if isinstance(value, list):
+        if len(value) > _MAX_CANONICAL_ITEMS:
+            raise ValueError("canonical JSON collection exceeds the item bound")
+        for item in value:
+            _validate_canonical_value(
+                item, depth=depth + 1, nodes=nodes, max_text_bytes=max_text_bytes
+            )
+        return
+    if isinstance(value, dict):
+        if len(value) > _MAX_CANONICAL_ITEMS:
+            raise ValueError("canonical JSON collection exceeds the item bound")
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise ValueError("canonical JSON object key is invalid")
+            _validate_canonical_value(
+                key, depth=depth + 1, nodes=nodes, max_text_bytes=max_text_bytes
+            )
+            _validate_canonical_value(
+                item, depth=depth + 1, nodes=nodes, max_text_bytes=max_text_bytes
+            )
+        return
+    raise ValueError("canonical JSON value is invalid")
+
+
+def decode_bounded_canonical_json(
+    raw: bytes, *, max_bytes: int, max_text_bytes: int = _MAX_TEXT_BYTES
+) -> dict[str, object]:
+    """Decode a bounded canonical JSON object without duplicate-key ambiguity."""
+    if not isinstance(raw, bytes) or not raw or len(raw) > max_bytes:
+        raise ValueError("canonical JSON bytes are invalid")
+    try:
+        decoded = raw.decode("utf-8")
+        record = json.loads(
+            decoded,
+            object_pairs_hook=_reject_duplicate_keys,
+            parse_int=_parse_canonical_int,
+            parse_float=_reject_float,
+            parse_constant=_reject_constant,
+        )
+    except (UnicodeDecodeError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError("canonical JSON is invalid") from exc
+    if not isinstance(record, dict):
+        raise ValueError("canonical JSON must contain one object")
+    _validate_canonical_value(
+        record, depth=1, nodes=[0], max_text_bytes=max_text_bytes
+    )
+    return record
 
 
 class MaintenanceEvidenceState(str, Enum):
@@ -238,10 +329,10 @@ def decode_maintenance_evidence(raw: bytes, signing_key: bytes) -> MaintenanceRu
     if type(signing_key) is not bytes or len(signing_key) != 32:
         raise ValueError("maintenance evidence requires a 32-byte signing key")
     try:
-        envelope = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        envelope = decode_bounded_canonical_json(raw, max_bytes=_MAX_EVIDENCE_BYTES)
+    except ValueError as exc:
         raise ValueError("maintenance evidence is not canonical JSON") from exc
-    if not isinstance(envelope, dict) or set(envelope) != {"evidence", "signature"}:
+    if set(envelope) != {"evidence", "signature"}:
         raise ValueError("maintenance evidence envelope is invalid")
     evidence = envelope["evidence"]
     signature = envelope["signature"]
@@ -258,6 +349,7 @@ def decode_maintenance_evidence(raw: bytes, signing_key: bytes) -> MaintenanceRu
 __all__ = [
     "MaintenanceEvidenceState",
     "MaintenanceRunEvidence",
+    "decode_bounded_canonical_json",
     "decode_maintenance_evidence",
     "encode_maintenance_evidence",
 ]

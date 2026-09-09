@@ -8,8 +8,9 @@ selected migration authority performs the sole whole-store visibility change.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from enum import Enum
+import base64
 import hashlib
 import hmac
 import json
@@ -18,7 +19,21 @@ import re
 from types import MappingProxyType
 from typing import Iterable, Mapping
 
-from .manifest import BlobManifest, StoreVersionDimensions, sign_current_manifest, verify_current_manifest
+from cacheness.error_handling import (
+    CacheManifestIntegrityError,
+    CacheManifestUnsupportedVersionError,
+    CacheMigrationOrRebuildRequiredError,
+)
+
+from .catalog import STORE_FORMAT_VERSION
+from .manifest import (
+    CURRENT_MANIFEST_SCHEMA_VERSION,
+    CURRENT_STORE_EPOCH,
+    BlobManifest,
+    StoreVersionDimensions,
+    sign_current_manifest,
+    verify_current_manifest,
+)
 from .migration_authority import (
     AuthorityIdentitySnapshot,
     AuthorityInventoryEntry,
@@ -29,6 +44,7 @@ from .migration_authority import (
 from .migration_evidence import (
     MaintenanceEvidenceState,
     MaintenanceRunEvidence,
+    decode_bounded_canonical_json,
     decode_maintenance_evidence,
     encode_maintenance_evidence,
 )
@@ -36,6 +52,11 @@ from .migration_evidence import (
 
 _RUN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
 _MAX_COMPATIBILITY_TEXT_BYTES = 256
+_MAX_PLAN_BYTES = 1_048_576
+_MAX_PLAN_TEXT_BYTES = 262_144
+_MAX_PLAN_DEPTH = 16
+_MAX_PLAN_NODES = 16_384
+_MAX_PLAN_COLLECTION_ITEMS = 4_096
 
 
 class CompatibilityDimension(str, Enum):
@@ -76,6 +97,33 @@ def _compatibility_value(value: object, field_name: str, *, size: int) -> tuple[
         _compatibility_text(item, f"{field_name}[{index}]")
         for index, item in enumerate(value)
     )
+
+
+def _freeze_plan_json(value: object, *, depth: int = 1, nodes: list[int] | None = None) -> object:
+    """Freeze bounded JSON-compatible assessment metadata before it reaches a plan."""
+    nodes = [0] if nodes is None else nodes
+    nodes[0] += 1
+    if nodes[0] > _MAX_PLAN_NODES or depth > _MAX_PLAN_DEPTH:
+        raise ValueError("migration plan metadata exceeds structural bounds")
+    if value is None or isinstance(value, (bool, int)):
+        return value
+    if isinstance(value, str):
+        if len(value.encode("utf-8")) > _MAX_PLAN_TEXT_BYTES:
+            raise ValueError("migration plan metadata string exceeds the byte bound")
+        return value
+    if isinstance(value, (list, tuple)):
+        if len(value) > _MAX_PLAN_COLLECTION_ITEMS:
+            raise ValueError("migration plan metadata collection exceeds the item bound")
+        return tuple(_freeze_plan_json(item, depth=depth + 1, nodes=nodes) for item in value)
+    if isinstance(value, Mapping):
+        if len(value) > _MAX_PLAN_COLLECTION_ITEMS:
+            raise ValueError("migration plan metadata collection exceeds the item bound")
+        frozen: dict[str, object] = {}
+        for key, item in value.items():
+            key = _compatibility_text(key, "migration plan metadata key")
+            frozen[key] = _freeze_plan_json(item, depth=depth + 1, nodes=nodes)
+        return MappingProxyType(frozen)
+    raise ValueError("migration plan metadata must be JSON-compatible")
 
 
 @dataclass(frozen=True)
@@ -380,6 +428,21 @@ class MigrationEntryAssessment:
     entry: AuthorityInventoryEntry
     disposition: MigrationDisposition
     reason: MigrationReason
+    catalog_values: Mapping[str, object] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.entry, AuthorityInventoryEntry):
+            raise TypeError("entry must be an AuthorityInventoryEntry")
+        if not isinstance(self.disposition, MigrationDisposition):
+            raise TypeError("disposition must be a MigrationDisposition")
+        if not isinstance(self.reason, MigrationReason):
+            raise TypeError("reason must be a MigrationReason")
+        if not isinstance(self.catalog_values, Mapping):
+            raise TypeError("catalog_values must be a mapping")
+        frozen_values = _freeze_plan_json(self.catalog_values)
+        if not isinstance(frozen_values, Mapping):
+            raise TypeError("catalog_values must remain a mapping")
+        object.__setattr__(self, "catalog_values", frozen_values)
 
 
 @dataclass(frozen=True)
@@ -391,15 +454,711 @@ class MigrationInspection:
     assessments: tuple[MigrationEntryAssessment, ...]
 
 
+class MigrationPlanKind(str, Enum):
+    """The offline workflow selected by one complete, non-mutating inspection."""
+
+    MIGRATION = "migration"
+    REBUILD = "rebuild"
+    REFUSED = "refused"
+
+
+class MigrationPlanState(str, Enum):
+    """The operator-visible state represented by a plan, never by report text."""
+
+    PLANNED = "planned"
+    REFUSED = "refused"
+
+
+@dataclass(frozen=True)
+class MigrationTotals:
+    """Exact count and byte aggregates for every assessment disposition."""
+
+    counts: Mapping[MigrationDisposition, int]
+    bytes_by_disposition: Mapping[MigrationDisposition, int]
+    total_entries: int
+    total_bytes: int
+
+    def __post_init__(self) -> None:
+        expected = set(MigrationDisposition)
+        if set(self.counts) != expected or set(self.bytes_by_disposition) != expected:
+            raise ValueError("migration totals must include every disposition")
+        if any(type(value) is not int or value < 0 for value in self.counts.values()):
+            raise ValueError("migration counts must be non-negative integers")
+        if any(
+            type(value) is not int or value < 0 for value in self.bytes_by_disposition.values()
+        ):
+            raise ValueError("migration byte totals must be non-negative integers")
+        if type(self.total_entries) is not int or type(self.total_bytes) is not int:
+            raise ValueError("migration aggregate totals must be integers")
+        if self.total_entries != sum(self.counts.values()):
+            raise ValueError("migration total_entries disagrees with dispositions")
+        if self.total_bytes != sum(self.bytes_by_disposition.values()):
+            raise ValueError("migration total_bytes disagrees with dispositions")
+        object.__setattr__(self, "counts", MappingProxyType(dict(self.counts)))
+        object.__setattr__(
+            self, "bytes_by_disposition", MappingProxyType(dict(self.bytes_by_disposition))
+        )
+
+    @classmethod
+    def from_entries(cls, entries: tuple[MigrationEntryAssessment, ...]) -> "MigrationTotals":
+        """Aggregate entry-complete classifications without opening payload bytes."""
+        counts = {disposition: 0 for disposition in MigrationDisposition}
+        byte_counts = {disposition: 0 for disposition in MigrationDisposition}
+        for assessment in entries:
+            counts[assessment.disposition] += 1
+            byte_counts[assessment.disposition] += assessment.entry.byte_size
+        return cls(
+            counts=counts,
+            bytes_by_disposition=byte_counts,
+            total_entries=len(entries),
+            total_bytes=sum(assessment.entry.byte_size for assessment in entries),
+        )
+
+
+def _all_supported_compatibility() -> CompatibilityResult:
+    """Represent the current-to-current baseline without declaring a version edge."""
+    outcomes = {dimension: CompatibilityOutcome.SUPPORTED for dimension in CompatibilityDimension}
+    reasons = {dimension: MigrationReason.COMPATIBLE_EDGE for dimension in CompatibilityDimension}
+    return CompatibilityResult(
+        outcome=CompatibilityOutcome.SUPPORTED,
+        dimension_outcomes=outcomes,
+        reasons=reasons,
+    )
+
+
+def _identity_record(identity: AuthorityIdentitySnapshot) -> dict[str, object]:
+    """Render only an authority fingerprint, never a path, DSN, or signing key."""
+    return {
+        "authority_kind": identity.authority_kind,
+        "revision": identity.revision,
+        "store_id": identity.store_id,
+    }
+
+
+def _identity_from_record(record: object, field_name: str) -> AuthorityIdentitySnapshot:
+    if not isinstance(record, dict) or set(record) != {"authority_kind", "revision", "store_id"}:
+        raise ValueError(f"{field_name} is invalid")
+    return AuthorityIdentitySnapshot(
+        store_id=record["store_id"],
+        revision=record["revision"],
+        authority_kind=record["authority_kind"],
+    )
+
+
+def _compatibility_record(compatibility: CompatibilityResult) -> dict[str, object]:
+    return {
+        "dimension_outcomes": {
+            dimension.value: compatibility.dimension_outcomes[dimension].value
+            for dimension in CompatibilityDimension
+        },
+        "outcome": compatibility.outcome.value,
+        "reasons": {
+            dimension.value: compatibility.reasons[dimension].value
+            for dimension in CompatibilityDimension
+        },
+        "release_window_reason": (
+            None
+            if compatibility.release_window_reason is None
+            else compatibility.release_window_reason.value
+        ),
+    }
+
+
+def _compatibility_from_record(record: object) -> CompatibilityResult:
+    required = {"dimension_outcomes", "outcome", "reasons", "release_window_reason"}
+    if not isinstance(record, dict) or set(record) != required:
+        raise ValueError("compatibility is invalid")
+    try:
+        outcomes = {
+            dimension: CompatibilityOutcome(record["dimension_outcomes"][dimension.value])
+            for dimension in CompatibilityDimension
+        }
+        reasons = {
+            dimension: MigrationReason(record["reasons"][dimension.value])
+            for dimension in CompatibilityDimension
+        }
+        release_reason = record["release_window_reason"]
+        return CompatibilityResult(
+            outcome=CompatibilityOutcome(record["outcome"]),
+            dimension_outcomes=outcomes,
+            reasons=reasons,
+            release_window_reason=(
+                None if release_reason is None else MigrationReason(release_reason)
+            ),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("compatibility contains an invalid value") from exc
+
+
+def _thaw_json(value: object) -> object:
+    """Convert frozen assessment metadata back to JSON-compatible ordinary values."""
+    if isinstance(value, Mapping):
+        return {str(key): _thaw_json(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_thaw_json(item) for item in value]
+    return value
+
+
 @dataclass(frozen=True)
 class MigrationPlan:
-    """Exact bounded operator plan, bound to one source identity and revision."""
+    """The one immutable machine-authoritative plan for offline maintenance."""
 
     run_id: str
     source_identity: AuthorityIdentitySnapshot
     destination_identity: AuthorityIdentitySnapshot
-    assessments: tuple[MigrationEntryAssessment, ...]
-    digest: str
+    entries: tuple[MigrationEntryAssessment, ...]
+    digest: str = ""
+    plan_version: int = 1
+    plan_id: str = ""
+    plan_kind: MigrationPlanKind = MigrationPlanKind.MIGRATION
+    source_revision: int = -1
+    release_window: ReleaseWindow = field(default_factory=ReleaseWindow.first_release_baseline)
+    compatibility: CompatibilityResult | None = None
+    totals: MigrationTotals | None = None
+    intended_actions: tuple[str, ...] = ()
+    exclusions: tuple[Mapping[str, object], ...] = ()
+    state: MigrationPlanState = MigrationPlanState.PLANNED
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.run_id, str) or _RUN_ID.fullmatch(self.run_id) is None:
+            raise ValueError("run_id must be a bounded opaque maintenance identifier")
+        if not isinstance(self.source_identity, AuthorityIdentitySnapshot) or not isinstance(
+            self.destination_identity, AuthorityIdentitySnapshot
+        ):
+            raise TypeError("plan identities must be AuthorityIdentitySnapshot values")
+        if not isinstance(self.entries, tuple) or not all(
+            isinstance(entry, MigrationEntryAssessment) for entry in self.entries
+        ):
+            raise TypeError("entries must be immutable migration assessments")
+        if len({entry.entry.key for entry in self.entries}) != len(self.entries):
+            raise ValueError("migration plan entries cannot contain duplicate keys")
+        if type(self.plan_version) is not int or self.plan_version != 1:
+            raise ValueError("unsupported migration plan version")
+        if not self.plan_id:
+            object.__setattr__(self, "plan_id", self.run_id)
+        if self.plan_id != self.run_id:
+            raise ValueError("plan_id must bind exactly to the explicit run_id")
+        if not isinstance(self.plan_kind, MigrationPlanKind) or not isinstance(
+            self.state, MigrationPlanState
+        ):
+            raise TypeError("plan kind and state are invalid")
+        if self.source_revision == -1:
+            object.__setattr__(self, "source_revision", self.source_identity.revision)
+        if self.source_revision != self.source_identity.revision:
+            raise ValueError("source_revision must match source_identity")
+        if not isinstance(self.release_window, ReleaseWindow):
+            raise TypeError("release_window must be a ReleaseWindow")
+        if self.compatibility is None:
+            object.__setattr__(self, "compatibility", _all_supported_compatibility())
+        if not isinstance(self.compatibility, CompatibilityResult):
+            raise TypeError("compatibility must be a CompatibilityResult")
+        if self.totals is None:
+            object.__setattr__(self, "totals", MigrationTotals.from_entries(self.entries))
+        if not isinstance(self.totals, MigrationTotals):
+            raise TypeError("totals must be a MigrationTotals")
+        expected_totals = MigrationTotals.from_entries(self.entries)
+        if self.totals != expected_totals:
+            raise ValueError("migration plan totals disagree with entries")
+        if not isinstance(self.intended_actions, tuple) or any(
+            not isinstance(action, str) or not action or "force" in action for action in self.intended_actions
+        ):
+            raise ValueError("intended actions are invalid")
+        if not isinstance(self.exclusions, tuple) or any(
+            not isinstance(exclusion, Mapping) for exclusion in self.exclusions
+        ):
+            raise TypeError("exclusions must be immutable mappings")
+        frozen_exclusions = tuple(_freeze_plan_json(exclusion) for exclusion in self.exclusions)
+        if not all(isinstance(exclusion, Mapping) for exclusion in frozen_exclusions):
+            raise TypeError("exclusions must remain mappings")
+        object.__setattr__(self, "exclusions", frozen_exclusions)
+        if self.plan_kind is MigrationPlanKind.MIGRATION and self.state is not MigrationPlanState.PLANNED:
+            raise ValueError("a migration plan must be planned before any mutation")
+        if self.plan_kind is not MigrationPlanKind.MIGRATION and self.state is not MigrationPlanState.REFUSED:
+            raise ValueError("rebuild-only and refused plans must remain non-mutating")
+        required_actions = {
+            MigrationPlanKind.MIGRATION: ("stage", "verify", "activate"),
+            MigrationPlanKind.REBUILD: ("rebuild",),
+            MigrationPlanKind.REFUSED: (),
+        }
+        if self.intended_actions != required_actions[self.plan_kind]:
+            raise ValueError("plan kind has an invalid intended action sequence")
+        expected_digest = self._expected_digest()
+        if self.digest:
+            if not isinstance(self.digest, str) or not re.fullmatch(r"[0-9a-f]{64}", self.digest):
+                raise ValueError("migration plan digest is invalid")
+            if not hmac.compare_digest(self.digest, expected_digest):
+                raise ValueError("migration plan digest does not match its content")
+        else:
+            object.__setattr__(self, "digest", expected_digest)
+
+    @property
+    def assessments(self) -> tuple[MigrationEntryAssessment, ...]:
+        """Retain the tracer's read-only name while plans expose ``entries`` publicly."""
+        return self.entries
+
+    @property
+    def stopped_worker_acknowledgement_required(self) -> bool:
+        """Require an explicit offline acknowledgement for every mutating intended action."""
+        return bool(set(self.intended_actions) & {"stage", "verify", "activate", "rebuild"})
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        run_id: str,
+        source_identity: AuthorityIdentitySnapshot,
+        destination_identity: AuthorityIdentitySnapshot,
+        entries: tuple[MigrationEntryAssessment, ...],
+        release_window: ReleaseWindow,
+        compatibility: CompatibilityResult,
+    ) -> "MigrationPlan":
+        """Build a complete plan whose kind follows its immutable classifications."""
+        dispositions = {assessment.disposition for assessment in entries}
+        if compatibility.outcome in {
+            CompatibilityOutcome.BLOCKED,
+            CompatibilityOutcome.UNVERIFIABLE,
+        } or dispositions & {MigrationDisposition.BLOCKED, MigrationDisposition.UNVERIFIABLE}:
+            plan_kind = MigrationPlanKind.REFUSED
+            state = MigrationPlanState.REFUSED
+            actions: tuple[str, ...] = ()
+        elif compatibility.outcome is CompatibilityOutcome.REBUILD_ONLY or dispositions - {
+            MigrationDisposition.MIGRATABLE
+        }:
+            plan_kind = MigrationPlanKind.REBUILD
+            state = MigrationPlanState.REFUSED
+            actions = ("rebuild",)
+        else:
+            plan_kind = MigrationPlanKind.MIGRATION
+            state = MigrationPlanState.PLANNED
+            actions = ("stage", "verify", "activate")
+        return cls(
+            run_id=run_id,
+            source_identity=source_identity,
+            destination_identity=destination_identity,
+            entries=entries,
+            plan_kind=plan_kind,
+            release_window=release_window,
+            compatibility=compatibility,
+            intended_actions=actions,
+            state=state,
+        )
+
+    def _entry_record(self, assessment: MigrationEntryAssessment) -> dict[str, object]:
+        entry = assessment.entry
+        return {
+            "catalog_values": _thaw_json(assessment.catalog_values),
+            "disposition": assessment.disposition.value,
+            "entry": {
+                "byte_size": entry.byte_size,
+                "generation": entry.generation,
+                "key": entry.key,
+                "locator": entry.locator,
+                "manifest": base64.b64encode(entry.manifest).decode("ascii"),
+                "payload_digest": entry.payload_digest,
+            },
+            "reason": assessment.reason.value,
+        }
+
+    def _record(self, *, include_digest: bool) -> dict[str, object]:
+        assert self.compatibility is not None
+        assert self.totals is not None
+        record: dict[str, object] = {
+            "compatibility": _compatibility_record(self.compatibility),
+            "destination_identity": _identity_record(self.destination_identity),
+            "entries": [self._entry_record(entry) for entry in sorted(self.entries, key=lambda item: item.entry.key)],
+            "exclusions": [_thaw_json(item) for item in self.exclusions],
+            "intended_actions": list(self.intended_actions),
+            "plan_id": self.plan_id,
+            "plan_kind": self.plan_kind.value,
+            "plan_version": self.plan_version,
+            "release_window": {
+                "current_release": self.release_window.current_release,
+                "immediately_previous_release": self.release_window.immediately_previous_release,
+            },
+            "run_id": self.run_id,
+            "source_identity": _identity_record(self.source_identity),
+            "source_revision": self.source_revision,
+            "state": self.state.value,
+            "totals": {
+                "bytes_by_disposition": {
+                    item.value: self.totals.bytes_by_disposition[item]
+                    for item in MigrationDisposition
+                },
+                "counts": {
+                    item.value: self.totals.counts[item] for item in MigrationDisposition
+                },
+                "total_bytes": self.totals.total_bytes,
+                "total_entries": self.totals.total_entries,
+            },
+        }
+        if include_digest:
+            record["digest"] = self.digest
+        return record
+
+    def _expected_digest(self) -> str:
+        return hashlib.sha256(_canonical_plan_bytes(self._record(include_digest=False))).hexdigest()
+
+    def to_canonical_bytes(self) -> bytes:
+        """Encode the complete plan once in bounded canonical JSON."""
+        encoded = _canonical_plan_bytes(self._record(include_digest=True))
+        if len(encoded) > _MAX_PLAN_BYTES:
+            raise ValueError("migration plan exceeds the byte bound")
+        return encoded
+
+    @classmethod
+    def from_canonical_bytes(cls, raw: bytes) -> "MigrationPlan":
+        """Decode one canonical plan without accepting duplicate keys or loose numbers."""
+        record = decode_bounded_canonical_json(
+            raw, max_bytes=_MAX_PLAN_BYTES, max_text_bytes=_MAX_PLAN_TEXT_BYTES
+        )
+        required = {
+            "compatibility",
+            "destination_identity",
+            "digest",
+            "entries",
+            "exclusions",
+            "intended_actions",
+            "plan_id",
+            "plan_kind",
+            "plan_version",
+            "release_window",
+            "run_id",
+            "source_identity",
+            "source_revision",
+            "state",
+            "totals",
+        }
+        if set(record) != required:
+            raise ValueError("migration plan fields are invalid")
+        if _canonical_plan_bytes(record) != raw:
+            raise ValueError("migration plan is not canonical")
+        entries = _entries_from_record(record["entries"])
+        totals = _totals_from_record(record["totals"])
+        window_record = record["release_window"]
+        if not isinstance(window_record, dict) or set(window_record) != {
+            "current_release",
+            "immediately_previous_release",
+        }:
+            raise ValueError("release_window is invalid")
+        if not isinstance(record["intended_actions"], list) or not isinstance(
+            record["exclusions"], list
+        ):
+            raise ValueError("migration plan collections are invalid")
+        try:
+            return cls(
+                run_id=record["run_id"],
+                source_identity=_identity_from_record(record["source_identity"], "source_identity"),
+                destination_identity=_identity_from_record(
+                    record["destination_identity"], "destination_identity"
+                ),
+                entries=entries,
+                digest=record["digest"],
+                plan_version=record["plan_version"],
+                plan_id=record["plan_id"],
+                plan_kind=MigrationPlanKind(record["plan_kind"]),
+                source_revision=record["source_revision"],
+                release_window=ReleaseWindow(
+                    current_release=window_record["current_release"],
+                    immediately_previous_release=window_record["immediately_previous_release"],
+                ),
+                compatibility=_compatibility_from_record(record["compatibility"]),
+                totals=totals,
+                intended_actions=tuple(record["intended_actions"]),
+                exclusions=tuple(record["exclusions"]),
+                state=MigrationPlanState(record["state"]),
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("migration plan contains an invalid value") from exc
+
+
+def _canonical_plan_bytes(record: Mapping[str, object]) -> bytes:
+    """Encode bounded plan data deterministically without a second report model."""
+    try:
+        return json.dumps(
+            record, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise ValueError("migration plan contains non-canonical JSON data") from exc
+
+
+def _entries_from_record(record: object) -> tuple[MigrationEntryAssessment, ...]:
+    if not isinstance(record, list):
+        raise ValueError("entries are invalid")
+    entries: list[MigrationEntryAssessment] = []
+    for item in record:
+        if not isinstance(item, dict) or set(item) != {
+            "catalog_values", "disposition", "entry", "reason"
+        }:
+            raise ValueError("entry assessment is invalid")
+        entry_record = item["entry"]
+        if not isinstance(entry_record, dict) or set(entry_record) != {
+            "byte_size", "generation", "key", "locator", "manifest", "payload_digest"
+        }:
+            raise ValueError("entry descriptor is invalid")
+        if not isinstance(item["catalog_values"], dict):
+            raise ValueError("catalog_values is invalid")
+        try:
+            manifest = base64.b64decode(entry_record["manifest"], validate=True)
+            entries.append(
+                MigrationEntryAssessment(
+                    entry=AuthorityInventoryEntry(
+                        key=entry_record["key"],
+                        generation=entry_record["generation"],
+                        locator=entry_record["locator"],
+                        manifest=manifest,
+                        payload_digest=entry_record["payload_digest"],
+                        byte_size=entry_record["byte_size"],
+                    ),
+                    disposition=MigrationDisposition(item["disposition"]),
+                    reason=MigrationReason(item["reason"]),
+                    catalog_values=item["catalog_values"],
+                )
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("entry assessment contains an invalid value") from exc
+    return tuple(entries)
+
+
+def _totals_from_record(record: object) -> MigrationTotals:
+    if not isinstance(record, dict) or set(record) != {
+        "bytes_by_disposition", "counts", "total_bytes", "total_entries"
+    }:
+        raise ValueError("totals are invalid")
+    try:
+        counts = {
+            disposition: record["counts"][disposition.value]
+            for disposition in MigrationDisposition
+        }
+        byte_counts = {
+            disposition: record["bytes_by_disposition"][disposition.value]
+            for disposition in MigrationDisposition
+        }
+        return MigrationTotals(
+            counts=counts,
+            bytes_by_disposition=byte_counts,
+            total_entries=record["total_entries"],
+            total_bytes=record["total_bytes"],
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("totals contain an invalid value") from exc
+
+
+def _current_contract(authority_kind: str) -> CompatibilityIdentity:
+    """Describe the current baseline without publishing a historical migration edge."""
+    if authority_kind == "sqlite":
+        from .sqlite_lifecycle_authority import SQLITE_USER_VERSION
+
+        authority = ("sqlite", "sqlite-lifecycle-authority", str(SQLITE_USER_VERSION))
+    elif authority_kind == "memory":
+        authority = ("memory", "memory-lifecycle-authority", "in-process")
+    else:
+        authority = (authority_kind, "unrecognized", "unrecognized")
+    return CompatibilityIdentity(
+        release="current",
+        store_layout=("store-format", str(STORE_FORMAT_VERSION), "epoch", str(CURRENT_STORE_EPOCH)),
+        authority=authority,
+        manifest_schema=("manifest", str(CURRENT_MANIFEST_SCHEMA_VERSION)),
+        payload=("entry-specific", "entry-specific", "current"),
+        catalog=("application-catalog", "entry-specific", "authenticated"),
+    )
+
+
+def _historical_contract() -> CompatibilityIdentity:
+    """Classify opaque legacy evidence without attempting a compatibility reader."""
+    return CompatibilityIdentity(
+        release="historical",
+        store_layout=("unrecognized", "unrecognized", "unrecognized", "unrecognized"),
+        authority=("unrecognized", "unrecognized", "unrecognized"),
+        manifest_schema=("unrecognized", "unrecognized"),
+        payload=("unrecognized", "unrecognized", "unrecognized"),
+        catalog=("unrecognized", "unrecognized", "unrecognized"),
+    )
+
+
+def _read_only_authority_identity(store) -> AuthorityIdentitySnapshot:
+    """Read an initialized authority fingerprint without opening a mutation boundary."""
+    authority = getattr(store, "lifecycle_authority", None)
+    migration_identity = getattr(authority, "migration_identity", None)
+    if callable(migration_identity):
+        identity = migration_identity()
+        if isinstance(identity, AuthorityIdentitySnapshot):
+            return identity
+
+    path = getattr(authority, "path", None)
+    if path is None:
+        raise ValueError("store authority does not expose a read-only inspection identity")
+    from .sqlite_lifecycle_authority import SQLITE_APPLICATION_ID, SQLITE_USER_VERSION
+    import sqlite3
+
+    try:
+        connection = sqlite3.connect(f"file:{Path(path)}?mode=ro", uri=True)
+        try:
+            application_id = connection.execute("PRAGMA application_id").fetchone()[0]
+            user_version = connection.execute("PRAGMA user_version").fetchone()[0]
+            identity_rows = connection.execute("SELECT identity FROM store_identity").fetchall()
+            revision_rows = connection.execute(
+                "SELECT revision FROM authority_state WHERE singleton = 1"
+            ).fetchall()
+        finally:
+            connection.close()
+    except sqlite3.Error as exc:
+        raise ValueError("SQLite authority cannot be inspected read-only") from exc
+    if application_id != SQLITE_APPLICATION_ID or user_version != SQLITE_USER_VERSION:
+        raise ValueError("SQLite authority identity is not current")
+    if len(identity_rows) != 1 or len(revision_rows) != 1:
+        raise ValueError("SQLite authority identity is incomplete")
+    return AuthorityIdentitySnapshot(
+        store_id=identity_rows[0][0], revision=revision_rows[0][0], authority_kind="sqlite"
+    )
+
+
+def inspect_migration_store(store) -> MigrationPlan:
+    """Inspect one initialized current store without changing bytes, metadata, or authority state."""
+    source_identity = _read_only_authority_identity(store)
+    authority = getattr(store, "lifecycle_authority", None)
+    list_entries = getattr(authority, "list_entries", None)
+    if not callable(list_entries):
+        raise ValueError("store authority does not support read-only inventory inspection")
+    signing_key = store._authority_manifest_key(initialize_new_store=False)
+    assessments: list[MigrationEntryAssessment] = []
+    for snapshot in list_entries():
+        try:
+            manifest = BlobManifest.from_canonical_bytes(bytes(snapshot.manifest))
+            entry = AuthorityInventoryEntry(
+                key=snapshot.key,
+                generation=snapshot.generation,
+                locator=snapshot.locator,
+                manifest=bytes(snapshot.manifest),
+                payload_digest=manifest.digest,
+                byte_size=manifest.byte_size,
+            )
+            verify_current_manifest(manifest, signing_key)
+        except (
+            CacheManifestIntegrityError,
+            CacheManifestUnsupportedVersionError,
+            CacheMigrationOrRebuildRequiredError,
+            ValueError,
+        ):
+            raw_manifest = bytes(snapshot.manifest)
+            entry = AuthorityInventoryEntry(
+                key=snapshot.key,
+                generation=snapshot.generation,
+                locator=snapshot.locator,
+                manifest=raw_manifest,
+                payload_digest=hashlib.sha256(raw_manifest).hexdigest(),
+                byte_size=len(raw_manifest),
+            )
+            assessments.append(
+                MigrationEntryAssessment(
+                    entry=entry,
+                    disposition=MigrationDisposition.UNVERIFIABLE,
+                    reason=MigrationReason.MANIFEST_UNAUTHENTICATED,
+                )
+            )
+            continue
+        try:
+            store.handlers.resolve_payload_contract(
+                manifest.handler_type, manifest.payload_format, manifest.payload_format_version
+            )
+        except (
+            CacheManifestIntegrityError,
+            CacheManifestUnsupportedVersionError,
+            CacheMigrationOrRebuildRequiredError,
+            ValueError,
+        ):
+            assessments.append(
+                MigrationEntryAssessment(
+                    entry=entry,
+                    disposition=MigrationDisposition.REBUILDABLE,
+                    reason=MigrationReason.MISSING_DIRECTED_EDGE,
+                    catalog_values=dict(manifest.catalog_values),
+                )
+            )
+            continue
+        assessments.append(
+            MigrationEntryAssessment(
+                entry=entry,
+                disposition=MigrationDisposition.MIGRATABLE,
+                reason=MigrationReason.COMPATIBLE_EDGE,
+                catalog_values=dict(manifest.catalog_values),
+            )
+        )
+    contract = _current_contract(source_identity.authority_kind)
+    return MigrationPlan.create(
+        run_id=f"inspection-{hashlib.sha256(source_identity.store_id.encode('utf-8')).hexdigest()[:32]}",
+        source_identity=source_identity,
+        destination_identity=source_identity,
+        entries=tuple(assessments),
+        release_window=ReleaseWindow.first_release_baseline(),
+        compatibility=CompatibilityMatrix.default().classify(contract, contract),
+    )
+
+
+def inspect_store_path(root: str | Path) -> MigrationPlan:
+    """Produce a rebuild-only plan for historical evidence without opening or changing it."""
+    root_path = Path(root).resolve(strict=False)
+    fingerprint = hashlib.sha256(str(root_path).encode("utf-8")).hexdigest()
+    source_identity = AuthorityIdentitySnapshot(
+        store_id=fingerprint, revision=0, authority_kind="unrecognized"
+    )
+    destination_identity = AuthorityIdentitySnapshot(
+        store_id=f"destination-{fingerprint[:32]}", revision=0, authority_kind="unconfigured"
+    )
+    matrix = CompatibilityMatrix.default()
+    from .sqlite_lifecycle_authority import AUTHORITY_RELATIVE_PATH
+
+    corrupted_authority = (root_path / AUTHORITY_RELATIVE_PATH).exists()
+    return MigrationPlan.create(
+        run_id=f"inspection-{fingerprint[:32]}",
+        source_identity=source_identity,
+        destination_identity=destination_identity,
+        entries=(),
+        release_window=matrix.release_window,
+        compatibility=matrix.classify(
+            _historical_contract(),
+            _current_contract("unconfigured"),
+            unverifiable_dimensions=(
+                (CompatibilityDimension.AUTHORITY,) if corrupted_authority else ()
+            ),
+        ),
+    )
+
+
+def render_migration_report(plan: MigrationPlan) -> str:
+    """Render a human report exclusively from the already-validated plan model."""
+    if not isinstance(plan, MigrationPlan):
+        raise TypeError("plan must be a MigrationPlan")
+    lines = [
+        f"Migration plan: {plan.plan_id}",
+        f"Digest: {plan.digest}",
+        f"Kind: {plan.plan_kind.value}",
+        f"State: {plan.state.value}",
+        "Release window: "
+        f"current={plan.release_window.current_release}, "
+        f"previous={plan.release_window.immediately_previous_release or 'none'}",
+        f"Source: {plan.source_identity.authority_kind}/{plan.source_identity.store_id} rev {plan.source_revision}",
+        f"Destination: {plan.destination_identity.authority_kind}/{plan.destination_identity.store_id} rev {plan.destination_identity.revision}",
+        f"Compatibility: {plan.compatibility.outcome.value}",
+        "Totals: "
+        f"{plan.totals.total_entries} entries, {plan.totals.total_bytes} bytes",
+        "Actions: " + (", ".join(plan.intended_actions) if plan.intended_actions else "none"),
+        f"Exclusions: {len(plan.exclusions)}",
+        "Stopped-worker acknowledgement required: "
+        f"{str(plan.stopped_worker_acknowledgement_required).lower()}",
+        "Entries:",
+    ]
+    for dimension in CompatibilityDimension:
+        lines.append(
+            f"- compatibility.{dimension.value}: "
+            f"{plan.compatibility.dimension_outcomes[dimension].value} "
+            f"({plan.compatibility.reasons[dimension].value})"
+        )
+    for assessment in sorted(plan.entries, key=lambda item: item.entry.key):
+        lines.append(
+            f"- {assessment.entry.key}: {assessment.disposition.value} "
+            f"({assessment.reason.value}), {assessment.entry.byte_size} bytes"
+        )
+    return "\n".join(lines) + "\n"
 
 
 @dataclass(frozen=True)
@@ -409,39 +1168,6 @@ class MigrationStepResult:
     state: MaintenanceEvidenceState
     completed: bool
     evidence_path: Path
-
-
-def _canonical_plan_digest(
-    run_id: str,
-    source_identity: AuthorityIdentitySnapshot,
-    destination_identity: AuthorityIdentitySnapshot,
-    assessments: tuple[MigrationEntryAssessment, ...],
-) -> str:
-    record = {
-        "assessments": [
-            {
-                "disposition": assessment.disposition.value,
-                "generation": assessment.entry.generation,
-                "key": assessment.entry.key,
-                "manifest_digest": assessment.entry.manifest_digest,
-                "reason": assessment.reason.value,
-            }
-            for assessment in sorted(assessments, key=lambda item: item.entry.key)
-        ],
-        "destination": {
-            "authority_kind": destination_identity.authority_kind,
-            "revision": destination_identity.revision,
-            "store_id": destination_identity.store_id,
-        },
-        "run_id": run_id,
-        "source": {
-            "authority_kind": source_identity.authority_kind,
-            "revision": source_identity.revision,
-            "store_id": source_identity.store_id,
-        },
-    }
-    raw = json.dumps(record, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    return hashlib.sha256(raw).hexdigest()
 
 
 class OfflineMigrationService:
@@ -646,18 +1372,13 @@ class OfflineMigrationService:
             for assessment in inspection.assessments
         ):
             raise ValueError("migration plan contains non-migratable entries")
-        digest = _canonical_plan_digest(
-            self.run_id,
-            inspection.source_identity,
-            inspection.destination_identity,
-            inspection.assessments,
-        )
-        plan = MigrationPlan(
+        plan = MigrationPlan.create(
             run_id=self.run_id,
             source_identity=inspection.source_identity,
             destination_identity=inspection.destination_identity,
-            assessments=inspection.assessments,
-            digest=digest,
+            entries=inspection.assessments,
+            release_window=ReleaseWindow.first_release_baseline(),
+            compatibility=_all_supported_compatibility(),
         )
         self._write_evidence(
             MaintenanceRunEvidence(
@@ -676,13 +1397,7 @@ class OfflineMigrationService:
     def _validate_plan(self, plan: MigrationPlan) -> None:
         if not isinstance(plan, MigrationPlan) or plan.run_id != self.run_id:
             raise ValueError("migration plan does not belong to this explicit run")
-        expected_digest = _canonical_plan_digest(
-            plan.run_id,
-            plan.source_identity,
-            plan.destination_identity,
-            plan.assessments,
-        )
-        if not hmac.compare_digest(plan.digest, expected_digest):
+        if not hmac.compare_digest(plan.digest, plan._expected_digest()):
             raise ValueError("migration plan digest is invalid")
         self._revalidate_identities(plan)
 
@@ -843,9 +1558,15 @@ __all__ = [
     "MigrationDisposition",
     "MigrationEntryAssessment",
     "MigrationPlan",
+    "MigrationPlanKind",
+    "MigrationPlanState",
     "MigrationReason",
     "MigrationStepResult",
+    "MigrationTotals",
     "OfflineMigrationService",
     "ReleaseWindow",
     "VersionEdge",
+    "inspect_migration_store",
+    "inspect_store_path",
+    "render_migration_report",
 ]

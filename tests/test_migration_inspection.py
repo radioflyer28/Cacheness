@@ -62,3 +62,19 @@ def test_historical_path_is_rebuild_only_without_writing(tmp_path: Path) -> None
     assert plan.intended_actions == ("rebuild",)
     assert plan.stopped_worker_acknowledgement_required is True
     assert _tree_bytes(root) == before
+
+
+def test_corrupt_authority_path_is_refused_without_writing(tmp_path: Path) -> None:
+    """Unreadable authority evidence is not upgraded or treated as rebuild-ready."""
+    root = tmp_path / "corrupt"
+    authority = root / ".cacheness" / "lifecycle-authority-v2.sqlite3"
+    authority.parent.mkdir(parents=True)
+    authority.write_bytes(b"not sqlite")
+    before = _tree_bytes(root)
+
+    plan = inspect_store_path(root)
+
+    assert plan.plan_kind is MigrationPlanKind.REFUSED
+    assert plan.state is MigrationPlanState.REFUSED
+    assert plan.intended_actions == ()
+    assert _tree_bytes(root) == before

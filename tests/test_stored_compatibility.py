@@ -26,6 +26,7 @@ from cacheness.storage import (
     StoreTopology,
 )
 from cacheness.storage.catalog import CatalogMigrationRequiredError, inspect_store_layout
+from cacheness.storage.migration import inspect_migration_store
 from cacheness.storage.sqlite_lifecycle_authority import AUTHORITY_RELATIVE_PATH
 
 
@@ -256,8 +257,11 @@ def test_initialized_current_memory_and_sqlite_stores_repeat_initialize_by_valid
         store.initialize()
         receipt = store.put_entry({"answer": 42}, key="sqlite-entry")
         before = _tree_snapshot(root)
+        inspection = inspect_migration_store(store)
         store.initialize()
         assert store.get(receipt.key) == {"answer": 42}
+        assert inspection.source_identity.authority_kind == "sqlite"
+        assert inspection.totals.total_entries == 1
         assert _tree_snapshot(root) == before
 
     before_reopen = _tree_snapshot(root)

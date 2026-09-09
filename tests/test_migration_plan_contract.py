@@ -157,3 +157,9 @@ def test_canonical_plan_round_trips_and_human_report_uses_the_same_model() -> No
     assert plan.digest in report
     assert "source-store" in report
     assert "directed_edge" in report
+
+
+def test_plan_decoder_rejects_duplicate_json_keys() -> None:
+    """A plan parser never permits JSON's last-key-wins reinterpretation."""
+    with pytest.raises(ValueError, match="canonical JSON"):
+        MigrationPlan.from_canonical_bytes(b'{"plan_version":1,"plan_version":1}')
