@@ -1,129 +1,83 @@
-#!/usr/bin/env python3
-"""
-Simple Object Caching Example
-=============================
+"""Canonical explicit object-cache lifecycle.
 
-Demonstrates caching complex objects without security warnings.
-Much simpler than the dill security example!
-
-Usage:
-    python simple_object_caching.py
+Run this example directly. It uses a fresh in-process memory topology, so it
+has no service credentials, network traffic, or shared application cache.
 """
 
-from cacheness import cached
-from dataclasses import dataclass
-from typing import List
+from __future__ import annotations
 
-# Simple data classes for caching
-@dataclass
-class UserProfile:
-    user_id: int
-    name: str
-    email: str
-    preferences: dict
+from tempfile import TemporaryDirectory
 
-@dataclass 
-class ProcessingResult:
-    input_data: List[str]
-    processed_items: List[str]
-    stats: dict
+from cacheness import (
+    CacheConfig,
+    CacheOutcome,
+    CachePolicyConfig,
+    StoreTopology,
+    UnifiedCache,
+)
+from cacheness.config import CacheStorageConfig
+from cacheness.storage import BackendRef
 
-@cached(ttl_hours=12)
-def get_user_profile(user_id: int) -> UserProfile:
-    """Get user profile (simulated expensive lookup)."""
-    print(f"🔍 Loading profile for user {user_id}")
-    
-    return UserProfile(
-        user_id=user_id,
-        name=f"User {user_id}",
-        email=f"user{user_id}@example.com",
-        preferences={
-            "theme": "dark",
-            "notifications": True,
-            "language": "en"
-        }
+
+def memory_topology() -> StoreTopology:
+    """Return the explicit one-process topology used by this example."""
+
+    return StoreTopology(
+        payload=BackendRef(name="memory"),
+        authority=BackendRef(name="memory"),
     )
 
-@cached(ttl_hours=24)
-def process_data(items: List[str]) -> ProcessingResult:
-    """Process a list of items (simulated expensive operation)."""
-    print(f"⚙️  Processing {len(items)} items")
-    
-    # Simulate expensive processing
-    processed = [item.upper() + "_PROCESSED" for item in items]
-    
-    stats = {
-        "total_items": len(items),
-        "processed_items": len(processed),
-        "avg_length": sum(len(item) for item in items) / len(items) if items else 0
-    }
-    
-    return ProcessingResult(
-        input_data=items,
-        processed_items=processed,
-        stats=stats
-    )
 
-@cached(ttl_hours=6)
-def complex_calculation(data: dict) -> dict:
-    """Perform complex calculations on dictionary data."""
-    print(f"🧮 Computing complex calculation for {len(data)} keys")
-    
-    result = {}
-    for key, value in data.items():
-        if isinstance(value, (int, float)):
-            result[f"{key}_squared"] = value ** 2
-            result[f"{key}_sqrt"] = value ** 0.5
-        else:
-            result[f"{key}_length"] = len(str(value))
-    
-    return result
+def main() -> None:
+    """Store, inspect, remove, and close one policy-owned cache."""
 
-def main():
-    """Demonstrate simple object caching."""
-    
-    print("=== Simple Object Caching Demo ===\n")
-    
-    # Cache user profiles
-    print("👤 USER PROFILE CACHING:")
-    profile1 = get_user_profile(123)
-    print(f"✅ Got profile: {profile1.name} ({profile1.email})")
-    
-    profile2 = get_user_profile(123)  # Cached
-    print(f"✅ Cached profile: {profile2.name}")
-    print(f"   Preferences: {profile2.preferences}\n")
-    
-    # Cache data processing results
-    print("⚙️  DATA PROCESSING CACHING:")
-    test_data = ["hello", "world", "cache", "example"]
-    result1 = process_data(test_data)
-    print(f"✅ Processed {result1.stats['total_items']} items")
-    print(f"   Sample output: {result1.processed_items[0]}")
-    
-    result2 = process_data(test_data)  # Cached
-    print(f"✅ Cached processing: {result2.stats['total_items']} items\n")
-    
-    # Cache complex objects
-    print("🧮 COMPLEX OBJECT CACHING:")
-    calc_input = {
-        "temperature": 25.5,
-        "pressure": 1013.25, 
-        "location": "San Francisco",
-        "measurements": 42
-    }
-    
-    calc1 = complex_calculation(calc_input)
-    print(f"✅ Calculated {len(calc1)} derived values")
-    print(f"   temperature_squared: {calc1.get('temperature_squared', 'N/A')}")
-    
-    calc2 = complex_calculation(calc_input)  # Cached
-    print(f"✅ Cached calculation: {len(calc2)} values")
-    
-    print("\n🎯 Benefits:")
-    print("   • Automatic object serialization")
-    print("   • Type safety with dataclasses") 
-    print("   • No security warnings (using pickle)")
-    print("   • Optimized for general Python objects")
+    with TemporaryDirectory(prefix="cacheness-object-example-") as directory:
+        config = CacheConfig(
+            storage=CacheStorageConfig(cache_dir=directory),
+            policy=CachePolicyConfig(
+                max_authoritative_bytes=1_024,
+                catalog_page_size=8,
+                maintenance_work_cap=8,
+            ),
+        )
+        cache = UnifiedCache(config, store=memory_topology())
+        try:
+            # Cache-owned topology: initialize before sharing this cache instance.
+            cache.initialize()
+
+            put_result = cache.put(
+                {"name": "Ada", "roles": ["maintainer"]}, request_id="profile"
+            )
+            print(f"PUT_COMMITTED={put_result.receipt.key}")
+            print(f"PUT_MAINTENANCE_COMPLETE={put_result.maintenance.complete}")
+
+            lookup = cache.lookup(cache_key=put_result.receipt.key)
+            assert lookup.outcome is CacheOutcome.HIT
+            assert lookup.value["name"] == "Ada"
+            print(f"LOOKUP_OUTCOME={lookup.outcome.value}")
+
+            statistics = cache.statistics()
+            print(f"STATISTICS_HITS={statistics.hit}")
+            print(f"STATISTICS_LOOKUPS={statistics.lookups}")
+
+            removal = cache.invalidate(cache_key=put_result.receipt.key)
+            print(
+                "INVALIDATION="
+                f"attempted:{removal.attempted},removed:{removal.removed},"
+                f"complete:{removal.complete}"
+            )
+
+            maintenance = cache.maintain_size()
+            print(
+                "MAINTENANCE="
+                f"complete:{maintenance.complete},retryable:{maintenance.retryable}"
+            )
+        finally:
+            # The cache owns the BlobStore it constructed from StoreTopology.
+            cache.close()
+
+    print("CANONICAL_OBJECT_CACHE_EXAMPLE_OK")
+
 
 if __name__ == "__main__":
     main()
