@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 06
 current_phase_name: UnifiedCache Policy Composition
 status: executing
-stopped_at: Completed 06-06-PLAN.md
-last_updated: "2026-09-09T03:56:47.684Z"
+stopped_at: Completed 06-07-PLAN.md
+last_updated: "2026-09-09T04:12:10.216Z"
 last_activity: 2026-09-09
 last_activity_desc: Phase 06 execution started
-state_head: 679b50e2287d0d1dc8624cfb9ef7a7dc736dbd7d
+state_head: 607b38f7a4f7a8b6ef27653489f185f25e51f9de
 progress:
   total_phases: 8
   completed_phases: 4
   total_plans: 78
-  completed_plans: 75
+  completed_plans: 76
 milestone_name: milestone
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-09-06)
 ## Current Position
 
 Phase: 06 (UnifiedCache Policy Composition) — EXECUTING
-Plan: 7 of 8
+Plan: 8 of 8
 Status: Ready to execute
 Last activity: 2026-09-08 — Phase 06 execution started
 
@@ -158,6 +158,7 @@ Phase 03 rows in this historical table include superseded attempts and do not de
 | Phase 06 P04 | 10 min | 2 tasks | 5 files |
 | Phase 06 P05 | 5min | 2 tasks | 2 files |
 | Phase 06 P06 | 13min | 2 tasks | 10 files |
+| Phase 06 P07 | 7min | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -332,6 +333,8 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - [Phase 06]: Closing UnifiedCache rejects cache policy observers without delegating close to caller-owned BlobStores or coordinating topology participants.
 - [Phase 06]: Removed cache singleton/factory/raw-result compatibility paths; callers use explicit UnifiedCache ownership.
 - [Phase 06]: Unsupported store/version layouts remain typed offline migration-or-rebuild failures; no implicit upgrade.
+- [Phase 06]: Examples use the qualified memory/memory topology so they make no remote-service claim.
+- [Phase 06]: Decorator examples preserve typed failures by default and expose explicit opt-in recomputation with cache_last_lookup.
 
 ### Pending Todos
 
@@ -361,6 +364,6 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 
 ## Session Continuity
 
-Last session: 2026-09-09T03:56:47.555Z
-Stopped at: Completed 06-06-PLAN.md
+Last session: 2026-09-09T04:12:10.102Z
+Stopped at: Completed 06-07-PLAN.md
 Resume file: None
