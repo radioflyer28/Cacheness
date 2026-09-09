@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from dataclasses import dataclass
 
 from cacheness import CacheConfig, cached
+from cacheness.config import CacheStorageConfig
 from cacheness.core import UnifiedCache
 from cacheness.serialization import create_unified_cache_key
 from cacheness.storage.composition import BackendRef, StoreTopology
@@ -28,7 +29,7 @@ def _memory_cache(cache_dir) -> UnifiedCache:
     """Create one initialized explicit cache for decorator-key tests."""
 
     cache = UnifiedCache(
-        CacheConfig(cache_dir=cache_dir),
+        CacheConfig(storage=CacheStorageConfig(cache_dir=cache_dir)),
         store=StoreTopology(
             payload=BackendRef(name="memory"),
             authority=BackendRef(name="memory"),
@@ -234,8 +235,8 @@ class TestCacheKeyConsistency:
     def test_function_decorator_consistency(self):
         """Test that decorated functions produce consistent cache keys for equivalent calls."""
         with tempfile.TemporaryDirectory() as temp_dir:
-            config = CacheConfig(cache_dir=temp_dir)
-            cache = _memory_cache(config.cache_dir)
+            config = CacheConfig(storage=CacheStorageConfig(cache_dir=temp_dir))
+            cache = _memory_cache(config.storage.cache_dir)
 
             call_count = 0
 
@@ -264,10 +265,10 @@ class TestCacheKeyConsistency:
         with tempfile.TemporaryDirectory() as temp_dir1, \
              tempfile.TemporaryDirectory() as temp_dir2:
             
-            config1 = CacheConfig(cache_dir=temp_dir1)
-            config2 = CacheConfig(cache_dir=temp_dir2)
-            cache1 = _memory_cache(config1.cache_dir)
-            cache2 = _memory_cache(config2.cache_dir)
+            config1 = CacheConfig(storage=CacheStorageConfig(cache_dir=temp_dir1))
+            config2 = CacheConfig(storage=CacheStorageConfig(cache_dir=temp_dir2))
+            cache1 = _memory_cache(config1.storage.cache_dir)
+            cache2 = _memory_cache(config2.storage.cache_dir)
             
             params = {"test": "value", "number": 42, "array": np.array([1, 2, 3])}
             

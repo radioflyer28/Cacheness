@@ -48,6 +48,10 @@ def test_manifest_is_fixed_and_contains_the_strict_projection_node() -> None:
     }
     assert verifier.FIXED_REGRESSION_NODES == {
         "CACH-07 SqlCache regression": ("tests/test_sql_cache.py",),
+        "Canonical decorator and key regressions": (
+            "tests/test_decorators.py",
+            "tests/test_cache_key_consistency.py",
+        ),
     }
     assert verifier.REMOTE_EVIDENCE_LABEL == "mocked-candidate; BACK-05 remains Phase 8"
 

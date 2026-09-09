@@ -61,6 +61,10 @@ CACH_REQUIREMENT_NODES = {
 }
 FIXED_REGRESSION_NODES = {
     "CACH-07 SqlCache regression": ("tests/test_sql_cache.py",),
+    "Canonical decorator and key regressions": (
+        "tests/test_decorators.py",
+        "tests/test_cache_key_consistency.py",
+    ),
 }
 ARCHITECTURE_MODULES = (
     "src/cacheness/core.py",

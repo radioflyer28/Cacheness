@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from cacheness import CacheConfig, cached
+from cacheness.config import CacheStorageConfig
 from cacheness.core import UnifiedCache
 from cacheness.storage.composition import BackendRef, StoreTopology
 
@@ -11,7 +12,7 @@ def _cache(tmp_path) -> UnifiedCache:
     """Create one initialized caller-owned memory cache for a test."""
 
     cache = UnifiedCache(
-        CacheConfig(cache_dir=tmp_path),
+        CacheConfig(storage=CacheStorageConfig(cache_dir=tmp_path)),
         store=StoreTopology(
             payload=BackendRef(name="memory"),
             authority=BackendRef(name="memory"),
