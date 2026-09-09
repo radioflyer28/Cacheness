@@ -112,6 +112,28 @@ def test_explicit_cache_normalizes_equivalent_function_call_forms(tmp_path) -> N
         cache.close()
 
 
+def test_explicit_cache_commits_under_the_pre_call_key_for_mutated_arguments(
+    tmp_path,
+) -> None:
+    """User-code mutation cannot move a result away from its lookup identity."""
+
+    cache = _cache(tmp_path)
+    calls = 0
+    try:
+        @cached(cache=cache)
+        def consume(values: list[str]) -> int:
+            nonlocal calls
+            calls += 1
+            values.append("consumed")
+            return len(values)
+
+        assert consume([]) == 1
+        assert consume([]) == 1
+        assert calls == 1
+    finally:
+        cache.close()
+
+
 def test_explicit_decorator_module_has_no_implicit_lifecycle_owner(tmp_path) -> None:
     """Decorator construction only closes over a caller-supplied cache instance."""
 

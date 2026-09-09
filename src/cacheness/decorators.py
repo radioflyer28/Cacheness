@@ -73,7 +73,8 @@ def cached(
 
         @wraps(func)
         def wrapper(*args: Any, **kwargs: Any) -> Any:
-            result = cache.lookup_call(func, args, kwargs)
+            namespace, cache_key = cache._function_cache_key(func, args, kwargs)
+            result = cache.lookup_call(func, args, kwargs, cache_key=cache_key)
             wrapper.cache_last_lookup = result
             if result.outcome is CacheOutcome.HIT:
                 return result.value
@@ -81,7 +82,14 @@ def cached(
                 _raise_lookup_cause(result)
 
             value = func(*args, **kwargs)
-            wrapper.cache_last_put_result = cache.put_call(func, args, kwargs, value)
+            wrapper.cache_last_put_result = cache.put_call(
+                func,
+                args,
+                kwargs,
+                value,
+                namespace=namespace,
+                cache_key=cache_key,
+            )
             return value
 
         def cache_clear(**kwargs: Any) -> CacheRemovalReport:

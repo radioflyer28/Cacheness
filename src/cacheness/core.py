@@ -837,11 +837,17 @@ class UnifiedCache:
 
     @_clear_read_coordinated
     def lookup_call(
-        self, func: Callable, args: tuple[Any, ...], kwargs: dict[str, Any]
+        self,
+        func: Callable,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        *,
+        cache_key: str | None = None,
     ) -> CacheLookupResult:
         """Look up one normalized decorated call through the shared policy boundary."""
 
-        _, cache_key = self._function_cache_key(func, args, kwargs)
+        if cache_key is None:
+            _, cache_key = self._function_cache_key(func, args, kwargs)
         return self.lookup(cache_key=cache_key)
 
     @_clear_coordinated
@@ -851,10 +857,17 @@ class UnifiedCache:
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
         value: Any,
+        *,
+        namespace: str | None = None,
+        cache_key: str | None = None,
     ) -> CachePutResult:
         """Commit one decorated result with its authenticated function namespace."""
 
-        namespace, cache_key = self._function_cache_key(func, args, kwargs)
+        if (namespace is None) != (cache_key is None):
+            raise ValueError("function namespace and cache key must be supplied together")
+        if namespace is None:
+            namespace, cache_key = self._function_cache_key(func, args, kwargs)
+        assert cache_key is not None
         return self._put_for_cache_key(
             value,
             cache_key=cache_key,
@@ -862,7 +875,7 @@ class UnifiedCache:
             description=f"Cached result for {namespace}",
             key_params={
                 "__function_namespace__": namespace,
-                "__function_arguments__": _normalize_function_args(func, args, kwargs),
+                "__function_cache_key__": cache_key,
             },
             function_namespace=namespace,
         )
