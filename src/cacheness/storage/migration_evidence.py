@@ -373,6 +373,12 @@ class MaintenanceRunEvidence:
                 raise ValueError("candidate_receipt does not bind this evidence")
         if self.activation_receipt is not None and self.candidate_receipt is None:
             raise ValueError("activation_receipt requires candidate_receipt")
+        for field_name, values in (
+            ("authority_receipts", self.authority_receipts),
+            ("cleanup_debt", self.cleanup_debt),
+        ):
+            if not isinstance(values, tuple) or len(values) > _MAX_COMPLETED_STEPS:
+                raise ValueError(f"{field_name} must be a bounded tuple")
         for value in (*self.authority_receipts, *self.cleanup_debt):
             _sha256(value, "maintenance receipt")
         if not isinstance(self.completed_output_digests, Mapping):
@@ -444,7 +450,12 @@ class MaintenanceRunEvidence:
             raise ValueError("maintenance evidence fields are invalid")
         steps = record["completed_steps"]
         output_digests = record["completed_output_digests"]
-        if not isinstance(steps, list) or not isinstance(output_digests, Mapping):
+        if (
+            not isinstance(steps, list)
+            or not isinstance(output_digests, Mapping)
+            or not isinstance(record["authority_receipts"], list)
+            or not isinstance(record["cleanup_debt"], list)
+        ):
             raise ValueError("maintenance evidence completion records are invalid")
         candidate = record["candidate_receipt"]
         candidate_receipt = None if candidate is None else _receipt_from_record(candidate)
@@ -708,6 +719,11 @@ class MaintenanceEvidenceStore:
         if self.evidence_path.exists():
             raise CacheBlobMigrationEvidenceMismatchError(
                 "maintenance evidence already exists for this run",
+                context={"operation": "maintenance_evidence.create", "run_id": self.run_id},
+            )
+        if evidence.state is not MaintenanceEvidenceState.INSPECTED:
+            raise CacheBlobMigrationEvidenceMismatchError(
+                "maintenance evidence must begin at the inspection state",
                 context={"operation": "maintenance_evidence.create", "run_id": self.run_id},
             )
         bound = self._bind_signing_identity(evidence)

@@ -127,6 +127,30 @@ def test_checkpoint_requires_exact_previous_bytes_and_legal_state_transition(tmp
     assert store.load().state is MaintenanceEvidenceState.PLANNED
 
 
+def test_evidence_store_requires_inspection_first_and_rejects_hostile_raw_bytes(
+    tmp_path: Path,
+) -> None:
+    """No malformed or pre-advanced evidence can create a resumable run."""
+    provider = _SentinelKeyProvider()
+    evidence = _evidence()
+    store = MaintenanceEvidenceStore(tmp_path / "maintenance", evidence.run_id, provider)
+
+    with pytest.raises(CacheBlobMigrationEvidenceMismatchError, match="inspection"):
+        store.create(_evidence(state=MaintenanceEvidenceState.PLANNED))
+    assert not store.evidence_path.exists()
+
+    store.create(evidence)
+    hostile_records = (
+        b'{"evidence":{},"evidence":{},"signature":"0"}',
+        b'{"evidence":' + b"[" * 20 + b"]" * 20 + b',"signature":"0"}',
+        b"x" * 65_537,
+    )
+    for hostile in hostile_records:
+        store.evidence_path.write_bytes(hostile)
+        with pytest.raises(CacheBlobMigrationEvidenceError):
+            store.load()
+
+
 def test_evidence_never_renders_or_logs_key_material(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     """Error channels preserve only a non-secret signing identity fingerprint."""
     provider = _SentinelKeyProvider()
