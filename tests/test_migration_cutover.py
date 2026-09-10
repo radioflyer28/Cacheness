@@ -12,6 +12,9 @@ from cacheness.storage.migration import (
     MigrationDisposition,
     OfflineMigrationService,
 )
+from cacheness.storage.migration_authority import AuthorityPublicationState
+from cacheness.storage.sqlite_lifecycle_authority import SQLITE_USER_VERSION
+from cacheness.storage.manifest import CURRENT_SQLITE_USER_VERSION
 
 
 class _SharedMemoryKeyProvider:
@@ -135,3 +138,15 @@ def test_maintenance_request_requires_stopped_workers_and_separate_work_dir(
     finally:
         source.close()
         destination.close()
+
+
+def test_release_authority_baseline_exposes_only_the_resolved_publication_states() -> None:
+    """RQ-01 fixes the first release schema and whole-store state vocabulary."""
+    assert SQLITE_USER_VERSION == 8
+    assert CURRENT_SQLITE_USER_VERSION == 8
+    assert {state.value for state in AuthorityPublicationState} == {
+        "candidate",
+        "activated_offline",
+        "active",
+        "rolled_back",
+    }
