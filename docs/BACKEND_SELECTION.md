@@ -255,42 +255,19 @@ def get_data():
 
 ## Migration Between Backends
 
-**Schema Compatibility:** All backends now use unified entry structures, making migrations seamless. The migration process automatically handles schema conversion while preserving all cache data and metadata.
+Changing a backend reference, opening a store, or calling `initialize()` never
+migrates, rebuilds, adopts, or deletes an existing root.  Versioned storage
+maintenance is an explicit stopped-worker Python API workflow above
+`BlobStore`, not a `UnifiedCache` policy feature and not part of `SqlCache`.
 
-### From JSON to SQLite
-
-```python
-from cacheness import CacheConfig, cacheness
-import shutil
-
-# Step 1: Backup your existing cache
-shutil.copytree("./old_cache", "./backup_cache")
-
-# Step 2: Create new SQLite config
-new_config = CacheConfig(
-    cache_dir="./old_cache",
-    metadata_backend="sqlite"
-)
-
-# Step 3: Initialize - this will read existing data and convert
-cache = cacheness(new_config)
-
-# Your cache entries are preserved, metadata is converted to SQLite
-print(f"Migrated {len(cache.list_entries())} entries to SQLite")
-```
-
-### From SQLite to JSON (not recommended for large caches)
-
-```python
-# Only recommended for small caches or testing
-new_config = CacheConfig(
-    cache_dir="./sqlite_cache",
-    metadata_backend="json"
-)
-
-# This will export SQLite metadata to JSON format
-cache = cacheness(new_config)
-```
+The first supported release baseline has no historical development-layout
+upgrade path. Each later release supports only its current and immediately
+previous released layout through declared per-contract edges. Older,
+cross-backend, and incompatible layouts are inspected and use an explicit
+confirmed rebuild when appropriate. See [Storage migration and rebuild](STORAGE_MIGRATION.md)
+for inspect, plan, stage, verify, activate, rollback/finalize, purge, and
+rebuild operations; it also records the topology limits and Phase 8 remote
+qualification boundary.
 
 ## Troubleshooting
 

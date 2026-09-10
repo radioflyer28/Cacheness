@@ -1508,10 +1508,11 @@ class PurgeReceipt:
 class OfflineMigrationService:
     """Coordinate an operator's explicit inspect-to-activate maintenance run.
 
-    The service is purposefully limited to the current memory/memory tracer.
     A supplied work directory holds authenticated operator evidence only. It
     never becomes a candidate locator, lifecycle state source, or visibility
-    authority; the destination ``MigrationAuthority`` owns activation.
+    authority; the destination ``MigrationAuthority`` owns activation. The
+    service supports only declared migration edges and separately confirmed
+    handler-backed rebuilds; it does not add an implicit ordinary-open path.
     """
 
     def __init__(

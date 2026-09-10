@@ -149,7 +149,7 @@ def test_runbook_marks_stop_conditions_and_non_claims() -> None:
     guide = Path("docs/STORAGE_MIGRATION.md").read_text(encoding="utf-8")
     assert "<!-- migration-runbook:start -->" in guide
     assert "<!-- migration-runbook:end -->" in guide
-    lowered = guide.lower()
+    lowered = " ".join(guide.lower().split())
     for required_text in (
         "current and immediately previous released layouts",
         "stopped-worker",
@@ -166,14 +166,13 @@ def test_runbook_marks_stop_conditions_and_non_claims() -> None:
         "no cli",
     ):
         assert required_text in lowered
-    for prohibited_claim in (
-        "seamless migration",
-        "automatic migration",
-        "online writer migration",
-        "cross-resource acid",
-        "universal conversion",
+    for required_disclaimer in (
+        "no promise of automatic or seamless migration",
+        "not cross-resource acid",
+        "no promise of automatic or seamless migration, online-writer coordination",
+        "universal payload conversion",
     ):
-        assert prohibited_claim not in lowered
+        assert required_disclaimer in lowered
 
 
 def test_ordinary_construction_exposes_no_migration_switch_or_cli() -> None:
@@ -183,3 +182,9 @@ def test_ordinary_construction_exposes_no_migration_switch_or_cli() -> None:
     pyproject = Path("pyproject.toml").read_text(encoding="utf-8")
     assert "[project.scripts]" not in pyproject
     assert not list(Path("src/cacheness").glob("*cli*.py"))
+    initialization_guide = Path("docs/STORAGE_INITIALIZATION.md").read_text(
+        encoding="utf-8"
+    )
+    assert "user_version = 8" in initialization_guide
+    assert "wait for the Phase 7 migration tooling" not in initialization_guide
+    assert "STORAGE_MIGRATION.md" in initialization_guide

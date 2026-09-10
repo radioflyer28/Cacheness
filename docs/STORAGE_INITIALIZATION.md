@@ -62,7 +62,7 @@ Inspection of an absent store does not initialize it. Repeated initialization of
 a valid current format-2 store is validation-only; it is not an online schema
 migration operation. The current authority file is
 `.cacheness/lifecycle-authority-v2.sqlite3` with application ID `0x43414348`
-and SQLite `user_version = 7`. This database version is intentionally separate
+and SQLite `user_version = 8`. This database version is intentionally separate
 from the public store-format and payload-format versions.
 
 An incomplete, foreign, or obsolete catalog fails closed with
@@ -71,9 +71,11 @@ automatically. Stop workers and preserve the original root, including signing
 material and SQLite sidecars, before maintenance. For a disposable cache, explicitly
 select a **new empty root** and rebuild from source. For non-disposable stored data,
 retain the original and use a compatible reader/export path where available;
-otherwise wait for the Phase 7 migration tooling. There is no general migration
-command in this change. Never delete an unexplained empty SQLite leaf to make an
-error go away: its ownership or interruption history may be unknown.
+otherwise use the explicit stopped-worker Python workflow in
+[Storage migration and rebuild](STORAGE_MIGRATION.md). There is no general
+migration command or implicit constructor switch. Never delete an unexplained
+empty SQLite leaf to make an error go away: its ownership or interruption
+history may be unknown.
 
 ## One storage engine, separate policy
 
