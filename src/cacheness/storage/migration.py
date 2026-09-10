@@ -1357,6 +1357,24 @@ class OfflineMigrationService:
             raise ValueError(f"{role} manifest is not canonical")
         return manifest
 
+    def _candidate_blob_id(self, manifest: BlobManifest) -> str:
+        """Derive one contained opaque payload identifier for an immutable candidate."""
+        material = "\x00".join(
+            (self.run_id, manifest.key, manifest.generation, manifest.digest)
+        ).encode("utf-8")
+        return f"{hashlib.sha256(material).hexdigest()}{''.join(Path(manifest.locator).suffixes)}"
+
+    def _candidate_locator(self, manifest: BlobManifest) -> str:
+        """Derive the exact backend locator without treating a candidate path as authority."""
+        blob_id = self._candidate_blob_id(manifest)
+        backend = self.destination.payload_backend
+        base_dir = getattr(backend, "base_dir", None)
+        shard_chars = getattr(backend, "shard_chars", None)
+        if isinstance(base_dir, Path) and type(shard_chars) is int:
+            shard = blob_id[:shard_chars] if shard_chars else ""
+            return str(base_dir / shard / blob_id) if shard else str(base_dir / blob_id)
+        return blob_id
+
     def _write_evidence(self, evidence: MaintenanceRunEvidence) -> MaintenanceRunEvidence:
         if not self.evidence_path.exists():
             return self._evidence_store.create(evidence)
@@ -1566,11 +1584,18 @@ class OfflineMigrationService:
                     payload = source_snapshot.path.read_bytes()
                 if hashlib.sha256(payload).hexdigest() != manifest.digest or len(payload) != manifest.byte_size:
                     raise ValueError("source payload fails authenticated integrity verification")
-                suffix = "".join(Path(manifest.locator).suffixes)
-                candidate_locator = (
-                    f"generations/migration/{self.run_id}/{snapshot.generation}{suffix}"
+                candidate_locator = self._candidate_locator(manifest)
+                written_locator = self.destination.payload_backend.write_blob(
+                    self._candidate_blob_id(manifest), payload
                 )
-                self.destination.payload_backend.write_blob(candidate_locator, payload)
+                expected_written_locator = candidate_locator
+                if self.destination.topology.qualified_profile.pair == ("memory", "memory"):
+                    expected_written_locator = f"memory://{candidate_locator}"
+                if written_locator != expected_written_locator:
+                    raise CacheBlobMigrationEvidenceMismatchError(
+                        "candidate backend returned an unexpected locator",
+                        context={"operation": "migration.stage", "run_id": self.run_id},
+                    )
                 candidate_manifest = sign_current_manifest(
                     replace(manifest, locator=candidate_locator), self._evidence_key
                 )
@@ -1675,10 +1700,7 @@ class OfflineMigrationService:
                     )
                 seen_keys.add(snapshot.key)
                 manifest = self._authenticated_manifest(snapshot.manifest, role="source")
-                suffix = "".join(Path(manifest.locator).suffixes)
-                candidate_locator = (
-                    f"generations/migration/{self.run_id}/{snapshot.generation}{suffix}"
-                )
+                candidate_locator = self._candidate_locator(manifest)
                 candidate_manifest = sign_current_manifest(
                     replace(manifest, locator=candidate_locator), self._evidence_key
                 )
@@ -1788,6 +1810,11 @@ class OfflineMigrationService:
         candidates = self._candidate_from_evidence(evidence, plan)
         receipt = evidence.candidate_receipt
         assert receipt is not None
+        record_candidate = getattr(
+            self._destination_authority, "record_verified_candidate", None
+        )
+        if callable(record_candidate):
+            record_candidate(receipt=receipt, entries=candidates)
         activation = self._destination_authority.activate_verified_candidate(
             receipt=receipt,
             entries=candidates,

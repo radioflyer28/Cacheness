@@ -196,6 +196,7 @@ def test_blob_store_public_initialize_provisions_a_fresh_postgresql_authority(
         ("clear_targets",),
         ("reconciliation_runs",),
         ("reconciliation_actions",),
+        ("migration_store_entries",),
     ]
     required_constraints = [
         ("authority_meta_singleton_check",),
@@ -204,6 +205,7 @@ def test_blob_store_public_initialize_provisions_a_fresh_postgresql_authority(
         ("cleanup_debt_operation_locator_role_key",),
         ("clear_targets_run_id_key_key",),
         ("reconciliation_actions_run_id_source_action_id_key",),
+        ("migration_store_entries_run_id_selection_key_key",),
     ]
     factory = _Factory(
         scripts=[
@@ -284,6 +286,7 @@ def test_open_validates_exact_layout_without_emitting_ddl() -> None:
         ("clear_targets",),
         ("reconciliation_runs",),
         ("reconciliation_actions",),
+        ("migration_store_entries",),
     ]
     required_constraints = [
         ("authority_meta_singleton_check",),
@@ -292,6 +295,7 @@ def test_open_validates_exact_layout_without_emitting_ddl() -> None:
         ("cleanup_debt_operation_locator_role_key",),
         ("clear_targets_run_id_key_key",),
         ("reconciliation_actions_run_id_source_action_id_key",),
+        ("migration_store_entries_run_id_selection_key_key",),
     ]
     factory = _Factory(
         scripts=[[

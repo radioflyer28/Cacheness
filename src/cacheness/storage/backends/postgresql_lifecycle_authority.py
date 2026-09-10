@@ -65,10 +65,10 @@ except ImportError:  # pragma: no cover - exercised by optional-dependency users
     sql = None
 
 
-POSTGRESQL_AUTHORITY_SCHEMA_VERSION = 3
-"""Current PostgreSQL authority layout version; Phase 7 migration input."""
+POSTGRESQL_AUTHORITY_SCHEMA_VERSION = 4
+"""First-release PostgreSQL authority layout; development schema 3 is unsupported."""
 
-POSTGRESQL_AUTHORITY_CAPABILITY = "postgresql-lifecycle-authority-v3"
+POSTGRESQL_AUTHORITY_CAPABILITY = "postgresql-lifecycle-authority-v4"
 """Persisted authority capability marker, independent of payload formats."""
 
 SCHEMA_VERSION = POSTGRESQL_AUTHORITY_SCHEMA_VERSION
@@ -95,6 +95,7 @@ _REQUIRED_TABLES = frozenset(
         "clear_targets",
         "reconciliation_runs",
         "reconciliation_actions",
+        "migration_store_entries",
     }
 )
 _REQUIRED_CONSTRAINTS = frozenset(
@@ -105,6 +106,7 @@ _REQUIRED_CONSTRAINTS = frozenset(
         "mutations_mutation_id_key",
         "clear_targets_run_id_key_key",
         "reconciliation_actions_run_id_source_action_id_key",
+        "migration_store_entries_run_id_selection_key_key",
     }
 )
 _T = TypeVar("_T")
@@ -581,7 +583,14 @@ class PostgresqlLifecycleAuthority:
                 "singleton BOOLEAN PRIMARY KEY DEFAULT TRUE, "
                 "schema_version INTEGER NOT NULL, store_identity TEXT NOT NULL, "
                 "capability TEXT NOT NULL, authority_revision BIGINT NOT NULL, "
-                "projection_dirty BOOLEAN NOT NULL, "
+                "projection_dirty BOOLEAN NOT NULL, migration_run_id TEXT, "
+                "migration_plan_digest TEXT, migration_candidate_digest TEXT, "
+                "migration_source_revision BIGINT, migration_activated_revision BIGINT, "
+                "migration_state TEXT NOT NULL DEFAULT 'idle' "
+                "CHECK (migration_state IN ('idle', 'candidate', 'activated_offline', 'active', 'rolled_back')), "
+                "migration_active_selection TEXT NOT NULL DEFAULT 'source' "
+                "CHECK (migration_active_selection IN ('source', 'candidate', 'prior')), "
+                "migration_rollback_eligible BOOLEAN NOT NULL DEFAULT FALSE, "
                 "CONSTRAINT authority_meta_singleton_check CHECK (singleton = TRUE))"
             ).format(self._table("authority_meta"))
         )
@@ -651,6 +660,18 @@ class PostgresqlLifecycleAuthority:
                 "CONSTRAINT reconciliation_actions_run_id_source_action_id_key "
                 "PRIMARY KEY (run_id, source, action_id))"
             ).format(self._table("reconciliation_actions"))
+        )
+        cursor.execute(
+            sql.SQL(
+                "CREATE TABLE IF NOT EXISTS {} ("
+                "run_id TEXT NOT NULL, selection TEXT NOT NULL "
+                "CHECK (selection IN ('candidate', 'prior')), key TEXT NOT NULL, "
+                "generation TEXT NOT NULL, locator TEXT NOT NULL, manifest BYTEA NOT NULL, "
+                "manifest_digest TEXT NOT NULL, lineage BIGINT NOT NULL, "
+                "entry_revision BIGINT NOT NULL, "
+                "CONSTRAINT migration_store_entries_run_id_selection_key_key "
+                "PRIMARY KEY (run_id, selection, key))"
+            ).format(self._table("migration_store_entries"))
         )
         identity = self._expected_store_identity or uuid.uuid4().hex
         cursor.execute(

@@ -10,6 +10,7 @@ the selected authority; they never become visibility authority themselves.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 import hashlib
 import json
 from typing import Protocol, runtime_checkable
@@ -20,6 +21,19 @@ _MAX_TEXT_BYTES = 512
 _MAX_CANDIDATE_ENTRIES = 256
 _MAX_INVENTORY_PAGE_ENTRIES = 256
 _MAX_INVENTORY_WORK_BYTES = 131_072
+SQLITE_MIGRATION_AUTHORITY_SCHEMA_VERSION = 8
+POSTGRESQL_MIGRATION_AUTHORITY_SCHEMA_VERSION = 4
+POSTGRESQL_MIGRATION_AUTHORITY_CAPABILITY = "postgresql-lifecycle-authority-v4"
+
+
+class AuthorityPublicationState(str, Enum):
+    """The only authority-owned states for an offline whole-store cutover."""
+
+    IDLE = "idle"
+    CANDIDATE = "candidate"
+    ACTIVATED_OFFLINE = "activated_offline"
+    ACTIVE = "active"
+    ROLLED_BACK = "rolled_back"
 
 
 def _bounded_text(value: str, field_name: str) -> str:
@@ -217,15 +231,69 @@ class VerifiedCandidateReceipt:
 
 
 @dataclass(frozen=True)
+class PriorStoreReceipt:
+    """Authority evidence that the selected store was retained before activation."""
+
+    run_id: str
+    revision: int
+    entry_count: int
+
+    def __post_init__(self) -> None:
+        _bounded_text(self.run_id, "run_id")
+        for field_name in ("revision", "entry_count"):
+            value = getattr(self, field_name)
+            if type(value) is not int or value < 0:
+                raise ValueError(f"{field_name} must be a non-negative integer")
+
+
+@dataclass(frozen=True)
 class ActivationReceipt:
     """Authority-issued result of the sole whole-store visibility transition."""
 
     candidate_receipt: VerifiedCandidateReceipt
     activation_revision: int
+    prior_store: PriorStoreReceipt | None = None
+    state: AuthorityPublicationState = AuthorityPublicationState.ACTIVATED_OFFLINE
 
     def __post_init__(self) -> None:
         if type(self.activation_revision) is not int or self.activation_revision < 0:
             raise ValueError("activation_revision must be a non-negative integer")
+        if self.state is not AuthorityPublicationState.ACTIVATED_OFFLINE:
+            raise ValueError("activation receipt must record activated_offline state")
+        if self.prior_store is not None and self.prior_store.run_id != self.candidate_receipt.run_id:
+            raise ValueError("prior store receipt must belong to the activated run")
+
+
+@dataclass(frozen=True)
+class RollbackReceipt:
+    """Authority result for the one offline return to the retained prior store."""
+
+    run_id: str
+    rollback_revision: int
+    state: AuthorityPublicationState = AuthorityPublicationState.ROLLED_BACK
+
+    def __post_init__(self) -> None:
+        _bounded_text(self.run_id, "run_id")
+        if type(self.rollback_revision) is not int or self.rollback_revision < 0:
+            raise ValueError("rollback_revision must be a non-negative integer")
+        if self.state is not AuthorityPublicationState.ROLLED_BACK:
+            raise ValueError("rollback receipt must record rolled_back state")
+
+
+@dataclass(frozen=True)
+class FinalizeReceipt:
+    """Authority result that permanently ends rollback eligibility for one run."""
+
+    run_id: str
+    finalized_revision: int
+    state: AuthorityPublicationState = AuthorityPublicationState.ACTIVE
+
+    def __post_init__(self) -> None:
+        _bounded_text(self.run_id, "run_id")
+        if type(self.finalized_revision) is not int or self.finalized_revision < 0:
+            raise ValueError("finalized_revision must be a non-negative integer")
+        if self.state is not AuthorityPublicationState.ACTIVE:
+            raise ValueError("finalize receipt must record active state")
 
 
 @runtime_checkable
@@ -249,14 +317,20 @@ class MigrationAuthority(Protocol):
         entries: tuple[AuthorityInventoryEntry, ...],
     ) -> ActivationReceipt: ...
 
-
 __all__ = [
     "ActivationReceipt",
+    "AuthorityPublicationState",
     "AuthorityInventoryCursor",
     "AuthorityIdentitySnapshot",
     "AuthorityInventoryEntry",
     "AuthorityInventoryPage",
+    "FinalizeReceipt",
     "MigrationAuthority",
+    "POSTGRESQL_MIGRATION_AUTHORITY_CAPABILITY",
+    "POSTGRESQL_MIGRATION_AUTHORITY_SCHEMA_VERSION",
+    "PriorStoreReceipt",
+    "RollbackReceipt",
+    "SQLITE_MIGRATION_AUTHORITY_SCHEMA_VERSION",
     "VerifiedCandidateReceipt",
     "candidate_digest",
     "validate_inventory_page_request",

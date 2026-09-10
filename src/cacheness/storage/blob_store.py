@@ -874,6 +874,11 @@ class BlobStore:
     def _require_canonical_store(self) -> None:
         if self._legacy_identity is not None:
             self._legacy_identity.require_explicit_migration()
+        require_worker_access = getattr(
+            self.lifecycle_authority, "require_ordinary_worker_access", None
+        )
+        if callable(require_worker_access):
+            require_worker_access()
 
     def _is_memory_topology(self) -> bool:
         return self.topology.qualified_profile.pair == ("memory", "memory")
