@@ -1374,6 +1374,9 @@ class OfflineMigrationService:
         """Derive the exact backend locator without treating a candidate path as authority."""
         blob_id = self._candidate_blob_id(manifest)
         backend = self.destination.payload_backend
+        remote_locator = getattr(backend, "migration_candidate_locator", None)
+        if callable(remote_locator):
+            return remote_locator(run_id=self.run_id, candidate_id=blob_id)
         base_dir = getattr(backend, "base_dir", None)
         shard_chars = getattr(backend, "shard_chars", None)
         if isinstance(base_dir, Path) and type(shard_chars) is int:
@@ -1591,9 +1594,42 @@ class OfflineMigrationService:
                 if hashlib.sha256(payload).hexdigest() != manifest.digest or len(payload) != manifest.byte_size:
                     raise ValueError("source payload fails authenticated integrity verification")
                 candidate_locator = self._candidate_locator(manifest)
-                written_locator = self.destination.payload_backend.write_blob(
-                    self._candidate_blob_id(manifest), payload
+                # The operator acknowledgement binds every participant write
+                # through current evidence. Revalidate again immediately
+                # before this external effect; it is not a global-quiescence
+                # claim and does not make the object authoritative.
+                self._revalidate_identities(plan)
+                destination_io = self.destination._materialize_authority_store()
+                remote_candidate_writer = getattr(
+                    destination_io, "write_migration_candidate", None
                 )
+                if callable(remote_candidate_writer):
+                    remote_receipt = remote_candidate_writer(
+                        run_id=self.run_id,
+                        plan_digest=plan.digest,
+                        source_revision=plan.source_identity.revision,
+                        locator=candidate_locator,
+                        payload=payload,
+                        payload_digest=manifest.digest,
+                        byte_size=manifest.byte_size,
+                    )
+                    if (
+                        remote_receipt.run_id != self.run_id
+                        or remote_receipt.plan_digest != plan.digest
+                        or remote_receipt.source_revision != plan.source_identity.revision
+                        or remote_receipt.locator != candidate_locator
+                        or remote_receipt.payload_digest != manifest.digest
+                        or remote_receipt.byte_size != manifest.byte_size
+                    ):
+                        raise CacheBlobMigrationEvidenceMismatchError(
+                            "S3 migration candidate receipt does not bind this exact plan",
+                            context={"operation": "migration.stage", "run_id": self.run_id},
+                        )
+                    written_locator = remote_receipt.locator
+                else:
+                    written_locator = self.destination.payload_backend.write_blob(
+                        self._candidate_blob_id(manifest), payload
+                    )
                 expected_written_locator = candidate_locator
                 if self.destination.topology.qualified_profile.pair == ("memory", "memory"):
                     expected_written_locator = f"memory://{candidate_locator}"

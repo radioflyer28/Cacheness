@@ -11,6 +11,7 @@ endpoints require separate qualification.
 from __future__ import annotations
 
 import hashlib
+import io
 import os
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -54,6 +55,45 @@ class S3ObjectEvidence:
 
     locator: str
     byte_size: int
+
+
+@dataclass(frozen=True)
+class S3MigrationCandidateReceipt:
+    """Attributable immutable S3 effect for one evidence-bound maintenance run.
+
+    This receipt corroborates a staged object.  It never selects a candidate,
+    grants visibility, or substitutes for an authority activation receipt.
+    """
+
+    run_id: str
+    plan_digest: str
+    source_revision: int
+    locator: str
+    payload_digest: str
+    byte_size: int
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.run_id, str)
+            or not self.run_id
+            or "/" in self.run_id
+            or "\\" in self.run_id
+        ):
+            raise ValueError("run_id must be an exact opaque maintenance identifier")
+        for field_name in ("plan_digest", "payload_digest"):
+            value = getattr(self, field_name)
+            if (
+                not isinstance(value, str)
+                or len(value) != 64
+                or any(character not in "0123456789abcdef" for character in value)
+            ):
+                raise ValueError(f"{field_name} must be a SHA-256 hexadecimal value")
+        if type(self.source_revision) is not int or self.source_revision < 0:
+            raise ValueError("source_revision must be a non-negative integer")
+        if not isinstance(self.locator, str) or not self.locator:
+            raise ValueError("locator must be a non-empty string")
+        if type(self.byte_size) is not int or self.byte_size < 0:
+            raise ValueError("byte_size must be a non-negative integer")
 
 
 @dataclass(frozen=True)
@@ -272,6 +312,24 @@ class S3BlobBackend:
         """Map one validated relative generation locator beneath the managed prefix."""
         return f"{self.prefix}{self._locator_text(locator)}"
 
+    def migration_candidate_locator(self, *, run_id: str, candidate_id: str) -> str:
+        """Derive one contained candidate key with an exact operator-run marker."""
+        if (
+            not isinstance(run_id, str)
+            or not run_id
+            or "/" in run_id
+            or "\\" in run_id
+        ):
+            raise CacheConfigurationError("run_id must be an exact opaque maintenance identifier")
+        if (
+            not isinstance(candidate_id, str)
+            or not candidate_id
+            or "/" in candidate_id
+            or "\\" in candidate_id
+        ):
+            raise CacheConfigurationError("candidate_id must be one opaque immutable identifier")
+        return self._locator_text(f"migration-candidates/{run_id}/{candidate_id}")
+
     def materialize_handler_io(self) -> "_S3GenerationIO":
         """Return the one guarded primitive consumed by the lifecycle engine."""
         if self._closed:
@@ -309,6 +367,70 @@ class _S3GenerationIO:
         self._require_open()
         with self._staging.stage(handler, data, config) as staged:
             yield staged
+
+    def write_migration_candidate(
+        self,
+        *,
+        run_id: str,
+        plan_digest: str,
+        source_revision: int,
+        locator: Path | str,
+        payload: bytes,
+        payload_digest: str,
+        byte_size: int,
+    ) -> S3MigrationCandidateReceipt:
+        """Publish one exact maintenance candidate and return only verifiable evidence.
+
+        The caller has already authenticated the source manifest and evidence.
+        This method rechecks the bytes and exact run-owned locator before its
+        one immutable write, then lets the existing response-loss classifier
+        hash an exact private snapshot.  It does not inspect listings, adopt
+        objects, or invoke lifecycle authority operations.
+        """
+        self._require_open()
+        locator_text = self._backend._locator_text(locator)
+        expected_prefix = f"migration-candidates/{run_id}/"
+        if not locator_text.startswith(expected_prefix) or locator_text == expected_prefix:
+            raise CacheBlobLifecycleConflictError(
+                "S3 migration candidate locator does not prove exact run ownership",
+                context={"operation": "s3.migration_candidate", "stage": "ownership"},
+            )
+        try:
+            receipt = S3MigrationCandidateReceipt(
+                run_id=run_id,
+                plan_digest=plan_digest,
+                source_revision=source_revision,
+                locator=locator_text,
+                payload_digest=payload_digest,
+                byte_size=byte_size,
+            )
+        except ValueError as error:
+            raise CacheBlobLifecycleConflictError(
+                "S3 migration candidate receipt is invalid",
+                context={"operation": "s3.migration_candidate", "stage": "receipt"},
+            ) from error
+        if not isinstance(payload, bytes) or len(payload) != byte_size:
+            raise CacheBlobLifecycleConflictError(
+                "S3 migration candidate bytes disagree with the exact receipt",
+                context={"operation": "s3.migration_candidate", "stage": "size"},
+            )
+        if hashlib.sha256(payload).hexdigest() != payload_digest:
+            raise CacheBlobLifecycleConflictError(
+                "S3 migration candidate bytes disagree with the exact receipt",
+                context={"operation": "s3.migration_candidate", "stage": "digest"},
+            )
+        if byte_size > self._backend.max_upload_bytes:
+            raise CacheBlobBackendError(
+                "S3 migration candidate exceeds configured upload bound",
+                context={"operation": "s3.migration_candidate", "stage": "validate"},
+            )
+        source = io.BytesIO(payload)
+        key = self._backend._object_key(locator_text)
+        if byte_size > self._backend.multipart_threshold:
+            self._publish_multipart(source, key, locator_text, byte_size, payload_digest)
+        else:
+            self._publish_single(source, key, locator_text, byte_size, payload_digest)
+        return receipt
 
     @staticmethod
     def _stage_digest(source: Any, expected_size: int) -> str:
