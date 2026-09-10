@@ -99,6 +99,14 @@ def test_memory_tracer_requires_explicit_whole_store_activation(tmp_path: Path) 
 
         activated = service.activate(plan)
         assert activated.completed is True
+        authority = destination.lifecycle_authority
+        assert authority.publication_state() is AuthorityPublicationState.ACTIVATED_OFFLINE
+        with pytest.raises(CacheBlobMigrationOfflineDecisionRequiredError):
+            destination.get("entry")
+
+        resumed = service.resume(plan, run_id=service.run_id, evidence_path=service.evidence_path)
+        assert resumed.completed is True
+        authority.finalize_verified_candidate(run_id=service.run_id)
         assert destination.get("entry") == {"answer": 42}
         # The source remains a retained valid store; activation never deletes it.
         assert source.get("entry") == {"answer": 42}
