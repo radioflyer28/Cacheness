@@ -20,6 +20,9 @@ from types import MappingProxyType
 from typing import Iterable, Mapping
 
 from cacheness.error_handling import (
+    CacheBlobMigrationEvidenceError,
+    CacheBlobMigrationEvidenceMismatchError,
+    CacheBlobMigrationPlanStaleError,
     CacheManifestIntegrityError,
     CacheManifestUnsupportedVersionError,
     CacheMigrationOrRebuildRequiredError,
@@ -35,6 +38,7 @@ from .manifest import (
     verify_current_manifest,
 )
 from .migration_authority import (
+    ActivationReceipt,
     AuthorityIdentitySnapshot,
     AuthorityInventoryEntry,
     MigrationAuthority,
@@ -43,10 +47,10 @@ from .migration_authority import (
 )
 from .migration_evidence import (
     MaintenanceEvidenceState,
+    MaintenanceEvidenceStore,
     MaintenanceRunEvidence,
+    StoppedWorkerAcknowledgement,
     decode_bounded_canonical_json,
-    decode_maintenance_evidence,
-    encode_maintenance_evidence,
 )
 
 
@@ -1196,6 +1200,7 @@ class OfflineMigrationService:
         self.destination = destination
         self.run_id = run_id
         self.work_directory = self._validated_work_directory(work_directory)
+        self._stopped_workers_acknowledged = stopped_workers_acknowledged
         self.compatibility_edges = tuple(compatibility_edges)
         if not self.compatibility_edges:
             raise ValueError("offline migration requires an explicit compatibility edge")
@@ -1203,13 +1208,25 @@ class OfflineMigrationService:
             raise TypeError("compatibility_edges must contain MigrationCompatibilityEdge values")
         self._source_authority = self._migration_authority(source, "source")
         self._destination_authority = self._migration_authority(destination, "destination")
+        source_provider = getattr(source, "_manifest_key_provider", None)
+        destination_provider = getattr(destination, "_manifest_key_provider", None)
+        if source_provider is None or destination_provider is None:
+            raise CacheBlobMigrationEvidenceError(
+                "offline migration requires existing source and destination signing providers",
+                context={"operation": "migration.configure"},
+            )
+        self._evidence_store = MaintenanceEvidenceStore(
+            self.work_directory, self.run_id, source_provider
+        )
+        self.work_directory = self._evidence_store.work_directory
+        self._destination_key_provider = destination_provider
         self._evidence_key = self._shared_signing_key()
         self._candidate_entries: tuple[AuthorityInventoryEntry, ...] = ()
 
     @property
     def evidence_path(self) -> Path:
         """Return the exact user-scoped evidence path; no latest-run lookup exists."""
-        return self.work_directory / f"{self.run_id}.maintenance.json"
+        return self._evidence_store.evidence_path
 
     @staticmethod
     def _migration_authority(store, role: str) -> MigrationAuthority:
@@ -1243,10 +1260,19 @@ class OfflineMigrationService:
             return False
 
     def _shared_signing_key(self) -> bytes:
-        source_key = self.source._authority_manifest_key()
-        destination_key = self.destination._authority_manifest_key()
+        source_key = self._evidence_store._signing_key()
+        try:
+            destination_key = self._destination_key_provider.get_key()
+        except Exception as exc:
+            raise CacheBlobMigrationEvidenceError(
+                "destination maintenance signing identity is unavailable",
+                context={"operation": "migration.configure"},
+            ) from exc
         if not hmac.compare_digest(source_key, destination_key):
-            raise ValueError("source and destination must preserve one signing provider identity")
+            raise CacheBlobMigrationEvidenceMismatchError(
+                "source and destination must preserve one signing provider identity",
+                context={"operation": "migration.configure", "run_id": self.run_id},
+            )
         return source_key
 
     def _revalidate_identities(self, plan: MigrationPlan | None = None) -> tuple[
@@ -1257,8 +1283,58 @@ class OfflineMigrationService:
         if plan is not None and (
             source_identity != plan.source_identity or destination_identity != plan.destination_identity
         ):
-            raise ValueError("migration plan is stale; source or destination identity changed")
+            raise CacheBlobMigrationPlanStaleError(
+                "migration plan is stale; source or destination identity changed",
+                context={"operation": "migration.revalidate", "run_id": self.run_id},
+            )
         return source_identity, destination_identity
+
+    def _acknowledgement(
+        self, plan_digest: str, source_identity: AuthorityIdentitySnapshot
+    ) -> StoppedWorkerAcknowledgement:
+        """Bind the operator assertion to the exact current source and plan."""
+        if not self._stopped_workers_acknowledged:
+            raise CacheBlobMigrationEvidenceMismatchError(
+                "offline migration requires stopped-worker acknowledgement",
+                context={"operation": "migration.acknowledgement", "run_id": self.run_id},
+            )
+        return StoppedWorkerAcknowledgement(
+            run_id=self.run_id,
+            plan_digest=plan_digest,
+            source_identity=source_identity,
+            source_revision=source_identity.revision,
+        )
+
+    def _new_evidence(
+        self,
+        *,
+        state: MaintenanceEvidenceState,
+        plan_digest: str,
+        source_identity: AuthorityIdentitySnapshot,
+        destination_identity: AuthorityIdentitySnapshot,
+        completed_steps: tuple[str, ...],
+        candidate_receipt: VerifiedCandidateReceipt | None = None,
+        activation_receipt: ActivationReceipt | None = None,
+        authority_receipts: tuple[str, ...] = (),
+        completed_output_digests: Mapping[str, str] | None = None,
+    ) -> MaintenanceRunEvidence:
+        """Build a fully bound evidence record without serializing signing bytes."""
+        return MaintenanceRunEvidence(
+            evidence_version=1,
+            run_id=self.run_id,
+            plan_digest=plan_digest,
+            source_identity=source_identity,
+            source_revision=source_identity.revision,
+            destination_identity=destination_identity,
+            destination_revision=destination_identity.revision,
+            acknowledgement=self._acknowledgement(plan_digest, source_identity),
+            state=state,
+            completed_steps=completed_steps,
+            candidate_receipt=candidate_receipt,
+            activation_receipt=activation_receipt,
+            authority_receipts=authority_receipts,
+            completed_output_digests=completed_output_digests or {},
+        )
 
     @staticmethod
     def _inventory_page(authority, cursor=None):
@@ -1281,34 +1357,35 @@ class OfflineMigrationService:
         return manifest
 
     def _write_evidence(self, evidence: MaintenanceRunEvidence) -> MaintenanceRunEvidence:
-        self.work_directory.mkdir(parents=True, exist_ok=True)
-        if self.work_directory.is_symlink() or self.evidence_path.is_symlink():
-            raise ValueError("maintenance evidence path may not be a symlink")
-        encoded = encode_maintenance_evidence(evidence, self._evidence_key)
-        temporary = self.evidence_path.with_suffix(".tmp")
-        temporary.write_bytes(encoded)
-        temporary.replace(self.evidence_path)
-        # Reread each durable boundary before the next action trusts it.
-        return self.read_evidence()
+        if not self.evidence_path.exists():
+            return self._evidence_store.create(evidence)
+        return self._evidence_store.checkpoint(self._evidence_store.read_bytes(), evidence)
 
     def read_evidence(self) -> MaintenanceRunEvidence:
         """Read only this run's authenticated evidence; candidate presence is ignored."""
-        try:
-            raw = self.evidence_path.read_bytes()
-        except OSError as exc:
-            raise ValueError("maintenance evidence is required for this action") from exc
-        evidence = decode_maintenance_evidence(raw, self._evidence_key)
-        if evidence.run_id != self.run_id:
-            raise ValueError("maintenance evidence run_id does not match request")
-        return evidence
+        return self._evidence_store.load()
 
     def _expect_evidence(
         self, state: MaintenanceEvidenceState, *, plan_digest: str
     ) -> MaintenanceRunEvidence:
         evidence = self.read_evidence()
         if evidence.state is not state or evidence.plan_digest != plan_digest:
-            raise ValueError(
-                f"maintenance evidence is not verified for the required {state.value} step"
+            raise CacheBlobMigrationEvidenceMismatchError(
+                f"maintenance evidence is not verified for the required {state.value} step",
+                context={"operation": "migration.evidence", "run_id": self.run_id},
+            )
+        source_identity, destination_identity = self._revalidate_identities()
+        if (
+            evidence.source_identity != source_identity
+            or evidence.source_revision != source_identity.revision
+            or evidence.destination_identity != destination_identity
+            or evidence.destination_revision != destination_identity.revision
+            or evidence.acknowledgement
+            != self._acknowledgement(plan_digest, source_identity)
+        ):
+            raise CacheBlobMigrationPlanStaleError(
+                "maintenance evidence source or destination is stale; reinspection is required",
+                context={"operation": "migration.evidence", "run_id": self.run_id},
             )
         return evidence
 
@@ -1375,14 +1452,11 @@ class OfflineMigrationService:
             assessments=tuple(assessments),
         )
         self._write_evidence(
-            MaintenanceRunEvidence(
-                evidence_version=1,
-                run_id=self.run_id,
+            self._new_evidence(
+                state=MaintenanceEvidenceState.INSPECTED,
                 plan_digest="",
                 source_identity=source_identity,
-                source_revision=source_identity.revision,
                 destination_identity=destination_identity,
-                state=MaintenanceEvidenceState.INSPECTED,
                 completed_steps=("inspect",),
             )
         )
@@ -1397,10 +1471,16 @@ class OfflineMigrationService:
             current_source != inspection.source_identity
             or current_destination != inspection.destination_identity
         ):
-            raise ValueError("inspection is stale; reinspection is required")
+            raise CacheBlobMigrationPlanStaleError(
+                "inspection is stale; reinspection is required",
+                context={"operation": "migration.plan", "run_id": self.run_id},
+            )
         evidence = self._expect_evidence(MaintenanceEvidenceState.INSPECTED, plan_digest="")
         if evidence.source_identity != inspection.source_identity:
-            raise ValueError("inspection evidence does not corroborate the source")
+            raise CacheBlobMigrationEvidenceMismatchError(
+                "inspection evidence does not corroborate the source",
+                context={"operation": "migration.plan", "run_id": self.run_id},
+            )
         if any(
             assessment.disposition is not MigrationDisposition.MIGRATABLE
             for assessment in inspection.assessments
@@ -1415,30 +1495,44 @@ class OfflineMigrationService:
             compatibility=_all_supported_compatibility(),
         )
         self._write_evidence(
-            MaintenanceRunEvidence(
-                evidence_version=1,
-                run_id=self.run_id,
+            self._new_evidence(
+                state=MaintenanceEvidenceState.PLANNED,
                 plan_digest=plan.digest,
                 source_identity=plan.source_identity,
-                source_revision=plan.source_identity.revision,
                 destination_identity=plan.destination_identity,
-                state=MaintenanceEvidenceState.PLANNED,
                 completed_steps=("inspect", "plan"),
+                completed_output_digests={"plan": plan.digest},
             )
         )
         return plan
 
     def _validate_plan(self, plan: MigrationPlan) -> None:
         if not isinstance(plan, MigrationPlan) or plan.run_id != self.run_id:
-            raise ValueError("migration plan does not belong to this explicit run")
+            raise CacheBlobMigrationEvidenceMismatchError(
+                "migration plan does not belong to this explicit run",
+                context={"operation": "migration.plan", "run_id": self.run_id},
+            )
         if not hmac.compare_digest(plan.digest, plan._expected_digest()):
-            raise ValueError("migration plan digest is invalid")
+            raise CacheBlobMigrationEvidenceMismatchError(
+                "migration plan digest is invalid",
+                context={"operation": "migration.plan", "run_id": self.run_id},
+            )
         self._revalidate_identities(plan)
 
     def stage(self, plan: MigrationPlan) -> MigrationStepResult:
         """Copy authenticated immutable payloads into an invisible candidate."""
         self._validate_plan(plan)
         self._expect_evidence(MaintenanceEvidenceState.PLANNED, plan_digest=plan.digest)
+        self._write_evidence(
+            self._new_evidence(
+                state=MaintenanceEvidenceState.STAGING,
+                plan_digest=plan.digest,
+                source_identity=plan.source_identity,
+                destination_identity=plan.destination_identity,
+                completed_steps=("inspect", "plan"),
+                completed_output_digests={"plan": plan.digest},
+            )
+        )
         expected = {assessment.entry.key: assessment for assessment in plan.assessments}
         candidates: list[AuthorityInventoryEntry] = []
         seen_keys: set[str] = set()
@@ -1501,16 +1595,17 @@ class OfflineMigrationService:
             byte_count=sum(entry.byte_size for entry in self._candidate_entries),
         )
         self._write_evidence(
-            MaintenanceRunEvidence(
-                evidence_version=1,
-                run_id=self.run_id,
+            self._new_evidence(
+                state=MaintenanceEvidenceState.STAGED,
                 plan_digest=plan.digest,
                 source_identity=plan.source_identity,
-                source_revision=plan.source_identity.revision,
                 destination_identity=plan.destination_identity,
-                state=MaintenanceEvidenceState.STAGED,
                 completed_steps=("inspect", "plan", "stage"),
                 candidate_receipt=receipt,
+                completed_output_digests={
+                    "plan": plan.digest,
+                    "stage": receipt.candidate_digest,
+                },
             )
         )
         return MigrationStepResult(MaintenanceEvidenceState.STAGED, True, self.evidence_path)
@@ -1531,6 +1626,17 @@ class OfflineMigrationService:
         """Verify every candidate payload and descriptor before activation is allowed."""
         self._validate_plan(plan)
         evidence = self._expect_evidence(MaintenanceEvidenceState.STAGED, plan_digest=plan.digest)
+        self._write_evidence(
+            self._new_evidence(
+                state=MaintenanceEvidenceState.VERIFYING,
+                plan_digest=plan.digest,
+                source_identity=plan.source_identity,
+                destination_identity=plan.destination_identity,
+                completed_steps=("inspect", "plan", "stage"),
+                candidate_receipt=evidence.candidate_receipt,
+                completed_output_digests=dict(evidence.completed_output_digests),
+            )
+        )
         candidates = self._candidate_from_evidence(evidence, plan)
         for candidate in candidates:
             manifest = self._authenticated_manifest(candidate.manifest, role="candidate")
@@ -1549,16 +1655,17 @@ class OfflineMigrationService:
         receipt = evidence.candidate_receipt
         assert receipt is not None
         self._write_evidence(
-            MaintenanceRunEvidence(
-                evidence_version=1,
-                run_id=self.run_id,
+            self._new_evidence(
+                state=MaintenanceEvidenceState.VERIFIED,
                 plan_digest=plan.digest,
                 source_identity=plan.source_identity,
-                source_revision=plan.source_identity.revision,
                 destination_identity=plan.destination_identity,
-                state=MaintenanceEvidenceState.VERIFIED,
                 completed_steps=("inspect", "plan", "stage", "verify"),
                 candidate_receipt=receipt,
+                completed_output_digests={
+                    **evidence.completed_output_digests,
+                    "verify": receipt.candidate_digest,
+                },
             )
         )
         return MigrationStepResult(MaintenanceEvidenceState.VERIFIED, True, self.evidence_path)
@@ -1574,18 +1681,23 @@ class OfflineMigrationService:
             receipt=receipt,
             entries=candidates,
         )
+        activation_digest = hashlib.sha256(
+            f"{activation.activation_revision}:{receipt.candidate_digest}".encode("ascii")
+        ).hexdigest()
         self._write_evidence(
-            MaintenanceRunEvidence(
-                evidence_version=1,
-                run_id=self.run_id,
+            self._new_evidence(
+                state=MaintenanceEvidenceState.ACTIVATED,
                 plan_digest=plan.digest,
                 source_identity=plan.source_identity,
-                source_revision=plan.source_identity.revision,
                 destination_identity=plan.destination_identity,
-                state=MaintenanceEvidenceState.ACTIVATED,
                 completed_steps=("inspect", "plan", "stage", "verify", "activate"),
                 candidate_receipt=receipt,
                 activation_receipt=activation,
+                authority_receipts=(activation_digest,),
+                completed_output_digests={
+                    **evidence.completed_output_digests,
+                    "activate": activation_digest,
+                },
             )
         )
         return MigrationStepResult(MaintenanceEvidenceState.ACTIVATED, True, self.evidence_path)

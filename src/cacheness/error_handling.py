@@ -68,6 +68,12 @@ class CacheReason(str, Enum):
     CATALOG_CURSOR_INVALID = "catalog_cursor_invalid"
     CATALOG_CURSOR_STALE = "catalog_cursor_stale"
     MIGRATION_OR_REBUILD_REQUIRED = "migration_or_rebuild_required"
+    BLOB_MIGRATION_PLAN_STALE = "blob_migration_plan_stale"
+    BLOB_MIGRATION_EVIDENCE_INVALID = "blob_migration_evidence_invalid"
+    BLOB_MIGRATION_EVIDENCE_MISMATCH = "blob_migration_evidence_mismatch"
+    BLOB_MIGRATION_CONFIRMATION_REQUIRED = "blob_migration_confirmation_required"
+    BLOB_MIGRATION_OFFLINE_DECISION_REQUIRED = "blob_migration_offline_decision_required"
+    BLOB_MIGRATION_CLEANUP_REQUIRED = "blob_migration_cleanup_required"
 
 
 class CacheError(Exception):
@@ -218,6 +224,84 @@ class CacheMigrationOrRebuildRequiredError(CacheStorageError):
         context: Optional[Dict[str, Any]] = None,
         *,
         reason: CacheReason = CacheReason.MIGRATION_OR_REBUILD_REQUIRED,
+    ):
+        super().__init__(message, _context_with_reason(context, reason))
+
+
+class CacheBlobMigrationPlanStaleError(CacheStorageError):
+    """Raised when a source or destination no longer matches an inspected plan."""
+
+    def __init__(
+        self,
+        message: str,
+        context: Optional[Dict[str, Any]] = None,
+        *,
+        reason: CacheReason = CacheReason.BLOB_MIGRATION_PLAN_STALE,
+    ):
+        super().__init__(message, _context_with_reason(context, reason))
+
+
+class CacheBlobMigrationEvidenceError(CacheStorageError, ValueError):
+    """Raised when explicit maintenance evidence is absent, malformed, or forged."""
+
+    def __init__(
+        self,
+        message: str,
+        context: Optional[Dict[str, Any]] = None,
+        *,
+        reason: CacheReason = CacheReason.BLOB_MIGRATION_EVIDENCE_INVALID,
+    ):
+        super().__init__(message, _context_with_reason(context, reason))
+
+
+class CacheBlobMigrationEvidenceMismatchError(CacheBlobMigrationEvidenceError):
+    """Raised when authentic evidence binds a different run, plan, or output."""
+
+    def __init__(
+        self,
+        message: str,
+        context: Optional[Dict[str, Any]] = None,
+        *,
+        reason: CacheReason = CacheReason.BLOB_MIGRATION_EVIDENCE_MISMATCH,
+    ):
+        super().__init__(message, context, reason=reason)
+
+
+class CacheBlobMigrationConfirmationError(CacheStorageError):
+    """Raised when an offline operator acknowledgement is absent or invalid."""
+
+    def __init__(
+        self,
+        message: str,
+        context: Optional[Dict[str, Any]] = None,
+        *,
+        reason: CacheReason = CacheReason.BLOB_MIGRATION_CONFIRMATION_REQUIRED,
+    ):
+        super().__init__(message, _context_with_reason(context, reason))
+
+
+class CacheBlobMigrationOfflineDecisionRequiredError(CacheStorageError):
+    """Raised when a resume needs explicit operator inputs or a fresh inspection."""
+
+    def __init__(
+        self,
+        message: str,
+        context: Optional[Dict[str, Any]] = None,
+        *,
+        reason: CacheReason = CacheReason.BLOB_MIGRATION_OFFLINE_DECISION_REQUIRED,
+    ):
+        super().__init__(message, _context_with_reason(context, reason))
+
+
+class CacheBlobMigrationCleanupError(CacheStorageError):
+    """Raised when explicit post-cutover cleanup requires a retryable offline action."""
+
+    def __init__(
+        self,
+        message: str,
+        context: Optional[Dict[str, Any]] = None,
+        *,
+        reason: CacheReason = CacheReason.BLOB_MIGRATION_CLEANUP_REQUIRED,
     ):
         super().__init__(message, _context_with_reason(context, reason))
 

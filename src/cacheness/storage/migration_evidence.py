@@ -1,13 +1,30 @@
-"""Authenticated bounded evidence for explicit offline maintenance runs."""
+"""Authenticated bounded evidence for explicit offline maintenance runs.
+
+Maintenance evidence records an operator-directed offline workflow. It is never
+lifecycle authority: a selected ``MigrationAuthority`` alone publishes a
+candidate. The codec accepts only a small canonical JSON language so corrupt or
+ambiguous evidence fails before it can direct a resume.
+"""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from enum import Enum
+import hashlib
 import hmac
 import json
+import os
+from pathlib import Path
+import re
+import tempfile
 from typing import Any, Mapping
 
+from cacheness.error_handling import (
+    CacheBlobMigrationEvidenceError,
+    CacheBlobMigrationEvidenceMismatchError,
+)
+
+from .integrity import ManifestSigningKeyProvider
 from .migration_authority import (
     ActivationReceipt,
     AuthorityIdentitySnapshot,
@@ -22,10 +39,12 @@ _MAX_TEXT_BYTES = 512
 _MAX_CANONICAL_DEPTH = 16
 _MAX_CANONICAL_NODES = 16_384
 _MAX_CANONICAL_ITEMS = 4_096
+_MAX_COMPLETED_STEPS = 16
+_RUN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
 
 
 def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    """Reject duplicate JSON object keys before a plan can reinterpret them."""
+    """Reject duplicate JSON object keys before a record can be reinterpreted."""
     record: dict[str, object] = {}
     for key, value in pairs:
         if key in record:
@@ -53,7 +72,7 @@ def _reject_constant(raw: str) -> object:
 def _validate_canonical_value(
     value: object, *, depth: int, nodes: list[int], max_text_bytes: int
 ) -> None:
-    """Apply allocation bounds before callers construct semantic plan values."""
+    """Apply structural bounds before callers construct semantic evidence values."""
     nodes[0] += 1
     if nodes[0] > _MAX_CANONICAL_NODES or depth > _MAX_CANONICAL_DEPTH:
         raise ValueError("canonical JSON exceeds structural bounds")
@@ -106,20 +125,55 @@ def decode_bounded_canonical_json(
         raise ValueError("canonical JSON is invalid") from exc
     if not isinstance(record, dict):
         raise ValueError("canonical JSON must contain one object")
-    _validate_canonical_value(
-        record, depth=1, nodes=[0], max_text_bytes=max_text_bytes
-    )
+    _validate_canonical_value(record, depth=1, nodes=[0], max_text_bytes=max_text_bytes)
     return record
 
 
 class MaintenanceEvidenceState(str, Enum):
-    """Monotonic offline-service boundaries represented by one evidence model."""
+    """Explicit bounded states of one offline maintenance workflow."""
 
     INSPECTED = "inspected"
     PLANNED = "planned"
+    STAGING = "staging"
     STAGED = "staged"
+    VERIFYING = "verifying"
     VERIFIED = "verified"
     ACTIVATED = "activated"
+    ROLLED_BACK = "rolled_back"
+    FINALIZED = "finalized"
+    PURGE_PENDING = "purge_pending"
+    PURGED = "purged"
+    ABORTED = "aborted"
+
+
+_LEGAL_TRANSITIONS: Mapping[MaintenanceEvidenceState, frozenset[MaintenanceEvidenceState]] = {
+    MaintenanceEvidenceState.INSPECTED: frozenset(
+        {MaintenanceEvidenceState.PLANNED, MaintenanceEvidenceState.ABORTED}
+    ),
+    MaintenanceEvidenceState.PLANNED: frozenset(
+        {MaintenanceEvidenceState.STAGING, MaintenanceEvidenceState.ABORTED}
+    ),
+    MaintenanceEvidenceState.STAGING: frozenset(
+        {MaintenanceEvidenceState.STAGED, MaintenanceEvidenceState.ABORTED}
+    ),
+    MaintenanceEvidenceState.STAGED: frozenset(
+        {MaintenanceEvidenceState.VERIFYING, MaintenanceEvidenceState.ABORTED}
+    ),
+    MaintenanceEvidenceState.VERIFYING: frozenset(
+        {MaintenanceEvidenceState.VERIFIED, MaintenanceEvidenceState.ABORTED}
+    ),
+    MaintenanceEvidenceState.VERIFIED: frozenset(
+        {MaintenanceEvidenceState.ACTIVATED, MaintenanceEvidenceState.ABORTED}
+    ),
+    MaintenanceEvidenceState.ACTIVATED: frozenset(
+        {MaintenanceEvidenceState.ROLLED_BACK, MaintenanceEvidenceState.FINALIZED}
+    ),
+    MaintenanceEvidenceState.FINALIZED: frozenset({MaintenanceEvidenceState.PURGE_PENDING}),
+    MaintenanceEvidenceState.PURGE_PENDING: frozenset({MaintenanceEvidenceState.PURGED}),
+    MaintenanceEvidenceState.ROLLED_BACK: frozenset(),
+    MaintenanceEvidenceState.PURGED: frozenset(),
+    MaintenanceEvidenceState.ABORTED: frozenset(),
+}
 
 
 def _bounded_text(value: object, field_name: str, *, allow_empty: bool = False) -> str:
@@ -127,6 +181,15 @@ def _bounded_text(value: object, field_name: str, *, allow_empty: bool = False) 
         raise ValueError(f"{field_name} must be a bounded string")
     if len(value.encode("utf-8")) > _MAX_TEXT_BYTES:
         raise ValueError(f"{field_name} exceeds the byte bound")
+    return value
+
+
+def _sha256(value: object, field_name: str, *, allow_empty: bool = False) -> str:
+    value = _bounded_text(value, field_name, allow_empty=allow_empty)
+    if not value and allow_empty:
+        return value
+    if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+        raise ValueError(f"{field_name} must be a SHA-256 hexadecimal value")
     return value
 
 
@@ -201,8 +264,55 @@ def _receipt_from_record(record: object) -> VerifiedCandidateReceipt:
 
 
 @dataclass(frozen=True)
+class StoppedWorkerAcknowledgement:
+    """An operator assertion, not global-quiescence proof or an authority lease."""
+
+    run_id: str
+    plan_digest: str
+    source_identity: AuthorityIdentitySnapshot
+    source_revision: int
+    acknowledged: bool = True
+
+    def __post_init__(self) -> None:
+        if _RUN_ID.fullmatch(_bounded_text(self.run_id, "run_id")) is None:
+            raise ValueError("run_id must be an opaque maintenance identifier")
+        _sha256(self.plan_digest, "plan_digest", allow_empty=True)
+        if self.source_revision != self.source_identity.revision:
+            raise ValueError("acknowledgement source revision must match its identity")
+        if self.acknowledged is not True:
+            raise ValueError("stopped-worker acknowledgement must be explicit")
+
+    def to_record(self) -> dict[str, object]:
+        return {
+            "acknowledged": self.acknowledged,
+            "plan_digest": self.plan_digest,
+            "run_id": self.run_id,
+            "source_identity": _identity_record(self.source_identity),
+            "source_revision": self.source_revision,
+        }
+
+    @classmethod
+    def from_record(cls, record: object) -> "StoppedWorkerAcknowledgement":
+        if not isinstance(record, Mapping) or set(record) != {
+            "acknowledged",
+            "plan_digest",
+            "run_id",
+            "source_identity",
+            "source_revision",
+        }:
+            raise ValueError("stopped-worker acknowledgement is invalid")
+        return cls(
+            run_id=record["run_id"],
+            plan_digest=record["plan_digest"],
+            source_identity=_identity_from_record(record["source_identity"], "source_identity"),
+            source_revision=record["source_revision"],
+            acknowledged=record["acknowledged"],
+        )
+
+
+@dataclass(frozen=True)
 class MaintenanceRunEvidence:
-    """Versioned canonical envelope; signing material never appears in this value."""
+    """Versioned signed maintenance state with no serialized key material."""
 
     evidence_version: int
     run_id: str
@@ -210,44 +320,93 @@ class MaintenanceRunEvidence:
     source_identity: AuthorityIdentitySnapshot
     source_revision: int
     destination_identity: AuthorityIdentitySnapshot
+    destination_revision: int
+    acknowledgement: StoppedWorkerAcknowledgement
     state: MaintenanceEvidenceState
     completed_steps: tuple[str, ...]
     candidate_receipt: VerifiedCandidateReceipt | None = None
     activation_receipt: ActivationReceipt | None = None
+    authority_receipts: tuple[str, ...] = ()
+    cleanup_debt: tuple[str, ...] = ()
+    completed_output_digests: Mapping[str, str] = field(default_factory=dict)
+    signing_key_fingerprint: str = ""
 
     def __post_init__(self) -> None:
         if self.evidence_version != _EVIDENCE_VERSION:
             raise ValueError("unsupported maintenance evidence version")
-        _bounded_text(self.run_id, "run_id")
-        _bounded_text(self.plan_digest, "plan_digest", allow_empty=True)
-        if self.plan_digest and (
-            len(self.plan_digest) != 64
-            or any(character not in "0123456789abcdef" for character in self.plan_digest)
+        if _RUN_ID.fullmatch(_bounded_text(self.run_id, "run_id")) is None:
+            raise ValueError("run_id must be an opaque maintenance identifier")
+        _sha256(self.plan_digest, "plan_digest", allow_empty=True)
+        if self.source_revision != self.source_identity.revision:
+            raise ValueError("source_revision must match source_identity")
+        if self.destination_revision != self.destination_identity.revision:
+            raise ValueError("destination_revision must match destination_identity")
+        if not isinstance(self.acknowledgement, StoppedWorkerAcknowledgement):
+            raise ValueError("maintenance evidence requires a stopped-worker acknowledgement")
+        if (
+            self.acknowledgement.run_id != self.run_id
+            or self.acknowledgement.plan_digest != self.plan_digest
+            or self.acknowledgement.source_identity != self.source_identity
+            or self.acknowledgement.source_revision != self.source_revision
         ):
-            raise ValueError("plan_digest must be a SHA-256 hexadecimal value")
-        if type(self.source_revision) is not int or self.source_revision < 0:
-            raise ValueError("source_revision must be a non-negative integer")
+            raise ValueError("stopped-worker acknowledgement does not bind this evidence")
         if not isinstance(self.state, MaintenanceEvidenceState):
             raise ValueError("state must be a maintenance evidence state")
-        if not isinstance(self.completed_steps, tuple) or len(self.completed_steps) > 8:
-            raise ValueError("completed_steps must be a bounded tuple")
+        if (
+            not isinstance(self.completed_steps, tuple)
+            or not self.completed_steps
+            or len(self.completed_steps) > _MAX_COMPLETED_STEPS
+            or len(set(self.completed_steps)) != len(self.completed_steps)
+        ):
+            raise ValueError("completed_steps must be an ordered bounded tuple")
         for step in self.completed_steps:
             _bounded_text(step, "completed_step")
-        if self.candidate_receipt is not None and self.candidate_receipt.run_id != self.run_id:
-            raise ValueError("candidate_receipt run_id disagrees with evidence")
+        if self.candidate_receipt is not None:
+            if (
+                self.candidate_receipt.run_id != self.run_id
+                or self.candidate_receipt.plan_digest != self.plan_digest
+                or self.candidate_receipt.source_identity != self.source_identity
+                or self.candidate_receipt.source_revision != self.source_revision
+                or self.candidate_receipt.destination_identity != self.destination_identity
+                or self.candidate_receipt.destination_revision != self.destination_revision
+            ):
+                raise ValueError("candidate_receipt does not bind this evidence")
         if self.activation_receipt is not None and self.candidate_receipt is None:
             raise ValueError("activation_receipt requires candidate_receipt")
+        for value in (*self.authority_receipts, *self.cleanup_debt):
+            _sha256(value, "maintenance receipt")
+        if not isinstance(self.completed_output_digests, Mapping):
+            raise ValueError("completed_output_digests must be a mapping")
+        if set(self.completed_output_digests) - set(self.completed_steps):
+            raise ValueError("completed output digest lacks a completed step")
+        output_digests = dict(self.completed_output_digests)
+        for step, digest in output_digests.items():
+            _bounded_text(step, "completed output step")
+            _sha256(digest, "completed output digest")
+        object.__setattr__(self, "completed_output_digests", output_digests)
+        _sha256(self.signing_key_fingerprint, "signing_key_fingerprint", allow_empty=True)
+
+    def with_signing_key_fingerprint(self, fingerprint: str) -> "MaintenanceRunEvidence":
+        """Bind a non-secret provider identity before persistence."""
+        _sha256(fingerprint, "signing_key_fingerprint")
+        return replace(self, signing_key_fingerprint=fingerprint)
 
     def to_record(self) -> dict[str, object]:
-        """Return the public canonical record, omitting no authoritative fields."""
+        """Return complete canonical fields while excluding secret key bytes."""
         record: dict[str, object] = {
+            "acknowledgement": self.acknowledgement.to_record(),
             "activation_receipt": None,
+            "authority_receipts": list(self.authority_receipts),
             "candidate_receipt": None,
+            "cleanup_debt": list(self.cleanup_debt),
+            "completed_output_digests": dict(sorted(self.completed_output_digests.items())),
             "completed_steps": list(self.completed_steps),
             "destination_identity": _identity_record(self.destination_identity),
+            "destination_revision": self.destination_revision,
             "evidence_version": self.evidence_version,
             "plan_digest": self.plan_digest,
             "run_id": self.run_id,
+            "signing_key_fingerprint": self.signing_key_fingerprint,
             "source_identity": _identity_record(self.source_identity),
             "source_revision": self.source_revision,
             "state": self.state.value,
@@ -262,15 +421,21 @@ class MaintenanceRunEvidence:
 
     @classmethod
     def from_record(cls, record: object) -> "MaintenanceRunEvidence":
-        """Decode an exact evidence record only after envelope authentication."""
+        """Decode exact evidence fields after outer-envelope authentication."""
         required = {
+            "acknowledgement",
             "activation_receipt",
+            "authority_receipts",
             "candidate_receipt",
+            "cleanup_debt",
+            "completed_output_digests",
             "completed_steps",
             "destination_identity",
+            "destination_revision",
             "evidence_version",
             "plan_digest",
             "run_id",
+            "signing_key_fingerprint",
             "source_identity",
             "source_revision",
             "state",
@@ -278,8 +443,9 @@ class MaintenanceRunEvidence:
         if not isinstance(record, Mapping) or set(record) != required:
             raise ValueError("maintenance evidence fields are invalid")
         steps = record["completed_steps"]
-        if not isinstance(steps, list):
-            raise ValueError("completed_steps is invalid")
+        output_digests = record["completed_output_digests"]
+        if not isinstance(steps, list) or not isinstance(output_digests, Mapping):
+            raise ValueError("maintenance evidence completion records are invalid")
         candidate = record["candidate_receipt"]
         candidate_receipt = None if candidate is None else _receipt_from_record(candidate)
         activation = record["activation_receipt"]
@@ -306,10 +472,29 @@ class MaintenanceRunEvidence:
             destination_identity=_identity_from_record(
                 record["destination_identity"], "destination_identity"
             ),
+            destination_revision=record["destination_revision"],
+            acknowledgement=StoppedWorkerAcknowledgement.from_record(record["acknowledgement"]),
             state=state,
             completed_steps=tuple(steps),
             candidate_receipt=candidate_receipt,
             activation_receipt=activation_receipt,
+            authority_receipts=tuple(record["authority_receipts"]),
+            cleanup_debt=tuple(record["cleanup_debt"]),
+            completed_output_digests=output_digests,
+            signing_key_fingerprint=record["signing_key_fingerprint"],
+        )
+
+    def render_report(self) -> str:
+        """Render only validated public fields for an operator report."""
+        return "\n".join(
+            (
+                f"Maintenance run: {self.run_id}",
+                f"State: {self.state.value}",
+                f"Plan digest: {self.plan_digest or 'not-yet-planned'}",
+                f"Source: {self.source_identity.store_id}@{self.source_revision}",
+                f"Destination: {self.destination_identity.store_id}@{self.destination_revision}",
+                f"Signing key fingerprint: {self.signing_key_fingerprint or 'not-recorded'}",
+            )
         )
 
 
@@ -318,15 +503,16 @@ def _canonical_bytes(record: Mapping[str, Any]) -> bytes:
 
 
 def encode_maintenance_evidence(evidence: MaintenanceRunEvidence, signing_key: bytes) -> bytes:
-    """Authenticate a bounded evidence envelope using provider-supplied bytes."""
+    """Authenticate a bounded evidence envelope using already-authorized bytes."""
     if not isinstance(evidence, MaintenanceRunEvidence):
         raise TypeError("evidence must be a MaintenanceRunEvidence")
     if type(signing_key) is not bytes or len(signing_key) != 32:
         raise ValueError("maintenance evidence requires a 32-byte signing key")
     unsigned = evidence.to_record()
-    signature = hmac.new(signing_key, _EVIDENCE_DOMAIN + _canonical_bytes(unsigned), "sha256").hexdigest()
-    envelope = {"evidence": unsigned, "signature": signature}
-    encoded = _canonical_bytes(envelope)
+    signature = hmac.new(
+        signing_key, _EVIDENCE_DOMAIN + _canonical_bytes(unsigned), "sha256"
+    ).hexdigest()
+    encoded = _canonical_bytes({"evidence": unsigned, "signature": signature})
     if len(encoded) > _MAX_EVIDENCE_BYTES:
         raise ValueError("maintenance evidence exceeds the byte bound")
     return encoded
@@ -348,7 +534,9 @@ def decode_maintenance_evidence(raw: bytes, signing_key: bytes) -> MaintenanceRu
     signature = envelope["signature"]
     if not isinstance(signature, str) or len(signature) != 64:
         raise ValueError("maintenance evidence signature is invalid")
-    expected = hmac.new(signing_key, _EVIDENCE_DOMAIN + _canonical_bytes(evidence), "sha256").hexdigest()
+    expected = hmac.new(
+        signing_key, _EVIDENCE_DOMAIN + _canonical_bytes(evidence), "sha256"
+    ).hexdigest()
     if not hmac.compare_digest(signature, expected):
         raise ValueError("maintenance evidence authentication failed")
     if raw != _canonical_bytes({"evidence": evidence, "signature": signature}):
@@ -356,9 +544,266 @@ def decode_maintenance_evidence(raw: bytes, signing_key: bytes) -> MaintenanceRu
     return MaintenanceRunEvidence.from_record(evidence)
 
 
+class MaintenanceEvidenceStore:
+    """Contain and conditionally replace one run's authenticated evidence file.
+
+    No discovery API exists: callers supply a work directory and run ID, and
+    only the exact derived path for that pair can be read or replaced.
+    """
+
+    def __init__(
+        self,
+        work_directory: str | Path,
+        run_id: str,
+        key_provider: ManifestSigningKeyProvider,
+    ) -> None:
+        if not isinstance(run_id, str) or _RUN_ID.fullmatch(run_id) is None:
+            raise CacheBlobMigrationEvidenceError(
+                "maintenance evidence run_id is invalid",
+                context={"operation": "maintenance_evidence.configure"},
+            )
+        if not isinstance(key_provider, ManifestSigningKeyProvider):
+            raise TypeError("key_provider must provide read-only get_key()")
+        self._supplied_work_directory = Path(work_directory)
+        self.run_id = run_id
+        self._key_provider = key_provider
+        self._work_directory = self._resolve_work_directory(create=False)
+
+    @property
+    def work_directory(self) -> Path:
+        """Return the validated resolved work root."""
+        return self._work_directory
+
+    @property
+    def evidence_path(self) -> Path:
+        """Return the only allowed evidence path for this exact run."""
+        return self._work_directory / f"{self.run_id}.maintenance.json"
+
+    def _resolve_work_directory(self, *, create: bool) -> Path:
+        supplied = self._supplied_work_directory
+        absolute = supplied if supplied.is_absolute() else Path.cwd() / supplied
+        current = Path(absolute.anchor)
+        for part in absolute.parts[1:]:
+            current /= part
+            if current.exists() and current.is_symlink():
+                raise CacheBlobMigrationEvidenceError(
+                    "maintenance evidence work directory cannot traverse a symlink",
+                    context={"operation": "maintenance_evidence.path"},
+                )
+        if create:
+            try:
+                absolute.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                raise CacheBlobMigrationEvidenceError(
+                    "maintenance evidence work directory cannot be created",
+                    context={"operation": "maintenance_evidence.path"},
+                ) from exc
+            current = Path(absolute.anchor)
+            for part in absolute.parts[1:]:
+                current /= part
+                if current.is_symlink():
+                    raise CacheBlobMigrationEvidenceError(
+                        "maintenance evidence work directory cannot traverse a symlink",
+                        context={"operation": "maintenance_evidence.path"},
+                    )
+        elif not absolute.exists():
+            return absolute.resolve(strict=False)
+        return absolute.resolve(strict=True)
+
+    def _assert_evidence_path(self) -> None:
+        path = self.evidence_path
+        if path.parent != self._work_directory or path.name != f"{self.run_id}.maintenance.json":
+            raise CacheBlobMigrationEvidenceError(
+                "maintenance evidence path is outside its exact work directory",
+                context={"operation": "maintenance_evidence.path"},
+            )
+        if path.exists() and path.is_symlink():
+            raise CacheBlobMigrationEvidenceError(
+                "maintenance evidence path cannot be a symlink",
+                context={"operation": "maintenance_evidence.path"},
+            )
+
+    def _signing_key(self) -> bytes:
+        try:
+            key = self._key_provider.get_key()
+        except Exception as exc:
+            raise CacheBlobMigrationEvidenceError(
+                "maintenance evidence signing identity is unavailable",
+                context={"operation": "maintenance_evidence.sign"},
+            ) from exc
+        if type(key) is not bytes or len(key) != 32:
+            raise CacheBlobMigrationEvidenceError(
+                "maintenance evidence signing identity is invalid",
+                context={"operation": "maintenance_evidence.sign"},
+            )
+        return key
+
+    def signing_key_fingerprint(self) -> str:
+        """Expose a non-secret identity marker for signed evidence diagnostics."""
+        return hashlib.sha256(self._signing_key()).hexdigest()
+
+    def _bind_signing_identity(self, evidence: MaintenanceRunEvidence) -> MaintenanceRunEvidence:
+        if not isinstance(evidence, MaintenanceRunEvidence) or evidence.run_id != self.run_id:
+            raise CacheBlobMigrationEvidenceMismatchError(
+                "maintenance evidence does not bind the configured run_id",
+                context={"operation": "maintenance_evidence.bind", "run_id": self.run_id},
+            )
+        fingerprint = self.signing_key_fingerprint()
+        if evidence.signing_key_fingerprint and not hmac.compare_digest(
+            evidence.signing_key_fingerprint, fingerprint
+        ):
+            raise CacheBlobMigrationEvidenceMismatchError(
+                "maintenance evidence signing identity does not match",
+                context={"operation": "maintenance_evidence.bind", "run_id": self.run_id},
+            )
+        return evidence.with_signing_key_fingerprint(fingerprint)
+
+    def _atomic_write(self, raw: bytes) -> None:
+        self._work_directory = self._resolve_work_directory(create=True)
+        self._assert_evidence_path()
+        descriptor = None
+        temporary_name = None
+        try:
+            descriptor, temporary_name = tempfile.mkstemp(
+                prefix=".maintenance-evidence-", suffix=".tmp", dir=self._work_directory
+            )
+            with os.fdopen(descriptor, "wb") as handle:
+                descriptor = None
+                handle.write(raw)
+                handle.flush()
+                os.fsync(handle.fileno())
+            self._assert_evidence_path()
+            os.replace(temporary_name, self.evidence_path)
+            temporary_name = None
+        except OSError as exc:
+            raise CacheBlobMigrationEvidenceError(
+                "maintenance evidence cannot be written",
+                context={"operation": "maintenance_evidence.write", "run_id": self.run_id},
+            ) from exc
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+            if temporary_name is not None:
+                try:
+                    os.unlink(temporary_name)
+                except OSError:
+                    pass
+
+    def read_bytes(self) -> bytes:
+        """Read the exact contained bytes without interpreting a candidate."""
+        self._work_directory = self._resolve_work_directory(create=False)
+        self._assert_evidence_path()
+        try:
+            return self.evidence_path.read_bytes()
+        except OSError as exc:
+            raise CacheBlobMigrationEvidenceError(
+                "maintenance evidence is required for this explicit run",
+                context={"operation": "maintenance_evidence.read", "run_id": self.run_id},
+            ) from exc
+
+    def create(self, evidence: MaintenanceRunEvidence) -> MaintenanceRunEvidence:
+        """Create first evidence only after binding its signing identity."""
+        self._work_directory = self._resolve_work_directory(create=True)
+        self._assert_evidence_path()
+        if self.evidence_path.exists():
+            raise CacheBlobMigrationEvidenceMismatchError(
+                "maintenance evidence already exists for this run",
+                context={"operation": "maintenance_evidence.create", "run_id": self.run_id},
+            )
+        bound = self._bind_signing_identity(evidence)
+        try:
+            raw = encode_maintenance_evidence(bound, self._signing_key())
+        except (TypeError, ValueError) as exc:
+            raise CacheBlobMigrationEvidenceError(
+                "maintenance evidence cannot be authenticated",
+                context={"operation": "maintenance_evidence.create", "run_id": self.run_id},
+            ) from exc
+        self._atomic_write(raw)
+        return self.load()
+
+    def load(self) -> MaintenanceRunEvidence:
+        """Authenticate and validate only this run's exact contained evidence."""
+        raw = self.read_bytes()
+        try:
+            evidence = decode_maintenance_evidence(raw, self._signing_key())
+        except (TypeError, ValueError) as exc:
+            raise CacheBlobMigrationEvidenceError(
+                "maintenance evidence authentication failed",
+                context={"operation": "maintenance_evidence.load", "run_id": self.run_id},
+            ) from exc
+        bound = self._bind_signing_identity(evidence)
+        if evidence != bound:
+            raise CacheBlobMigrationEvidenceMismatchError(
+                "maintenance evidence signing identity is incomplete",
+                context={"operation": "maintenance_evidence.load", "run_id": self.run_id},
+            )
+        return evidence
+
+    def checkpoint(
+        self, expected_previous_bytes: bytes, evidence: MaintenanceRunEvidence
+    ) -> MaintenanceRunEvidence:
+        """Replace only from exact previous bytes and a legal next state."""
+        if not isinstance(expected_previous_bytes, bytes):
+            raise TypeError("expected_previous_bytes must be bytes")
+        current = self.read_bytes()
+        if not hmac.compare_digest(current, expected_previous_bytes):
+            raise CacheBlobMigrationEvidenceMismatchError(
+                "maintenance evidence no longer has the exact previous bytes",
+                context={"operation": "maintenance_evidence.checkpoint", "run_id": self.run_id},
+            )
+        previous = self.load()
+        next_evidence = self._bind_signing_identity(evidence)
+        if next_evidence.state not in _LEGAL_TRANSITIONS[previous.state]:
+            raise CacheBlobMigrationEvidenceMismatchError(
+                "maintenance evidence state transition is invalid",
+                context={"operation": "maintenance_evidence.checkpoint", "run_id": self.run_id},
+            )
+        immutable_fields = (
+            "run_id",
+            "source_identity",
+            "source_revision",
+            "destination_identity",
+            "destination_revision",
+            "signing_key_fingerprint",
+        )
+        if any(
+            getattr(previous, name) != getattr(next_evidence, name)
+            for name in immutable_fields
+        ):
+            raise CacheBlobMigrationEvidenceMismatchError(
+                "maintenance evidence checkpoint changes immutable run binding",
+                context={"operation": "maintenance_evidence.checkpoint", "run_id": self.run_id},
+            )
+        establishing_plan = (
+            previous.state is MaintenanceEvidenceState.INSPECTED
+            and next_evidence.state is MaintenanceEvidenceState.PLANNED
+            and previous.plan_digest == ""
+            and next_evidence.plan_digest
+        )
+        if not establishing_plan and (
+            previous.plan_digest != next_evidence.plan_digest
+            or previous.acknowledgement != next_evidence.acknowledgement
+        ):
+            raise CacheBlobMigrationEvidenceMismatchError(
+                "maintenance evidence checkpoint changes immutable plan binding",
+                context={"operation": "maintenance_evidence.checkpoint", "run_id": self.run_id},
+            )
+        try:
+            raw = encode_maintenance_evidence(next_evidence, self._signing_key())
+        except (TypeError, ValueError) as exc:
+            raise CacheBlobMigrationEvidenceError(
+                "maintenance evidence cannot be authenticated",
+                context={"operation": "maintenance_evidence.checkpoint", "run_id": self.run_id},
+            ) from exc
+        self._atomic_write(raw)
+        return self.load()
+
+
 __all__ = [
     "MaintenanceEvidenceState",
+    "MaintenanceEvidenceStore",
     "MaintenanceRunEvidence",
+    "StoppedWorkerAcknowledgement",
     "decode_bounded_canonical_json",
     "decode_maintenance_evidence",
     "encode_maintenance_evidence",

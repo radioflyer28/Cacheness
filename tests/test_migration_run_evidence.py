@@ -25,7 +25,7 @@ from cacheness.storage.migration_evidence import (
 class _SentinelKeyProvider:
     """Return a test-only key whose bytes must never be rendered or logged."""
 
-    key = b"migration-evidence-secret-sentinel"
+    key = b"migration-evidence-key-sentinel0"
 
     def get_key(self) -> bytes:
         return self.key
@@ -73,12 +73,12 @@ def test_evidence_store_round_trips_canonically_and_rejects_forgery(tmp_path: Pa
     )
 
     created = store.create(evidence)
-    assert created == evidence
-    assert store.load() == evidence
+    assert created.signing_key_fingerprint
+    assert store.load() == created
 
     raw = store.read_bytes()
-    assert decode_maintenance_evidence(raw, provider.get_key()) == evidence
-    assert encode_maintenance_evidence(evidence, provider.get_key()) == raw
+    assert decode_maintenance_evidence(raw, provider.get_key()) == created
+    assert encode_maintenance_evidence(created, provider.get_key()) == raw
 
     store.evidence_path.write_bytes(raw.replace(b"inspected", b"inSpected"))
     with pytest.raises(CacheBlobMigrationEvidenceError, match="authentication"):
@@ -97,9 +97,8 @@ def test_evidence_store_rejects_unsafe_run_paths_and_symlink_escapes(tmp_path: P
     outside.mkdir()
     linked = tmp_path / "linked-work"
     linked.symlink_to(outside, target_is_directory=True)
-    store = MaintenanceEvidenceStore(linked, evidence.run_id, provider)
     with pytest.raises(CacheBlobMigrationEvidenceError, match="symlink"):
-        store.create(evidence)
+        MaintenanceEvidenceStore(linked, evidence.run_id, provider)
     assert not list(outside.iterdir())
 
 
