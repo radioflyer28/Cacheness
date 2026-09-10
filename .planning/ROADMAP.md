@@ -427,9 +427,11 @@ Plans:
 
   1. Users can inspect a store without mutation and receive human-readable and machine-readable migration plans with entry counts, bytes, incompatibilities, and intended actions.
   2. Supported same-backend metadata and payload format migrations use offline copy-verify-switch semantics and retire the prior copy only after verified publication. Workers remain stopped for mutation/cutover; ordinary constructors and initialize do not perform implicit upgrades.
-  3. An interrupted migration can resume idempotently from its explicit maintenance evidence without losing the only valid generation. Preserve signing material and unknown/incomplete catalogs; do not adopt an unexplained empty database or add online writer coordination.
+  3. An interrupted bounded migration can resume idempotently for effects durably attributed in authority-owned evidence without losing the only valid generation. Each run enforces explicit entry, byte, and evidence limits; larger stores split into independently recoverable maintenance runs. Preserve signing material and unknown/incomplete catalogs; do not adopt unexplained state or add online writer coordination.
   4. Incompatible formats and cross-backend moves offer an explicit, scoped, confirmed rebuild path rather than implicit deletion or a promise of universal physical migration.
   5. Define the supported source-version window explicitly; it may exclude pre-production development layouts. Distinguish catalog/payload migration from rebuilding derived indexes; a missing or stale index cannot require rewriting valid payloads or become a second cutover authority.
+
+**Accepted recovery/progress limit (checker override, 2026-09-10):** A crash after immutable payload publication but before its authority checkpoint may leave an invisible, unattributed orphan. It is never visible, never automatically adopted, and guaranteed exact cleanup is outside Phase 7. Integrity and authority visibility remain guaranteed while perfect orphan reclamation is not; resume/abort guarantees apply only to effects durably attributed in authority-owned evidence. This is an ADR 0001 topology-specific recovery/progress limit, not failed atomicity. Phase 7 adds no pre-publication maintenance intent, extra journal/lifecycle state, coordination mechanism, or production obstore adoption.
 
 **Plans**: 11/19 plans executed; 8 gap-closure plans ready
 
