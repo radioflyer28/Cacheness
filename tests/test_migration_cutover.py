@@ -321,6 +321,104 @@ def test_offline_service_finalize_requires_exact_confirmation_and_seals_rollback
         destination.close()
 
 
+def test_offline_service_abort_removes_only_its_unactivated_candidate(tmp_path: Path) -> None:
+    """Abort is limited to authenticated run-owned candidate effects before activation."""
+    key_provider = _SharedMemoryKeyProvider()
+    source = _memory_store(tmp_path / "source", key_provider)
+    destination = _memory_store(tmp_path / "destination", key_provider)
+    try:
+        source.put_entry({"answer": "candidate"}, key="entry")
+        service = _service(
+            source,
+            destination,
+            tmp_path / "maintenance",
+            run_id="abort-service",
+        )
+        plan = service.plan(service.inspect())
+        service.stage(plan)
+
+        aborted = service.abort(plan)
+
+        assert aborted.run_id == service.run_id
+        assert aborted.deleted_entries == 1
+        assert service.read_evidence().state is MaintenanceEvidenceState.ABORTED
+        assert destination.get("entry") is None
+
+        active_service = _service(
+            source,
+            destination,
+            tmp_path / "active-maintenance",
+            run_id="active-abort-service",
+        )
+        active_plan = active_service.plan(active_service.inspect())
+        active_service.stage(active_plan)
+        active_service.verify(active_plan)
+        active_service.activate(active_plan)
+        with pytest.raises(CacheBlobMigrationOfflineDecisionRequiredError, match="rollback or finalize"):
+            active_service.abort(active_plan)
+    finally:
+        source.close()
+        destination.close()
+
+
+def test_offline_service_purge_is_separate_idempotent_retryable_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Purge deletes only retained prior bytes and keeps final activation authoritative."""
+    key_provider = _SharedMemoryKeyProvider()
+    source = _memory_store(tmp_path / "source", key_provider)
+    destination = _memory_store(tmp_path / "destination", key_provider)
+    try:
+        source.put_entry({"answer": "candidate"}, key="entry")
+        destination.put_entry({"answer": "prior"}, key="entry")
+        service = _service(
+            source,
+            destination,
+            tmp_path / "maintenance",
+            run_id="purge-service",
+        )
+        plan = service.plan(service.inspect())
+        service.stage(plan)
+        service.verify(plan)
+        service.activate(plan)
+        service.finalize(plan, confirmation=service.finalize_confirmation(plan))
+
+        with pytest.raises(CacheBlobMigrationOfflineDecisionRequiredError, match="confirmation"):
+            service.purge(plan, confirmation="0" * 64)
+
+        original_delete = destination.delete_migration_payload
+        attempts = 0
+
+        def fail_once(locator: str) -> None:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise OSError("simulated deletion failure")
+            original_delete(locator)
+
+        monkeypatch.setattr(destination, "delete_migration_payload", fail_once)
+        pending = service.purge(plan, confirmation=service.purge_confirmation(plan))
+
+        assert pending.completed is False
+        assert pending.pending_entries == 1
+        assert service.read_evidence().state is MaintenanceEvidenceState.PURGE_PENDING
+        assert destination.lifecycle_authority.publication_state() is AuthorityPublicationState.ACTIVE
+        assert destination.get("entry") == {"answer": "candidate"}
+
+        monkeypatch.setattr(destination, "delete_migration_payload", original_delete)
+        purged = service.purge(plan, confirmation=service.purge_confirmation(plan))
+
+        assert purged.completed is True
+        assert purged.pending_entries == 0
+        assert service.read_evidence().state is MaintenanceEvidenceState.PURGED
+        assert destination.get("entry") == {"answer": "candidate"}
+        assert service.purge(plan, confirmation=service.purge_confirmation(plan)) == purged
+    finally:
+        source.close()
+        destination.close()
+
+
 def test_projection_failure_is_derived_after_memory_activation(tmp_path: Path) -> None:
     """A failed projection rebuild preserves the committed activation receipt and state."""
     key_provider = _SharedMemoryKeyProvider()
