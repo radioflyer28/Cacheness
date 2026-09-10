@@ -138,6 +138,11 @@ class MaintenanceEvidenceState(str, Enum):
     STAGED = "staged"
     VERIFYING = "verifying"
     VERIFIED = "verified"
+    REBUILDING = "rebuilding"
+    REBUILD_STAGED = "rebuild_staged"
+    REBUILD_VERIFYING = "rebuild_verifying"
+    REBUILD_VERIFIED = "rebuild_verified"
+    REBUILD_ACCEPTED = "rebuild_accepted"
     ACTIVATED = "activated"
     ROLLED_BACK = "rolled_back"
     FINALIZED = "finalized"
@@ -151,7 +156,11 @@ _LEGAL_TRANSITIONS: Mapping[MaintenanceEvidenceState, frozenset[MaintenanceEvide
         {MaintenanceEvidenceState.PLANNED, MaintenanceEvidenceState.ABORTED}
     ),
     MaintenanceEvidenceState.PLANNED: frozenset(
-        {MaintenanceEvidenceState.STAGING, MaintenanceEvidenceState.ABORTED}
+        {
+            MaintenanceEvidenceState.STAGING,
+            MaintenanceEvidenceState.REBUILDING,
+            MaintenanceEvidenceState.ABORTED,
+        }
     ),
     MaintenanceEvidenceState.STAGING: frozenset(
         {MaintenanceEvidenceState.STAGED, MaintenanceEvidenceState.ABORTED}
@@ -165,6 +174,19 @@ _LEGAL_TRANSITIONS: Mapping[MaintenanceEvidenceState, frozenset[MaintenanceEvide
     MaintenanceEvidenceState.VERIFIED: frozenset(
         {MaintenanceEvidenceState.ACTIVATED, MaintenanceEvidenceState.ABORTED}
     ),
+    MaintenanceEvidenceState.REBUILDING: frozenset(
+        {MaintenanceEvidenceState.REBUILD_STAGED, MaintenanceEvidenceState.ABORTED}
+    ),
+    MaintenanceEvidenceState.REBUILD_STAGED: frozenset(
+        {MaintenanceEvidenceState.REBUILD_VERIFYING, MaintenanceEvidenceState.ABORTED}
+    ),
+    MaintenanceEvidenceState.REBUILD_VERIFYING: frozenset(
+        {MaintenanceEvidenceState.REBUILD_VERIFIED, MaintenanceEvidenceState.ABORTED}
+    ),
+    MaintenanceEvidenceState.REBUILD_VERIFIED: frozenset(
+        {MaintenanceEvidenceState.REBUILD_ACCEPTED, MaintenanceEvidenceState.ABORTED}
+    ),
+    MaintenanceEvidenceState.REBUILD_ACCEPTED: frozenset(),
     MaintenanceEvidenceState.ACTIVATED: frozenset(
         {MaintenanceEvidenceState.ROLLED_BACK, MaintenanceEvidenceState.FINALIZED}
     ),

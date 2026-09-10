@@ -1797,6 +1797,7 @@ class OfflineMigrationService:
                         entry=entry,
                         disposition=disposition,
                         reason=reason,
+                        catalog_values=dict(manifest.catalog_values),
                     )
                 )
             if page.exhausted:
@@ -1963,14 +1964,361 @@ class OfflineMigrationService:
             )
         self._revalidate_identities(plan)
 
-    def _validate_rebuild_plan(self, plan: MigrationPlan) -> None:
+    def _validate_rebuild_plan(
+        self, plan: MigrationPlan, *, require_destination_revision: bool = False
+    ) -> None:
         """Reject physical-migration plans before a rebuild action can begin."""
-        self._validate_plan(plan)
+        if not isinstance(plan, MigrationPlan) or plan.run_id != self.run_id:
+            raise CacheBlobMigrationEvidenceMismatchError(
+                "rebuild plan does not belong to this explicit run",
+                context={"operation": "migration.rebuild", "run_id": self.run_id},
+            )
+        if not hmac.compare_digest(plan.digest, plan._expected_digest()):
+            raise CacheBlobMigrationEvidenceMismatchError(
+                "rebuild plan digest is invalid",
+                context={"operation": "migration.rebuild", "run_id": self.run_id},
+            )
         if plan.plan_kind is not MigrationPlanKind.REBUILD or plan.state is not MigrationPlanState.PLANNED:
             raise CacheBlobMigrationEvidenceMismatchError(
                 "rebuild action requires an actionable rebuild plan",
                 context={"operation": "migration.rebuild", "run_id": self.run_id},
             )
+        source_identity = self._source_authority.identity_snapshot()
+        destination_identity = self._destination_authority.identity_snapshot()
+        if source_identity != plan.source_identity or (
+            destination_identity.store_id != plan.destination_identity.store_id
+            or destination_identity.authority_kind != plan.destination_identity.authority_kind
+            or destination_identity.capability != plan.destination_identity.capability
+            or destination_identity.schema_version != plan.destination_identity.schema_version
+            or (
+                require_destination_revision
+                and destination_identity.revision != plan.destination_identity.revision
+            )
+        ):
+            raise CacheBlobMigrationPlanStaleError(
+                "rebuild plan is stale; source or destination identity changed",
+                context={"operation": "migration.rebuild", "run_id": self.run_id},
+            )
+
+    def _expect_rebuild_evidence(
+        self, state: MaintenanceEvidenceState, *, plan: MigrationPlan
+    ) -> MaintenanceRunEvidence:
+        """Revalidate source truth while allowing only this run's destination writes."""
+        evidence = self.read_evidence()
+        if evidence.state is not state or evidence.plan_digest != plan.digest:
+            raise CacheBlobMigrationEvidenceMismatchError(
+                f"maintenance evidence is not ready for rebuild {state.value}",
+                context={"operation": "migration.rebuild_evidence", "run_id": self.run_id},
+            )
+        self._validate_rebuild_plan(plan)
+        if (
+            evidence.source_identity != plan.source_identity
+            or evidence.source_revision != plan.source_identity.revision
+            or evidence.destination_identity != plan.destination_identity
+            or evidence.destination_revision != plan.destination_identity.revision
+            or evidence.acknowledgement
+            != self._acknowledgement(plan.digest, plan.source_identity)
+        ):
+            raise CacheBlobMigrationPlanStaleError(
+                "rebuild evidence source or destination is stale; reinspection is required",
+                context={"operation": "migration.rebuild_evidence", "run_id": self.run_id},
+            )
+        return evidence
+
+    @staticmethod
+    def _rebuild_output_digest(entries: tuple[object, ...]) -> str:
+        """Bind evidence to exact destination lifecycle receipts without adopting paths."""
+        record = [
+            {
+                "generation": entry.generation,
+                "key": entry.key,
+                "locator": entry.locator,
+            }
+            for entry in entries
+        ]
+        return hashlib.sha256(_canonical_plan_bytes({"entries": record})).hexdigest()
+
+    def _discard_rebuild_receipts(self, receipts: tuple[object, ...]) -> tuple[str, ...]:
+        """Delete only exact unaccepted entries this rebuild wrote through BlobStore."""
+        cleanup_debt: list[str] = []
+        for receipt in reversed(receipts):
+            try:
+                current = self.destination.get_entry_info(receipt.key)
+                if current is None:
+                    continue
+                if current.generation != receipt.generation or current.locator != receipt.locator:
+                    cleanup_debt.append(
+                        hashlib.sha256(
+                            f"{receipt.key}:{receipt.generation}:{receipt.locator}".encode("utf-8")
+                        ).hexdigest()
+                    )
+                    continue
+                self.destination.delete(receipt.key)
+            except Exception:
+                cleanup_debt.append(
+                    hashlib.sha256(
+                        f"{receipt.key}:{receipt.generation}:{receipt.locator}".encode("utf-8")
+                    ).hexdigest()
+                )
+        return tuple(cleanup_debt)
+
+    def _abort_rebuild_after_failure(
+        self,
+        plan: MigrationPlan,
+        evidence: MaintenanceRunEvidence,
+        receipts: tuple[object, ...],
+    ) -> None:
+        """Record cleanup debt without converting a failed rebuild into acceptance."""
+        cleanup_debt = self._discard_rebuild_receipts(receipts)
+        output_digest = self._rebuild_output_digest(receipts)
+        self._write_evidence(
+            self._new_evidence(
+                state=MaintenanceEvidenceState.ABORTED,
+                plan_digest=plan.digest,
+                source_identity=plan.source_identity,
+                destination_identity=plan.destination_identity,
+                completed_steps=(*evidence.completed_steps, "abort_rebuild"),
+                authority_receipts=(output_digest,),
+                cleanup_debt=cleanup_debt,
+                completed_output_digests={
+                    **evidence.completed_output_digests,
+                    "abort_rebuild": output_digest,
+                },
+            )
+        )
+
+    def stage_rebuild(self, plan: MigrationPlan) -> MigrationStepResult:
+        """Rebuild every included value through verified source and destination APIs.
+
+        ``BlobStore.open_entry`` authenticates the source manifest, verifies a
+        private snapshot's digest and size, and only then permits handler
+        deserialization.  ``BlobStore.put_entry`` remains the sole destination
+        lifecycle publisher; this coordinator never writes native payload
+        bytes or authority rows directly.
+        """
+        self._validate_rebuild_plan(plan, require_destination_revision=True)
+        current = self.read_evidence()
+        if current.state is MaintenanceEvidenceState.PLANNED:
+            evidence = self._expect_rebuild_evidence(
+                MaintenanceEvidenceState.PLANNED, plan=plan
+            )
+            if self.destination.list():
+                raise CacheBlobMigrationEvidenceMismatchError(
+                    "rebuild destination must be empty before staging",
+                    context={"operation": "migration.stage_rebuild", "run_id": self.run_id},
+                )
+            evidence = self._write_evidence(
+                self._new_evidence(
+                    state=MaintenanceEvidenceState.REBUILDING,
+                    plan_digest=plan.digest,
+                    source_identity=plan.source_identity,
+                    destination_identity=plan.destination_identity,
+                    completed_steps=("inspect", "confirm_rebuild"),
+                    completed_output_digests=dict(evidence.completed_output_digests),
+                )
+            )
+        elif current.state is MaintenanceEvidenceState.REBUILDING:
+            evidence = self._expect_rebuild_evidence(
+                MaintenanceEvidenceState.REBUILDING, plan=plan
+            )
+        else:
+            raise CacheBlobMigrationEvidenceMismatchError(
+                "maintenance evidence is not ready to stage this rebuild",
+                context={"operation": "migration.stage_rebuild", "run_id": self.run_id},
+            )
+
+        receipts: list[object] = []
+        try:
+            for assessment in plan.included_entries:
+                self._validate_rebuild_plan(plan)
+                with self.source.open_entry(assessment.entry.key) as source_entry:
+                    if (
+                        source_entry is None
+                        or source_entry.generation != assessment.entry.generation
+                        or source_entry.locator != assessment.entry.locator
+                    ):
+                        raise CacheBlobMigrationPlanStaleError(
+                            "rebuild source entry changed; reinspection is required",
+                            context={
+                                "operation": "migration.stage_rebuild",
+                                "run_id": self.run_id,
+                            },
+                        )
+                    catalog = source_entry.metadata.get("catalog")
+                    if not isinstance(catalog, Mapping) or not isinstance(
+                        catalog.get("values"), Mapping
+                    ):
+                        raise CacheBlobMigrationEvidenceMismatchError(
+                            "authenticated source entry has invalid catalog values",
+                            context={
+                                "operation": "migration.stage_rebuild",
+                                "run_id": self.run_id,
+                            },
+                        )
+                    catalog_values = dict(catalog["values"])
+                    if catalog_values != dict(assessment.catalog_values):
+                        raise CacheBlobMigrationPlanStaleError(
+                            "rebuild source catalog changed; reinspection is required",
+                            context={
+                                "operation": "migration.stage_rebuild",
+                                "run_id": self.run_id,
+                            },
+                        )
+                    value = source_entry.read()
+                self._validate_rebuild_plan(plan)
+                if self.destination.get_entry_info(assessment.entry.key) is not None:
+                    raise CacheBlobMigrationEvidenceMismatchError(
+                        "rebuild destination key already exists",
+                        context={
+                            "operation": "migration.stage_rebuild",
+                            "run_id": self.run_id,
+                        },
+                    )
+                receipts.append(
+                    self.destination.put_entry(
+                        value,
+                        key=assessment.entry.key,
+                        catalog_values=catalog_values,
+                    )
+                )
+        except Exception:
+            self._abort_rebuild_after_failure(plan, evidence, tuple(receipts))
+            raise
+
+        output_digest = self._rebuild_output_digest(tuple(receipts))
+        self._write_evidence(
+            self._new_evidence(
+                state=MaintenanceEvidenceState.REBUILD_STAGED,
+                plan_digest=plan.digest,
+                source_identity=plan.source_identity,
+                destination_identity=plan.destination_identity,
+                completed_steps=("inspect", "confirm_rebuild", "stage_rebuild"),
+                authority_receipts=(output_digest,),
+                completed_output_digests={
+                    **evidence.completed_output_digests,
+                    "stage_rebuild": output_digest,
+                },
+            )
+        )
+        return MigrationStepResult(MaintenanceEvidenceState.REBUILD_STAGED, True, self.evidence_path)
+
+    def verify_rebuild(self, plan: MigrationPlan) -> MigrationStepResult:
+        """Verify the exact included destination set before explicit acceptance."""
+        self._validate_rebuild_plan(plan)
+        current = self.read_evidence()
+        if current.state is MaintenanceEvidenceState.REBUILD_STAGED:
+            evidence = self._expect_rebuild_evidence(
+                MaintenanceEvidenceState.REBUILD_STAGED, plan=plan
+            )
+            evidence = self._write_evidence(
+                self._new_evidence(
+                    state=MaintenanceEvidenceState.REBUILD_VERIFYING,
+                    plan_digest=plan.digest,
+                    source_identity=plan.source_identity,
+                    destination_identity=plan.destination_identity,
+                    completed_steps=evidence.completed_steps,
+                    authority_receipts=evidence.authority_receipts,
+                    completed_output_digests=evidence.completed_output_digests,
+                )
+            )
+        elif current.state is MaintenanceEvidenceState.REBUILD_VERIFYING:
+            evidence = self._expect_rebuild_evidence(
+                MaintenanceEvidenceState.REBUILD_VERIFYING, plan=plan
+            )
+        else:
+            raise CacheBlobMigrationEvidenceMismatchError(
+                "maintenance evidence is not ready to verify this rebuild",
+                context={"operation": "migration.verify_rebuild", "run_id": self.run_id},
+            )
+
+        expected_keys = {assessment.entry.key for assessment in plan.included_entries}
+        if set(self.destination.list()) != expected_keys:
+            self._abort_rebuild_after_failure(plan, evidence, ())
+            raise CacheBlobMigrationEvidenceMismatchError(
+                "rebuild destination does not contain the exact included key set",
+                context={"operation": "migration.verify_rebuild", "run_id": self.run_id},
+            )
+        try:
+            for assessment in plan.included_entries:
+                with self.destination.open_entry(assessment.entry.key) as destination_entry:
+                    if destination_entry is None:
+                        raise CacheBlobMigrationEvidenceMismatchError(
+                            "rebuild destination entry is absent",
+                            context={
+                                "operation": "migration.verify_rebuild",
+                                "run_id": self.run_id,
+                            },
+                        )
+                    catalog = destination_entry.metadata.get("catalog")
+                    if not isinstance(catalog, Mapping) or dict(catalog.get("values", {})) != dict(
+                        assessment.catalog_values
+                    ):
+                        raise CacheBlobMigrationEvidenceMismatchError(
+                            "rebuild destination catalog values do not match the source",
+                            context={
+                                "operation": "migration.verify_rebuild",
+                                "run_id": self.run_id,
+                            },
+                        )
+        except Exception:
+            self._abort_rebuild_after_failure(plan, evidence, ())
+            raise
+        verify_digest = hashlib.sha256(
+            _canonical_plan_bytes(
+                {
+                    "catalog": [
+                        _thaw_json(assessment.catalog_values)
+                        for assessment in plan.included_entries
+                    ],
+                    "keys": sorted(expected_keys),
+                }
+            )
+        ).hexdigest()
+        self._write_evidence(
+            self._new_evidence(
+                state=MaintenanceEvidenceState.REBUILD_VERIFIED,
+                plan_digest=plan.digest,
+                source_identity=plan.source_identity,
+                destination_identity=plan.destination_identity,
+                completed_steps=(*evidence.completed_steps, "verify_rebuild"),
+                authority_receipts=evidence.authority_receipts,
+                completed_output_digests={
+                    **evidence.completed_output_digests,
+                    "verify_rebuild": verify_digest,
+                },
+            )
+        )
+        return MigrationStepResult(MaintenanceEvidenceState.REBUILD_VERIFIED, True, self.evidence_path)
+
+    def accept_rebuild(self, plan: MigrationPlan) -> MigrationStepResult:
+        """Record explicit acceptance after complete destination verification.
+
+        BlobStore has already committed each destination entry through its own
+        lifecycle authority.  This evidence checkpoint is corroborative
+        offline maintenance state, never a second visibility authority.
+        """
+        self._validate_rebuild_plan(plan)
+        evidence = self._expect_rebuild_evidence(
+            MaintenanceEvidenceState.REBUILD_VERIFIED, plan=plan
+        )
+        accepted_digest = hashlib.sha256(
+            f"{plan.plan_id}:{plan.digest}:accepted".encode("utf-8")
+        ).hexdigest()
+        self._write_evidence(
+            self._new_evidence(
+                state=MaintenanceEvidenceState.REBUILD_ACCEPTED,
+                plan_digest=plan.digest,
+                source_identity=plan.source_identity,
+                destination_identity=plan.destination_identity,
+                completed_steps=(*evidence.completed_steps, "accept_rebuild"),
+                authority_receipts=(*evidence.authority_receipts, accepted_digest),
+                completed_output_digests={
+                    **evidence.completed_output_digests,
+                    "accept_rebuild": accepted_digest,
+                },
+            )
+        )
+        return MigrationStepResult(MaintenanceEvidenceState.REBUILD_ACCEPTED, True, self.evidence_path)
 
     def stage(self, plan: MigrationPlan) -> MigrationStepResult:
         """Copy authenticated immutable payloads into an invisible candidate."""
@@ -2730,11 +3078,11 @@ class OfflineMigrationService:
         plan: MigrationPlan,
         controller: ProjectionController,
     ) -> ProjectionResult:
-        """Run an explicit derived rebuild only after authority activation is confirmed.
+        """Run an explicit derived rebuild only after canonical acceptance.
 
         Projection publication is an external derived effect. Its failure is
-        reported beside the immutable activation receipt and can never revoke,
-        select, or otherwise redefine canonical authority state.
+        reported beside immutable offline-maintenance evidence and can never
+        revoke, select, or otherwise redefine canonical authority state.
         """
         if not isinstance(plan, MigrationPlan) or plan.run_id != self.run_id:
             raise CacheBlobMigrationEvidenceMismatchError(
@@ -2743,16 +3091,22 @@ class OfflineMigrationService:
             )
         if not isinstance(controller, ProjectionController):
             raise TypeError("projection rebuild requires a ProjectionController")
-        evidence = self.read_evidence()
-        if evidence.state is not MaintenanceEvidenceState.ACTIVATED or (
-            evidence.plan_digest != plan.digest or evidence.activation_receipt is None
-        ):
-            raise CacheBlobMigrationOfflineDecisionRequiredError(
-                "projection rebuild requires a confirmed offline migration activation",
-                context={"operation": "migration.projection", "run_id": self.run_id},
+        if plan.plan_kind is MigrationPlanKind.REBUILD:
+            evidence = self._expect_rebuild_evidence(
+                MaintenanceEvidenceState.REBUILD_ACCEPTED, plan=plan
             )
-        self._revalidate_activated_receipt(evidence, plan)
-        receipt = evidence.activation_receipt
+            receipt = evidence.authority_receipts[-1] if evidence.authority_receipts else None
+        else:
+            evidence = self.read_evidence()
+            if evidence.state is not MaintenanceEvidenceState.ACTIVATED or (
+                evidence.plan_digest != plan.digest or evidence.activation_receipt is None
+            ):
+                raise CacheBlobMigrationOfflineDecisionRequiredError(
+                    "projection rebuild requires confirmed offline canonical acceptance",
+                    context={"operation": "migration.projection", "run_id": self.run_id},
+                )
+            self._revalidate_activated_receipt(evidence, plan)
+            receipt = evidence.activation_receipt
         try:
             result = controller.rebuild(requested="offline")
         except Exception as error:
