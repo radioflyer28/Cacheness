@@ -18,6 +18,7 @@ from .interfaces import (
     CacheHandler,
     CacheWriteError,
     CacheReadError,
+    PayloadTransformationEdge,
 )
 from .error_handling import (
     CacheLegacyFormatError,
@@ -1472,6 +1473,52 @@ class HandlerRegistry:
             )
         return handler
 
+    def resolve_payload_transformation(
+        self,
+        handler_type: str,
+        source_format: str,
+        source_version: int,
+        target_format: str,
+        target_version: int,
+    ) -> tuple[CacheHandler, PayloadTransformationEdge]:
+        """Resolve exactly one registered handler-owned directed transform.
+
+        A source contract must be readable by the same store-local handler
+        before its declared transformation edge is considered.  Exact payload
+        copies deliberately bypass this resolver.
+        """
+        context = {
+            "handler_type": handler_type,
+            "source_format": source_format,
+            "source_version": source_version,
+            "target_format": target_format,
+            "target_version": target_version,
+        }
+        try:
+            requested = PayloadTransformationEdge(
+                source_format, source_version, target_format, target_version
+            )
+        except ValueError as exc:
+            raise CacheManifestUnsupportedVersionError(
+                "Payload transformation contract is malformed",
+                context=context,
+            ) from exc
+        handler = self.resolve_payload_contract(
+            handler_type, requested.source_format, requested.source_version
+        )
+        edges = handler.payload_transformation_edges()
+        matches = tuple(
+            edge
+            for edge in edges
+            if edge == requested
+        )
+        if len(matches) != 1:
+            raise CacheManifestUnsupportedVersionError(
+                "Canonical manifest declares no exact payload transformation",
+                context=context,
+            )
+        return handler, matches[0]
+
     def register_handler(
         self, 
         handler: CacheHandler, 
@@ -1589,8 +1636,19 @@ class HandlerRegistry:
         Raises:
             ValueError: If handler is missing required methods/properties
         """
-        required_methods = ["can_handle", "put", "get", "get_file_extension"]
-        required_properties = ["data_type"]
+        required_methods = [
+            "can_handle",
+            "put",
+            "get",
+            "get_file_extension",
+            "supports_payload_contract",
+            "payload_transformation_edges",
+        ]
+        required_properties = [
+            "data_type",
+            "payload_format",
+            "payload_format_version",
+        ]
         
         missing = []
         
@@ -1607,3 +1665,33 @@ class HandlerRegistry:
                 f"Handler {handler.__class__.__name__} missing required: {', '.join(missing)}. "
                 f"Handlers must implement the CacheHandler interface."
             )
+        payload_format = handler.payload_format
+        payload_format_version = handler.payload_format_version
+        if not isinstance(payload_format, str) or not payload_format or "*" in payload_format:
+            raise ValueError("handler payload_format must be an exact non-wildcard string")
+        if type(payload_format_version) is not int or payload_format_version < 1:
+            raise ValueError("handler payload_format_version must be a positive integer")
+        edges = handler.payload_transformation_edges()
+        if not isinstance(edges, tuple):
+            raise ValueError("handler payload transformation edges must be a tuple")
+        edge_keys: set[tuple[str, int, str, int]] = set()
+        for edge in edges:
+            if not isinstance(edge, PayloadTransformationEdge):
+                raise ValueError("handler payload transformation edge is invalid")
+            edge_key = (
+                edge.source_format,
+                edge.source_version,
+                edge.target_format,
+                edge.target_version,
+            )
+            if edge_key in edge_keys:
+                raise ValueError("handler payload transformation edges contain a duplicate")
+            edge_keys.add(edge_key)
+            if not handler.supports_payload_contract(edge.source_format, edge.source_version):
+                raise ValueError(
+                    "handler payload transformation source contract is not readable"
+                )
+            if not callable(getattr(handler, "transform_payload", None)):
+                raise ValueError(
+                    "handler payload transformations require transform_payload"
+                )

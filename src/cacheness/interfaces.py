@@ -10,7 +10,10 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
 import logging
-from typing import Any, ContextManager, Dict, Optional, Protocol, TypedDict
+from typing import Any, ContextManager, Dict, Optional, Protocol, TYPE_CHECKING, TypedDict
+
+if TYPE_CHECKING:
+    from .config import CacheConfig
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +112,42 @@ class FormatProvider(ABC):
         pass
 
 
+@dataclass(frozen=True)
+class PayloadTransformationEdge:
+    """One handler-owned exact directed native payload transformation.
+
+    Exact-compatible payloads continue through the ordinary verified byte-copy
+    path.  This value exists only when a registered source handler explicitly
+    owns a format-changing read/transform/write contract.
+    """
+
+    source_format: str
+    source_version: int
+    target_format: str
+    target_version: int
+
+    def __post_init__(self) -> None:
+        for field_name, value in (
+            ("source_format", self.source_format),
+            ("target_format", self.target_format),
+        ):
+            if not isinstance(value, str) or not value:
+                raise ValueError(f"{field_name} must be a non-empty string")
+            if "*" in value:
+                raise ValueError(f"{field_name} cannot contain a wildcard")
+        for field_name, value in (
+            ("source_version", self.source_version),
+            ("target_version", self.target_version),
+        ):
+            if type(value) is not int or value < 1:
+                raise ValueError(f"{field_name} must be a positive integer")
+        if (self.source_format, self.source_version) == (
+            self.target_format,
+            self.target_version,
+        ):
+            raise ValueError("payload transformation endpoints must be distinct")
+
+
 class CacheHandler(CacheabilityChecker, CacheWriter, CacheReader, FormatProvider):
     """
     Complete cache handler interface combining all capabilities.
@@ -145,6 +184,29 @@ class CacheHandler(CacheabilityChecker, CacheWriter, CacheReader, FormatProvider
         return (
             payload_format == self.payload_format
             and payload_format_version == self.payload_format_version
+        )
+
+    def payload_transformation_edges(self) -> tuple[PayloadTransformationEdge, ...]:
+        """Return directed transforms this handler explicitly owns.
+
+        The default is intentionally empty: identity contracts are copied as
+        verified bytes and no coordinator infers a native-format converter.
+        """
+        return ()
+
+    def transform_payload(
+        self,
+        snapshot: "GuardedReadSnapshot",
+        edge: PayloadTransformationEdge,
+        *,
+        destination_io: "GuardedHandlerIO",
+        key: str,
+        config: "CacheConfig",
+    ) -> "GuardedWriteResult":
+        """Refuse transforms until a handler implements one declared edge."""
+        del snapshot, edge, destination_io, key, config
+        raise CacheFormatError(
+            "Handler does not implement the declared payload transformation"
         )
 
 
