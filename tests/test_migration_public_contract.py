@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import inspect
+import json
+import os
 from pathlib import Path
+import subprocess
 
 from cacheness.storage import BackendRef, BlobStore, StoreTopology
 import cacheness.storage as storage
@@ -50,6 +53,49 @@ PUBLIC_MAINTENANCE_SYMBOLS = {
     "VersionEdge",
     "render_migration_report",
 }
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PHASE_DIRECTORY = PROJECT_ROOT / ".planning/phases/07-explicit-migration-and-rebuild-cutover"
+API_COVERAGE_RESULT_START = "<!-- phase7-api-coverage:detector-result:start -->\n```json\n"
+API_COVERAGE_RESULT_END = "\n```\n<!-- phase7-api-coverage:detector-result:end -->"
+
+
+def _phase7_detector_scope() -> str:
+    """Assemble the exact roadmap section and plan bodies sent to GSD's detector."""
+    roadmap = (PROJECT_ROOT / ".planning/ROADMAP.md").read_text(encoding="utf-8")
+    start = roadmap.index("### Phase 7: Explicit Migration and Rebuild Cutover")
+    end = roadmap.index("### Phase 8: Production Gates and Performance Stabilization", start)
+    plan_bodies: list[str] = []
+    for plan_path in sorted(PHASE_DIRECTORY.glob("07-*-PLAN.md")):
+        plan = plan_path.read_text(encoding="utf-8")
+        parts = plan.split("\n---\n", 1)
+        assert len(parts) == 2, f"{plan_path.name} must have YAML frontmatter"
+        plan_bodies.append(parts[1])
+    return roadmap[start:end] + "".join(plan_bodies)
+
+
+def _api_coverage_detector_path() -> Path:
+    """Find the active GSD detector without replacing it with test-local logic."""
+    roots = []
+    configured_root = os.environ.get("CODEX_HOME")
+    if configured_root:
+        roots.append(Path(configured_root))
+    roots.append(Path.home() / ".codex")
+    for root in roots:
+        candidate = root / "gsd-core/bin/lib/api-coverage.cjs"
+        if candidate.is_file():
+            return candidate.resolve()
+    raise AssertionError("the active GSD api-coverage.cjs detector is unavailable")
+
+
+def _stored_detector_result() -> dict[str, object]:
+    """Read the typed detector output recorded in the coverage declaration."""
+    coverage = (PHASE_DIRECTORY / "07-COVERAGE.md").read_text(encoding="utf-8")
+    start = coverage.index(API_COVERAGE_RESULT_START) + len(API_COVERAGE_RESULT_START)
+    end = coverage.index(API_COVERAGE_RESULT_END, start)
+    result = json.loads(coverage[start:end])
+    assert isinstance(result, dict)
+    return result
 
 
 class _SharedMemoryKeyProvider:
@@ -188,3 +234,34 @@ def test_ordinary_construction_exposes_no_migration_switch_or_cli() -> None:
     assert "user_version = 8" in initialization_guide
     assert "wait for the Phase 7 migration tooling" not in initialization_guide
     assert "STORAGE_MIGRATION.md" in initialization_guide
+
+
+def test_external_api_coverage_declaration_is_detector_backed() -> None:
+    """The no-integration declaration records the real detector, not a matrix claim."""
+    detector = _api_coverage_detector_path()
+    completed = subprocess.run(
+        ["node", str(detector), "--json"],
+        input=_phase7_detector_scope(),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode in {0, 1}, completed.stderr
+    assert json.loads(completed.stdout) == _stored_detector_result()
+
+    coverage = (PHASE_DIRECTORY / "07-COVERAGE.md").read_text(encoding="utf-8")
+    normalized_coverage = " ".join(coverage.split())
+    assert "No external API integration:" in normalized_coverage
+    for required_reference in (
+        "PostgresqlLifecycleAuthority",
+        "S3BlobBackend",
+        "tests/contracts/test_postgresql_lifecycle_authority.py",
+        "tests/test_migration_remote_contract.py",
+        "tests/test_s3_blob_backend.py",
+        "do not qualify live PostgreSQL/AWS S3",
+        "Phase 8 alone",
+    ):
+        assert required_reference in normalized_coverage
+    assert "| capability | decision | reason |" not in coverage
+    assert "qualifies live PostgreSQL/AWS S3" not in coverage
+    assert "supports live PostgreSQL/AWS S3" not in coverage
