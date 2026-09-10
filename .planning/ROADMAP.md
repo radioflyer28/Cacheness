@@ -431,7 +431,7 @@ Plans:
   4. Incompatible formats and cross-backend moves offer an explicit, scoped, confirmed rebuild path rather than implicit deletion or a promise of universal physical migration.
   5. Define the supported source-version window explicitly; it may exclude pre-production development layouts. Distinguish catalog/payload migration from rebuilding derived indexes; a missing or stale index cannot require rewriting valid payloads or become a second cutover authority.
 
-**Plans**: 11/11 plans executed
+**Plans**: 11/19 plans executed; 8 gap-closure plans ready
 
 Plans:
 
@@ -473,6 +473,35 @@ Plans:
 
 - [x] 07-11-PLAN.md — Run the fixed Phase 7 contract, architecture, security, Nyquist, full-suite, and Ruff gates.
 
+**Wave 9** *(gap closure; blocked on verified Plan 07-11 baseline)*
+
+- [ ] 07-12-PLAN.md — Add bounded durable migration-batch attribution, uncapped complete-candidate aggregation, and resumable STAGING abort/debt.
+- [ ] 07-13-PLAN.md — Re-run the canonical PostgreSQL worker fence after persisted identity/state load and before readiness.
+
+**Wave 10** *(blocked on both Wave 9 repairs)*
+
+- [ ] 07-14-PLAN.md — Add exact canonical operation replay for rebuild response-loss recovery without another authority.
+
+**Wave 11** *(blocked on canonical operation replay)*
+
+- [ ] 07-15-PLAN.md — Persist rebuild intents/receipts and resume or clean every rebuild interruption from exact run-owned evidence.
+
+**Wave 12** *(blocked on durable rebuild recovery)*
+
+- [ ] 07-16-PLAN.md — Enforce exact destination compatibility and execute only concrete handler-owned guarded transformations.
+
+**Wave 13** *(blocked on the destination contract)*
+
+- [ ] 07-17-PLAN.md — Replace raw plan metadata with digest-bound confidential records and authenticated execution-time rereads.
+
+**Wave 14** *(blocked on all behavioral blocker repairs)*
+
+- [ ] 07-18-PLAN.md — Bind every fixed Phase 7 claim and gap threat to exact executable test selectors.
+
+**Wave 15** *(blocked on exact selector verification)*
+
+- [ ] 07-19-PLAN.md — Run quick/all fixed verification and record truthful blocker, warning, spike-boundary, and Phase 8 evidence.
+
 ### Phase 8: Production Gates and Performance Stabilization
 
 **Goal**: Users can rely on reproducible release evidence across supported installations, Python versions, backends, failures, and operational scale.
@@ -499,7 +528,7 @@ Plans:
 | 4. Metadata Composition and Topology Contracts | 14/14 | Complete    | 2026-09-08 |
 | 5. Payload Backends and Supported Topology Qualification | 9/9 | Complete    | 2026-09-08 |
 | 6. UnifiedCache Policy Composition | 11/11 | Complete    | 2026-09-09 |
-| 7. Explicit Migration and Rebuild Cutover | 11/11 | In Progress|  |
+| 7. Explicit Migration and Rebuild Cutover | 11/19 | Gap closure planned |  |
 | 8. Production Gates and Performance Stabilization | 0/TBD | Not started | - |
 
 ## Backlog
