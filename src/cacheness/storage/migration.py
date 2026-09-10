@@ -22,6 +22,7 @@ from typing import Iterable, Mapping
 from cacheness.error_handling import (
     CacheBlobMigrationEvidenceError,
     CacheBlobMigrationEvidenceMismatchError,
+    CacheBlobMigrationOfflineDecisionRequiredError,
     CacheBlobMigrationPlanStaleError,
     CacheManifestIntegrityError,
     CacheManifestUnsupportedVersionError,
@@ -1522,17 +1523,26 @@ class OfflineMigrationService:
     def stage(self, plan: MigrationPlan) -> MigrationStepResult:
         """Copy authenticated immutable payloads into an invisible candidate."""
         self._validate_plan(plan)
-        self._expect_evidence(MaintenanceEvidenceState.PLANNED, plan_digest=plan.digest)
-        self._write_evidence(
-            self._new_evidence(
-                state=MaintenanceEvidenceState.STAGING,
-                plan_digest=plan.digest,
-                source_identity=plan.source_identity,
-                destination_identity=plan.destination_identity,
-                completed_steps=("inspect", "plan"),
-                completed_output_digests={"plan": plan.digest},
+        current = self.read_evidence()
+        if current.state is MaintenanceEvidenceState.PLANNED:
+            self._expect_evidence(MaintenanceEvidenceState.PLANNED, plan_digest=plan.digest)
+            self._write_evidence(
+                self._new_evidence(
+                    state=MaintenanceEvidenceState.STAGING,
+                    plan_digest=plan.digest,
+                    source_identity=plan.source_identity,
+                    destination_identity=plan.destination_identity,
+                    completed_steps=("inspect", "plan"),
+                    completed_output_digests={"plan": plan.digest},
+                )
             )
-        )
+        elif current.state is MaintenanceEvidenceState.STAGING:
+            self._expect_evidence(MaintenanceEvidenceState.STAGING, plan_digest=plan.digest)
+        else:
+            raise CacheBlobMigrationEvidenceMismatchError(
+                "maintenance evidence is not ready to stage this plan",
+                context={"operation": "migration.stage", "run_id": self.run_id},
+            )
         expected = {assessment.entry.key: assessment for assessment in plan.assessments}
         candidates: list[AuthorityInventoryEntry] = []
         seen_keys: set[str] = set()
@@ -1613,36 +1623,103 @@ class OfflineMigrationService:
     def _candidate_from_evidence(
         self, evidence: MaintenanceRunEvidence, plan: MigrationPlan
     ) -> tuple[AuthorityInventoryEntry, ...]:
-        receipt = evidence.candidate_receipt
-        if receipt is None or not self._candidate_entries:
-            raise ValueError(
-                "candidate descriptors require explicit restaging; candidate presence is not evidence"
-            )
-        if receipt.plan_digest != plan.digest or candidate_digest(self._candidate_entries) != receipt.candidate_digest:
-            raise ValueError("candidate descriptors do not match authenticated evidence")
-        return self._candidate_entries
+        """Rebuild expected descriptors from the plan, then verify recorded outputs.
 
-    def verify(self, plan: MigrationPlan) -> MigrationStepResult:
-        """Verify every candidate payload and descriptor before activation is allowed."""
-        self._validate_plan(plan)
-        evidence = self._expect_evidence(MaintenanceEvidenceState.STAGED, plan_digest=plan.digest)
-        self._write_evidence(
-            self._new_evidence(
-                state=MaintenanceEvidenceState.VERIFYING,
-                plan_digest=plan.digest,
-                source_identity=plan.source_identity,
-                destination_identity=plan.destination_identity,
-                completed_steps=("inspect", "plan", "stage"),
-                candidate_receipt=evidence.candidate_receipt,
-                completed_output_digests=dict(evidence.completed_output_digests),
+        Candidate presence is never progress evidence.  The plan plus signed
+        receipt determines each expected immutable output, which is then read
+        and hashed before a resume can skip the completed stage.
+        """
+        receipt = evidence.candidate_receipt
+        if receipt is None:
+            raise CacheBlobMigrationEvidenceMismatchError(
+                "candidate receipt is required for resume",
+                context={"operation": "migration.resume", "run_id": self.run_id},
             )
-        )
-        candidates = self._candidate_from_evidence(evidence, plan)
+        candidates = self._expected_candidate_entries(plan)
+        if (
+            receipt.plan_digest != plan.digest
+            or receipt.candidate_digest != candidate_digest(candidates)
+            or receipt.entry_count != len(candidates)
+            or receipt.byte_count != sum(item.byte_size for item in candidates)
+        ):
+            raise CacheBlobMigrationEvidenceMismatchError(
+                "candidate descriptors do not match authenticated evidence",
+                context={"operation": "migration.resume", "run_id": self.run_id},
+            )
+        self._verify_candidate_outputs(candidates)
+        return candidates
+
+    def _expected_candidate_entries(
+        self, plan: MigrationPlan
+    ) -> tuple[AuthorityInventoryEntry, ...]:
+        """Derive the only valid candidate descriptors from current planned input."""
+        expected = {assessment.entry.key: assessment for assessment in plan.assessments}
+        candidates: list[AuthorityInventoryEntry] = []
+        seen_keys: set[str] = set()
+        cursor = None
+        while True:
+            page = self._inventory_page(self._source_authority, cursor)
+            if page.identity != plan.source_identity:
+                raise CacheBlobMigrationPlanStaleError(
+                    "source inventory changed; reinspection is required",
+                    context={"operation": "migration.resume", "run_id": self.run_id},
+                )
+            for snapshot in page.entries:
+                assessment = expected.get(snapshot.key)
+                if assessment is None or assessment.entry.manifest_digest != hashlib.sha256(
+                    snapshot.manifest
+                ).hexdigest():
+                    raise CacheBlobMigrationPlanStaleError(
+                        "source entry changed; reinspection is required",
+                        context={"operation": "migration.resume", "run_id": self.run_id},
+                    )
+                seen_keys.add(snapshot.key)
+                manifest = self._authenticated_manifest(snapshot.manifest, role="source")
+                suffix = "".join(Path(manifest.locator).suffixes)
+                candidate_locator = (
+                    f"generations/migration/{self.run_id}/{snapshot.generation}{suffix}"
+                )
+                candidate_manifest = sign_current_manifest(
+                    replace(manifest, locator=candidate_locator), self._evidence_key
+                )
+                candidate_raw = candidate_manifest.canonical_bytes()
+                self._authenticated_manifest(candidate_raw, role="candidate")
+                candidates.append(
+                    AuthorityInventoryEntry(
+                        key=snapshot.key,
+                        generation=snapshot.generation,
+                        locator=candidate_locator,
+                        manifest=candidate_raw,
+                        payload_digest=manifest.digest,
+                        byte_size=manifest.byte_size,
+                    )
+                )
+            if page.exhausted:
+                break
+            cursor = page.next_cursor
+        if seen_keys != set(expected):
+            raise CacheBlobMigrationPlanStaleError(
+                "source inventory changed; reinspection is required",
+                context={"operation": "migration.resume", "run_id": self.run_id},
+            )
+        self._revalidate_identities(plan)
+        return tuple(candidates)
+
+    def _verify_candidate_outputs(
+        self, candidates: tuple[AuthorityInventoryEntry, ...]
+    ) -> None:
+        """Validate every deterministic completed candidate output before reuse."""
         for candidate in candidates:
             manifest = self._authenticated_manifest(candidate.manifest, role="candidate")
             destination_io = self.destination._materialize_authority_store()
-            with destination_io.open_snapshot(candidate.locator, {}) as snapshot:
-                payload = snapshot.path.read_bytes()
+            try:
+                with destination_io.open_snapshot(candidate.locator, {}) as snapshot:
+                    payload = snapshot.path.read_bytes()
+            except OSError as exc:
+                raise CacheBlobMigrationEvidenceMismatchError(
+                    "candidate output is missing during explicit resume",
+                    context={"operation": "migration.resume", "run_id": self.run_id},
+                ) from exc
             if (
                 manifest.key != candidate.key
                 or manifest.locator != candidate.locator
@@ -1651,7 +1728,41 @@ class OfflineMigrationService:
                 or hashlib.sha256(payload).hexdigest() != candidate.payload_digest
                 or len(payload) != candidate.byte_size
             ):
-                raise ValueError("candidate verification failed before activation")
+                raise CacheBlobMigrationEvidenceMismatchError(
+                    "candidate output does not match authenticated evidence",
+                    context={"operation": "migration.resume", "run_id": self.run_id},
+                )
+
+    def verify(self, plan: MigrationPlan) -> MigrationStepResult:
+        """Verify every candidate payload and descriptor before activation is allowed."""
+        self._validate_plan(plan)
+        evidence = self.read_evidence()
+        if evidence.state is MaintenanceEvidenceState.STAGED:
+            evidence = self._expect_evidence(
+                MaintenanceEvidenceState.STAGED, plan_digest=plan.digest
+            )
+            self._candidate_from_evidence(evidence, plan)
+            self._write_evidence(
+                self._new_evidence(
+                    state=MaintenanceEvidenceState.VERIFYING,
+                    plan_digest=plan.digest,
+                    source_identity=plan.source_identity,
+                    destination_identity=plan.destination_identity,
+                    completed_steps=("inspect", "plan", "stage"),
+                    candidate_receipt=evidence.candidate_receipt,
+                    completed_output_digests=dict(evidence.completed_output_digests),
+                )
+            )
+        elif evidence.state is MaintenanceEvidenceState.VERIFYING:
+            evidence = self._expect_evidence(
+                MaintenanceEvidenceState.VERIFYING, plan_digest=plan.digest
+            )
+            self._candidate_from_evidence(evidence, plan)
+        else:
+            raise CacheBlobMigrationEvidenceMismatchError(
+                "maintenance evidence is not ready to verify this plan",
+                context={"operation": "migration.verify", "run_id": self.run_id},
+            )
         receipt = evidence.candidate_receipt
         assert receipt is not None
         self._write_evidence(
@@ -1701,6 +1812,86 @@ class OfflineMigrationService:
             )
         )
         return MigrationStepResult(MaintenanceEvidenceState.ACTIVATED, True, self.evidence_path)
+
+    def resume(
+        self,
+        plan: MigrationPlan,
+        *,
+        run_id: str | None,
+        evidence_path: str | Path | None,
+    ) -> MigrationStepResult:
+        """Continue one explicit run only after authenticating and revalidating it.
+
+        The caller must give the exact run ID and generated evidence path. This
+        method never enumerates work roots, searches for a latest run, or scans
+        payload/catalog state to infer an unrecorded completed action.
+        """
+        if run_id is None or evidence_path is None:
+            raise CacheBlobMigrationOfflineDecisionRequiredError(
+                "resume requires an explicit run_id and exact evidence path",
+                context={"operation": "migration.resume"},
+            )
+        if run_id != self.run_id:
+            raise CacheBlobMigrationEvidenceMismatchError(
+                "resume run_id does not match this offline service",
+                context={"operation": "migration.resume", "run_id": self.run_id},
+            )
+        if Path(evidence_path) != self.evidence_path:
+            raise CacheBlobMigrationEvidenceMismatchError(
+                "resume evidence path does not match this explicit run",
+                context={"operation": "migration.resume", "run_id": self.run_id},
+            )
+        evidence = self.read_evidence()
+        if evidence.run_id != run_id or evidence.plan_digest != plan.digest:
+            raise CacheBlobMigrationEvidenceMismatchError(
+                "resume evidence does not bind the supplied plan",
+                context={"operation": "migration.resume", "run_id": self.run_id},
+            )
+        if evidence.state is MaintenanceEvidenceState.ACTIVATED:
+            self._revalidate_activated_receipt(evidence, plan)
+            return MigrationStepResult(MaintenanceEvidenceState.ACTIVATED, True, self.evidence_path)
+        self._validate_plan(plan)
+        if evidence.state is MaintenanceEvidenceState.PLANNED:
+            return self.stage(plan)
+        if evidence.state is MaintenanceEvidenceState.STAGING:
+            return self.stage(plan)
+        if evidence.state is MaintenanceEvidenceState.STAGED:
+            self._candidate_from_evidence(evidence, plan)
+            return self.verify(plan)
+        if evidence.state is MaintenanceEvidenceState.VERIFYING:
+            self._candidate_from_evidence(evidence, plan)
+            return self.verify(plan)
+        if evidence.state is MaintenanceEvidenceState.VERIFIED:
+            self._expect_evidence(MaintenanceEvidenceState.VERIFIED, plan_digest=plan.digest)
+            self._candidate_from_evidence(evidence, plan)
+            return MigrationStepResult(MaintenanceEvidenceState.VERIFIED, True, self.evidence_path)
+        raise CacheBlobMigrationOfflineDecisionRequiredError(
+            "resume state requires reinspection or a separately confirmed offline action",
+            context={"operation": "migration.resume", "run_id": self.run_id},
+        )
+
+    def _revalidate_activated_receipt(
+        self, evidence: MaintenanceRunEvidence, plan: MigrationPlan
+    ) -> None:
+        """Validate an already-authorized activation without treating evidence as authority."""
+        receipt = evidence.activation_receipt
+        if receipt is None or evidence.candidate_receipt is None:
+            raise CacheBlobMigrationEvidenceMismatchError(
+                "activated evidence lacks an authority receipt",
+                context={"operation": "migration.resume", "run_id": self.run_id},
+            )
+        source_identity = self._source_authority.identity_snapshot()
+        destination_identity = self._destination_authority.identity_snapshot()
+        if (
+            source_identity != plan.source_identity
+            or receipt.candidate_receipt != evidence.candidate_receipt
+            or destination_identity.store_id != plan.destination_identity.store_id
+            or destination_identity.revision != receipt.activation_revision
+        ):
+            raise CacheBlobMigrationPlanStaleError(
+                "activated maintenance evidence no longer matches live authority state",
+                context={"operation": "migration.resume", "run_id": self.run_id},
+            )
 
 
 __all__ = [
