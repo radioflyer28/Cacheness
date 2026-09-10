@@ -30,3 +30,4 @@ existing path-based handler ecosystem and ADR 0001's single-authority lifecycle.
 |---|------|------|------|-----------|---------|------|
 | 001 | obstore-payload-participant | handler-boundary | standard | Path-based built-in and user-registered MCAP handlers survive private staging through LocalStore and MemoryStore | VALIDATED | obstore, handlers, mcap, local, memory |
 | 002 | obstore-payload-participant | immutable-publication | standard | Create-if-absent yields one complete winner under collision and deterministic identity reconciles a lost response on LocalStore, MemoryStore, and mocked S3 | VALIDATED | obstore, concurrency, recovery, local, memory, s3 |
+| 003 | obstore-payload-participant | authority-boundary | standard | SQLite remains the visibility authority; durable intent and identity reconcile external obstore effects without cross-resource ACID | VALIDATED | adr-0001, sqlite, atomicity, recovery, obstore |
