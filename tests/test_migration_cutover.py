@@ -8,7 +8,10 @@ from types import SimpleNamespace
 import pytest
 
 from cacheness.storage import BackendRef, BlobStore, StoreTopology
-from cacheness.error_handling import CacheBlobMigrationOfflineDecisionRequiredError
+from cacheness.error_handling import (
+    CacheBlobMigrationOfflineDecisionRequiredError,
+    CacheBlobMigrationPlanStaleError,
+)
 from cacheness.storage.migration import (
     MigrationCompatibilityEdge,
     MigrationDisposition,
@@ -394,6 +397,7 @@ def test_offline_service_purge_is_separate_idempotent_retryable_cleanup(
             nonlocal attempts
             attempts += 1
             if attempts == 1:
+                original_delete(locator)
                 raise OSError("simulated deletion failure")
             original_delete(locator)
 
@@ -414,6 +418,67 @@ def test_offline_service_purge_is_separate_idempotent_retryable_cleanup(
         assert service.read_evidence().state is MaintenanceEvidenceState.PURGED
         assert destination.get("entry") == {"answer": "candidate"}
         assert service.purge(plan, confirmation=service.purge_confirmation(plan)) == purged
+    finally:
+        source.close()
+        destination.close()
+
+
+def test_sqlite_purge_uses_the_finalized_authority_retention_rows(tmp_path: Path) -> None:
+    """The durable authority exposes retained prior rows only for explicit purge."""
+    key_provider = _SharedMemoryKeyProvider()
+    source = _sqlite_store(tmp_path / "source", key_provider)
+    destination = _sqlite_store(tmp_path / "destination", key_provider)
+    try:
+        source.put_entry({"answer": "candidate"}, key="entry")
+        destination.put_entry({"answer": "prior"}, key="entry")
+        service = _service(
+            source,
+            destination,
+            tmp_path / "maintenance",
+            run_id="sqlite-purge-service",
+        )
+        plan = service.plan(service.inspect())
+        service.stage(plan)
+        service.verify(plan)
+        service.activate(plan)
+        service.finalize(plan, confirmation=service.finalize_confirmation(plan))
+
+        purged = service.purge(plan, confirmation=service.purge_confirmation(plan))
+
+        assert purged.completed is True
+        assert purged.purged_entries == 1
+        assert destination.lifecycle_authority.publication_state() is AuthorityPublicationState.ACTIVE
+        assert destination.get("entry") == {"answer": "candidate"}
+    finally:
+        source.close()
+        destination.close()
+
+
+def test_purge_refuses_a_stale_source_without_touching_active_candidate(tmp_path: Path) -> None:
+    """Purge uses the evidence-bound stopped-worker source revision before I/O."""
+    key_provider = _SharedMemoryKeyProvider()
+    source = _memory_store(tmp_path / "source", key_provider)
+    destination = _memory_store(tmp_path / "destination", key_provider)
+    try:
+        source.put_entry({"answer": "candidate"}, key="entry")
+        destination.put_entry({"answer": "prior"}, key="entry")
+        service = _service(
+            source,
+            destination,
+            tmp_path / "maintenance",
+            run_id="stale-purge-service",
+        )
+        plan = service.plan(service.inspect())
+        service.stage(plan)
+        service.verify(plan)
+        service.activate(plan)
+        service.finalize(plan, confirmation=service.finalize_confirmation(plan))
+        confirmation = service.purge_confirmation(plan)
+        source.put_entry({"answer": "source changed"}, key="new-entry")
+
+        with pytest.raises(CacheBlobMigrationPlanStaleError, match="source revision"):
+            service.purge(plan, confirmation=confirmation)
+        assert destination.get("entry") == {"answer": "candidate"}
     finally:
         source.close()
         destination.close()

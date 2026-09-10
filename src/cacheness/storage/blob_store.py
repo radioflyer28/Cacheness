@@ -814,6 +814,17 @@ class BlobStore:
         """Delegate exact cleanup to the selected payload participant's I/O."""
         self._materialize_authority_store().delete_or_prove_absent(locator)
 
+    def delete_migration_payload(self, locator: str) -> None:
+        """Delete one authority-correlated retired migration locator idempotently.
+
+        This narrow maintenance-only primitive is intentionally not an ordinary
+        BlobStore deletion path: callers must obtain the exact locator from the
+        selected migration authority before requesting external cleanup.
+        """
+        if not isinstance(locator, str) or not locator:
+            raise ValueError("migration payload locator must be a non-empty string")
+        self._materialize_authority_store().delete_or_prove_absent(locator)
+
     def _resolve_payload_handler(self, manifest: BlobManifest) -> Any:
         """Resolve one signed handler/payload contract before opening bytes."""
         resolver = getattr(self.handlers, "resolve_payload_contract", None)

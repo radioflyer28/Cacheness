@@ -1181,6 +1181,48 @@ class MigrationStepResult:
     evidence_path: Path
 
 
+@dataclass(frozen=True)
+class AbortReceipt:
+    """Result of an explicit unactivated-candidate retirement attempt."""
+
+    run_id: str
+    deleted_entries: int
+    state: MaintenanceEvidenceState = MaintenanceEvidenceState.ABORTED
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.run_id, str) or not self.run_id:
+            raise ValueError("abort receipt requires a non-empty run_id")
+        if type(self.deleted_entries) is not int or self.deleted_entries < 0:
+            raise ValueError("abort receipt deleted_entries must be non-negative")
+        if self.state is not MaintenanceEvidenceState.ABORTED:
+            raise ValueError("abort receipt must record aborted state")
+
+
+@dataclass(frozen=True)
+class PurgeReceipt:
+    """Typed post-finalization cleanup outcome that cannot rewrite activation."""
+
+    run_id: str
+    purged_entries: int
+    pending_entries: int
+    cleanup_debt: tuple[str, ...]
+    completed: bool
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.run_id, str) or not self.run_id:
+            raise ValueError("purge receipt requires a non-empty run_id")
+        for field_name in ("purged_entries", "pending_entries"):
+            value = getattr(self, field_name)
+            if type(value) is not int or value < 0:
+                raise ValueError(f"purge receipt {field_name} must be non-negative")
+        if not isinstance(self.cleanup_debt, tuple) or any(
+            not isinstance(item, str) or len(item) != 64 for item in self.cleanup_debt
+        ):
+            raise ValueError("purge receipt cleanup_debt must contain SHA-256 values")
+        if not isinstance(self.completed, bool) or self.completed != (self.pending_entries == 0):
+            raise ValueError("purge receipt completion must match pending cleanup work")
+
+
 class OfflineMigrationService:
     """Coordinate an operator's explicit inspect-to-activate maintenance run.
 
@@ -1326,6 +1368,7 @@ class OfflineMigrationService:
         candidate_receipt: VerifiedCandidateReceipt | None = None,
         activation_receipt: ActivationReceipt | None = None,
         authority_receipts: tuple[str, ...] = (),
+        cleanup_debt: tuple[str, ...] = (),
         completed_output_digests: Mapping[str, str] | None = None,
     ) -> MaintenanceRunEvidence:
         """Build a fully bound evidence record without serializing signing bytes."""
@@ -1343,6 +1386,7 @@ class OfflineMigrationService:
             candidate_receipt=candidate_receipt,
             activation_receipt=activation_receipt,
             authority_receipts=authority_receipts,
+            cleanup_debt=cleanup_debt,
             completed_output_digests=completed_output_digests or {},
         )
 
@@ -2021,6 +2065,283 @@ class OfflineMigrationService:
         )
         return finalized
 
+    def _retained_prior_entries(self) -> tuple[AuthorityInventoryEntry, ...]:
+        """Load exact authenticated retained-prior entries from the authority."""
+        reader = getattr(self._destination_authority, "retained_prior_entries", None)
+        if not callable(reader):
+            raise CacheBlobMigrationEvidenceMismatchError(
+                "destination authority cannot expose retained migration entries",
+                context={"operation": "migration.purge", "run_id": self.run_id},
+            )
+        snapshots = reader(run_id=self.run_id)
+        if not isinstance(snapshots, tuple):
+            raise CacheBlobMigrationEvidenceMismatchError(
+                "destination authority returned invalid retained migration entries",
+                context={"operation": "migration.purge", "run_id": self.run_id},
+            )
+        entries: list[AuthorityInventoryEntry] = []
+        for snapshot in snapshots:
+            try:
+                manifest = self._authenticated_manifest(snapshot.manifest, role="retained prior")
+            except (AttributeError, TypeError, ValueError) as exc:
+                raise CacheBlobMigrationEvidenceMismatchError(
+                    "retained prior entry cannot be authenticated",
+                    context={"operation": "migration.purge", "run_id": self.run_id},
+                ) from exc
+            if (
+                manifest.key != snapshot.key
+                or manifest.generation != snapshot.generation
+                or manifest.locator != snapshot.locator
+            ):
+                raise CacheBlobMigrationEvidenceMismatchError(
+                    "retained prior entry does not match its authenticated manifest",
+                    context={"operation": "migration.purge", "run_id": self.run_id},
+                )
+            entries.append(
+                AuthorityInventoryEntry(
+                    key=snapshot.key,
+                    generation=snapshot.generation,
+                    locator=snapshot.locator,
+                    manifest=bytes(snapshot.manifest),
+                    payload_digest=manifest.digest,
+                    byte_size=manifest.byte_size,
+                )
+            )
+        if len({(entry.key, entry.generation) for entry in entries}) != len(entries):
+            raise CacheBlobMigrationEvidenceMismatchError(
+                "retained prior entries contain duplicate identities",
+                context={"operation": "migration.purge", "run_id": self.run_id},
+            )
+        return tuple(sorted(entries, key=lambda entry: (entry.key, entry.generation)))
+
+    def _finalized_evidence(self, plan: MigrationPlan) -> MaintenanceRunEvidence:
+        """Require signed finalized evidence and a still-matching source revision."""
+        if not isinstance(plan, MigrationPlan) or plan.run_id != self.run_id:
+            raise CacheBlobMigrationEvidenceMismatchError(
+                "migration plan does not belong to this explicit run",
+                context={"operation": "migration.purge", "run_id": self.run_id},
+            )
+        evidence = self.read_evidence()
+        if evidence.state not in {
+            MaintenanceEvidenceState.FINALIZED,
+            MaintenanceEvidenceState.PURGE_PENDING,
+            MaintenanceEvidenceState.PURGED,
+        }:
+            raise CacheBlobMigrationOfflineDecisionRequiredError(
+                "purge requires the separately finalized offline migration state",
+                context={"operation": "migration.purge", "run_id": self.run_id},
+            )
+        source_identity = self._source_authority.identity_snapshot()
+        if (
+            evidence.plan_digest != plan.digest
+            or evidence.activation_receipt is None
+            or evidence.acknowledgement
+            != self._acknowledgement(plan.digest, source_identity)
+            or source_identity != plan.source_identity
+        ):
+            raise CacheBlobMigrationPlanStaleError(
+                "purge requires the exact stopped-worker source revision",
+                context={"operation": "migration.purge", "run_id": self.run_id},
+            )
+        if self._destination_authority.publication_state() is not AuthorityPublicationState.ACTIVE:
+            raise CacheBlobMigrationEvidenceMismatchError(
+                "purge requires the authority's finalized active selection",
+                context={"operation": "migration.purge", "run_id": self.run_id},
+            )
+        return evidence
+
+    @staticmethod
+    def _retirement_digest(entry: AuthorityInventoryEntry) -> str:
+        """Name one exact external cleanup obligation without exposing payload bytes."""
+        material = "\x00".join(
+            (entry.key, entry.generation, entry.locator, entry.manifest_digest)
+        ).encode("utf-8")
+        return hashlib.sha256(material).hexdigest()
+
+    def _purge_confirmation_digest(
+        self,
+        evidence: MaintenanceRunEvidence,
+        entries: tuple[AuthorityInventoryEntry, ...],
+    ) -> str:
+        """Bind destructive confirmation to every retained prior locator and byte count."""
+        material = json.dumps(
+            {
+                "base_confirmation": self._confirmation_digest(action="purge", evidence=evidence),
+                "prior_byte_count": sum(entry.byte_size for entry in entries),
+                "prior_digest": candidate_digest(entries),
+                "prior_entry_count": len(entries),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return hashlib.sha256(material).hexdigest()
+
+    def abort(self, plan: MigrationPlan) -> AbortReceipt:
+        """Retire only this run's authenticated, still-unactivated candidate bytes."""
+        evidence = self.read_evidence()
+        if evidence.state in {
+            MaintenanceEvidenceState.ACTIVATED,
+            MaintenanceEvidenceState.FINALIZED,
+            MaintenanceEvidenceState.PURGE_PENDING,
+            MaintenanceEvidenceState.PURGED,
+            MaintenanceEvidenceState.ROLLED_BACK,
+        }:
+            raise CacheBlobMigrationOfflineDecisionRequiredError(
+                "abort is unavailable after activation; use rollback or finalize",
+                context={"operation": "migration.abort", "run_id": self.run_id},
+            )
+        if evidence.state is MaintenanceEvidenceState.ABORTED:
+            if evidence.plan_digest != plan.digest:
+                raise CacheBlobMigrationEvidenceMismatchError(
+                    "aborted maintenance evidence does not bind the supplied plan",
+                    context={"operation": "migration.abort", "run_id": self.run_id},
+                )
+            deleted_entries = 0 if evidence.candidate_receipt is None else evidence.candidate_receipt.entry_count
+            return AbortReceipt(run_id=self.run_id, deleted_entries=deleted_entries)
+        if evidence.state not in {
+            MaintenanceEvidenceState.INSPECTED,
+            MaintenanceEvidenceState.PLANNED,
+            MaintenanceEvidenceState.STAGED,
+            MaintenanceEvidenceState.VERIFYING,
+            MaintenanceEvidenceState.VERIFIED,
+        }:
+            raise CacheBlobMigrationOfflineDecisionRequiredError(
+                "abort requires recorded unactivated candidate evidence",
+                context={"operation": "migration.abort", "run_id": self.run_id},
+            )
+        self._validate_plan(plan)
+        evidence = self._expect_evidence(evidence.state, plan_digest=plan.digest)
+        candidates = (
+            ()
+            if evidence.candidate_receipt is None
+            else self._candidate_from_evidence(evidence, plan)
+        )
+        try:
+            for candidate in candidates:
+                self.destination.delete_migration_payload(candidate.locator)
+        except Exception as exc:
+            raise CacheBlobMigrationEvidenceError(
+                "abort could not retire an exact run-owned candidate",
+                context={"operation": "migration.abort", "run_id": self.run_id},
+            ) from exc
+        abort_digest = hashlib.sha256(
+            f"{self.run_id}:{len(candidates)}".encode("utf-8")
+        ).hexdigest()
+        self._write_evidence(
+            self._new_evidence(
+                state=MaintenanceEvidenceState.ABORTED,
+                plan_digest=plan.digest,
+                source_identity=plan.source_identity,
+                destination_identity=plan.destination_identity,
+                completed_steps=(*evidence.completed_steps, "abort"),
+                candidate_receipt=evidence.candidate_receipt,
+                activation_receipt=evidence.activation_receipt,
+                authority_receipts=evidence.authority_receipts,
+                cleanup_debt=evidence.cleanup_debt,
+                completed_output_digests={
+                    **evidence.completed_output_digests,
+                    "abort": abort_digest,
+                },
+            )
+        )
+        return AbortReceipt(run_id=self.run_id, deleted_entries=len(candidates))
+
+    def purge_confirmation(self, plan: MigrationPlan) -> str:
+        """Return the exact separately confirmed D-15 retirement action token."""
+        evidence = self._finalized_evidence(plan)
+        return self._purge_confirmation_digest(evidence, self._retained_prior_entries())
+
+    def purge(self, plan: MigrationPlan, *, confirmation: str) -> PurgeReceipt:
+        """Apply idempotent retained-prior cleanup without revising activation state."""
+        evidence = self._finalized_evidence(plan)
+        entries = self._retained_prior_entries()
+        expected_confirmation = self._purge_confirmation_digest(evidence, entries)
+        if not isinstance(confirmation, str) or not hmac.compare_digest(
+            confirmation, expected_confirmation
+        ):
+            raise CacheBlobMigrationOfflineDecisionRequiredError(
+                "purge requires the exact separately confirmed confirmation for the prior selection",
+                context={"operation": "migration.purge", "run_id": self.run_id},
+            )
+        if evidence.state is MaintenanceEvidenceState.PURGED:
+            return PurgeReceipt(
+                run_id=self.run_id,
+                purged_entries=len(entries),
+                pending_entries=0,
+                cleanup_debt=(),
+                completed=True,
+            )
+        if evidence.state is MaintenanceEvidenceState.FINALIZED:
+            self._write_evidence(
+                self._new_evidence(
+                    state=MaintenanceEvidenceState.PURGE_PENDING,
+                    plan_digest=plan.digest,
+                    source_identity=plan.source_identity,
+                    destination_identity=plan.destination_identity,
+                    completed_steps=evidence.completed_steps,
+                    candidate_receipt=evidence.candidate_receipt,
+                    activation_receipt=evidence.activation_receipt,
+                    authority_receipts=evidence.authority_receipts,
+                    completed_output_digests=evidence.completed_output_digests,
+                )
+            )
+            evidence = self.read_evidence()
+
+        pending: list[str] = []
+        for entry in entries:
+            try:
+                self.destination.delete_migration_payload(entry.locator)
+            except Exception:
+                pending.append(self._retirement_digest(entry))
+        if pending:
+            self._write_evidence(
+                self._new_evidence(
+                    state=MaintenanceEvidenceState.PURGE_PENDING,
+                    plan_digest=plan.digest,
+                    source_identity=plan.source_identity,
+                    destination_identity=plan.destination_identity,
+                    completed_steps=evidence.completed_steps,
+                    candidate_receipt=evidence.candidate_receipt,
+                    activation_receipt=evidence.activation_receipt,
+                    authority_receipts=evidence.authority_receipts,
+                    cleanup_debt=tuple(pending),
+                    completed_output_digests=evidence.completed_output_digests,
+                )
+            )
+            return PurgeReceipt(
+                run_id=self.run_id,
+                purged_entries=len(entries) - len(pending),
+                pending_entries=len(pending),
+                cleanup_debt=tuple(pending),
+                completed=False,
+            )
+        purge_digest = hashlib.sha256(
+            "\x00".join(self._retirement_digest(entry) for entry in entries).encode("utf-8")
+        ).hexdigest()
+        self._write_evidence(
+            self._new_evidence(
+                state=MaintenanceEvidenceState.PURGED,
+                plan_digest=plan.digest,
+                source_identity=plan.source_identity,
+                destination_identity=plan.destination_identity,
+                completed_steps=(*evidence.completed_steps, "purge"),
+                candidate_receipt=evidence.candidate_receipt,
+                activation_receipt=evidence.activation_receipt,
+                authority_receipts=evidence.authority_receipts,
+                completed_output_digests={
+                    **evidence.completed_output_digests,
+                    "purge": purge_digest,
+                },
+            )
+        )
+        return PurgeReceipt(
+            run_id=self.run_id,
+            purged_entries=len(entries),
+            pending_entries=0,
+            cleanup_debt=(),
+            completed=True,
+        )
+
     def rebuild_projection(
         self,
         plan: MigrationPlan,
@@ -2191,6 +2512,7 @@ class OfflineMigrationService:
 
 
 __all__ = [
+    "AbortReceipt",
     "CompatibilityDimension",
     "CompatibilityIdentity",
     "CompatibilityMatrix",
@@ -2206,6 +2528,7 @@ __all__ = [
     "MigrationStepResult",
     "MigrationTotals",
     "OfflineMigrationService",
+    "PurgeReceipt",
     "ReleaseWindow",
     "VersionEdge",
     "inspect_migration_store",

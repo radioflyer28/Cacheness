@@ -631,6 +631,28 @@ class InMemoryLifecycleAuthority:
 
         return self._transition(finalize)
 
+    def retained_prior_entries(self, *, run_id: str) -> tuple[EntrySnapshot, ...]:
+        """Return exact retained prior rows only after this run is finalized."""
+        if not isinstance(run_id, str) or not run_id:
+            raise ValueError("run_id must be a non-empty string")
+        self._require_open()
+        with self._lock:
+            if (
+                self._migration_state is not AuthorityPublicationState.ACTIVE
+                or self._migration_receipt is None
+                or self._migration_receipt.run_id != run_id
+            ):
+                raise CacheBlobLifecycleConflictError(
+                    "Retained prior entries require the finalized selected migration"
+                )
+            return tuple(
+                self._copy(entry)
+                for entry in sorted(
+                    self._migration_prior_entries.values(),
+                    key=lambda entry: (entry.key, entry.generation),
+                )
+            )
+
     def catalog_page(
         self,
         query: CatalogQuery,

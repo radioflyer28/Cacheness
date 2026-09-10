@@ -169,7 +169,9 @@ _LEGAL_TRANSITIONS: Mapping[MaintenanceEvidenceState, frozenset[MaintenanceEvide
         {MaintenanceEvidenceState.ROLLED_BACK, MaintenanceEvidenceState.FINALIZED}
     ),
     MaintenanceEvidenceState.FINALIZED: frozenset({MaintenanceEvidenceState.PURGE_PENDING}),
-    MaintenanceEvidenceState.PURGE_PENDING: frozenset({MaintenanceEvidenceState.PURGED}),
+    MaintenanceEvidenceState.PURGE_PENDING: frozenset(
+        {MaintenanceEvidenceState.PURGE_PENDING, MaintenanceEvidenceState.PURGED}
+    ),
     MaintenanceEvidenceState.ROLLED_BACK: frozenset(),
     MaintenanceEvidenceState.PURGED: frozenset(),
     MaintenanceEvidenceState.ABORTED: frozenset(),

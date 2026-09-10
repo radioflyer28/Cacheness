@@ -2056,6 +2056,40 @@ class SqliteLifecycleAuthority:
 
         return self._transaction(finalize)
 
+    def retained_prior_entries(self, *, run_id: str) -> tuple[EntrySnapshot, ...]:
+        """Return exact retained rows only for this finalized migration run."""
+        if not isinstance(run_id, str) or not run_id:
+            raise ValueError("run_id must be a non-empty string")
+
+        def retained(connection: sqlite3.Connection) -> tuple[EntrySnapshot, ...]:
+            state_row = self._publication_state_row(connection)
+            if (
+                AuthorityPublicationState(state_row[6]) is not AuthorityPublicationState.ACTIVE
+                or state_row[1] != run_id
+                or state_row[8] != 0
+            ):
+                raise CacheBlobLifecycleConflictError(
+                    "Retained prior entries require the finalized selected migration"
+                )
+            rows = connection.execute(
+                "SELECT key, generation, locator, manifest, manifest_digest, lineage, entry_revision "
+                "FROM migration_store_entries WHERE run_id = ? AND selection = 'prior' "
+                "ORDER BY key, generation",
+                (run_id,),
+            ).fetchall()
+            return tuple(
+                EntrySnapshot(
+                    row[0],
+                    row[1],
+                    row[2],
+                    bytes(row[3]),
+                    EntryExpectation(row[5], row[6], row[1], row[4]),
+                )
+                for row in rows
+            )
+
+        return self._transaction(retained)
+
     def catalog_page(
         self,
         query: CatalogQuery,
