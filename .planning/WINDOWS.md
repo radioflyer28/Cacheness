@@ -2,9 +2,9 @@
 schema_version: 1
 open_count: 4
 waived_count: 0
-fixed_count: 36
-total_count: 40
-last_updated: 2026-09-09T04:41:46.920Z
+fixed_count: 37
+total_count: 41
+last_updated: 2026-09-10T04:31:40.837Z
 ---
 
 # Broken Windows Ledger
@@ -55,6 +55,7 @@ last_updated: 2026-09-09T04:41:46.920Z
 | 38 | 06 | unmet-truth | tests/test_unified_cache_lifecycle_authority.py |  | Legacy lifecycle helpers still invoke removed implicit cacheness(config) construction before removal-report assertions. | open |  | 2026-09-09T02:38:50.398Z |  |
 | 39 | 06 | deviation | tests/test_phase6_lookup_contract.py |  | Migrated direct Phase 6 callers to CachePutResult.receipt.key after the approved pre-production result cutover. | fixed |  | 2026-09-09T03:02:19.682Z | 2026-09-09T03:02:36.292Z |
 | 40 | 06 | unrun-verify | tools/verify_phase6_contracts.py |  | Default uv environment lacks pandas; fixed CACH-07 SqlCache regression and full suite remain open. | open |  | 2026-09-09T04:41:46.920Z |  |
+| 41 | 07 | deviation | docs/STORAGE_INITIALIZATION.md |  | Corrected stale schema-7 and future-tooling guidance while publishing the Phase 7 runbook. | fixed |  | 2026-09-10T04:30:14.283Z | 2026-09-10T04:31:40.837Z |
 
 ````json
 [
@@ -537,6 +538,18 @@ last_updated: 2026-09-09T04:41:46.920Z
     "reason": "",
     "recorded_at": "2026-09-09T04:41:46.920Z",
     "resolved_at": null
+  },
+  {
+    "id": 41,
+    "kind": "deviation",
+    "phase": "07",
+    "file": "docs/STORAGE_INITIALIZATION.md",
+    "line": null,
+    "description": "Corrected stale schema-7 and future-tooling guidance while publishing the Phase 7 runbook.",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-09-10T04:30:14.283Z",
+    "resolved_at": "2026-09-10T04:31:40.837Z"
   }
 ]
 ````
