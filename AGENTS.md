@@ -357,7 +357,7 @@ availability promises.
 
 ## Project Skills
 
-No project skills found. Add skills to any of: `.claude/skills/`, `.agents/skills/`, `.cursor/skills/`, `.github/skills/`, or `.codex/skills/` with a `SKILL.md` index file.
+- **Spike findings for cacheness** (implementation patterns, constraints, gotchas) → `Skill("spike-findings-cacheness")`
 <!-- GSD:skills-end -->
 
 <!-- GSD:workflow-start source:GSD defaults -->

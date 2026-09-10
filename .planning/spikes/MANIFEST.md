@@ -21,8 +21,6 @@ existing path-based handler ecosystem and ADR 0001's single-authority lifecycle.
 - Enforce safe suffixes and normalized locators below one managed namespace.
 - Delete exact immutable generations and rely on authority-owned cleanup debt
   and reconciliation rather than object presence or listings.
-- Do not modify production source, `pyproject.toml`, or `uv.lock` during the
-  spike; temporary dependencies use `uv run --with`.
 
 ## Spikes
 
