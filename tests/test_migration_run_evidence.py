@@ -10,6 +10,13 @@ import pytest
 from cacheness.error_handling import (
     CacheBlobMigrationEvidenceError,
     CacheBlobMigrationEvidenceMismatchError,
+    CacheBlobMigrationOfflineDecisionRequiredError,
+    CacheBlobMigrationPlanStaleError,
+)
+from cacheness.storage import BackendRef, BlobStore, StoreTopology
+from cacheness.storage.migration import (
+    MigrationCompatibilityEdge,
+    OfflineMigrationService,
 )
 from cacheness.storage.migration_authority import AuthorityIdentitySnapshot
 from cacheness.storage.migration_evidence import (
@@ -138,3 +145,97 @@ def test_evidence_never_renders_or_logs_key_material(tmp_path: Path, caplog: pyt
     assert provider.key.decode("ascii") not in str(raised.value)
     assert provider.key.decode("ascii") not in str(raised.value.context)
     assert provider.key.decode("ascii") not in caplog.text
+
+
+def _memory_store(root: Path, key_provider: _SentinelKeyProvider) -> BlobStore:
+    store = BlobStore(
+        StoreTopology(
+            payload=BackendRef(name="memory"),
+            authority=BackendRef(name="memory"),
+        ),
+        cache_dir=root,
+        manifest_key_provider=key_provider,
+    )
+    store.initialize()
+    return store
+
+
+def _service(
+    source: BlobStore,
+    destination: BlobStore,
+    work_directory: Path,
+    *,
+    run_id: str = "resumable-maintenance-run",
+) -> OfflineMigrationService:
+    return OfflineMigrationService(
+        source=source,
+        destination=destination,
+        work_directory=work_directory,
+        run_id=run_id,
+        stopped_workers_acknowledged=True,
+        compatibility_edges=(MigrationCompatibilityEdge.current_to_current_for_test(),),
+    )
+
+
+def test_resume_requires_exact_run_and_evidence_then_revalidates_next_step(tmp_path: Path) -> None:
+    """A fresh process resumes only the explicit authenticated staged run."""
+    provider = _SentinelKeyProvider()
+    source = _memory_store(tmp_path / "source", provider)
+    destination = _memory_store(tmp_path / "destination", provider)
+    try:
+        source.put_entry({"answer": 42}, key="entry")
+        service = _service(source, destination, tmp_path / "maintenance")
+        plan = service.plan(service.inspect())
+        service.stage(plan)
+        destination_revision = destination.lifecycle_authority.identity_snapshot().revision
+
+        restarted = _service(source, destination, tmp_path / "maintenance")
+        with pytest.raises(CacheBlobMigrationOfflineDecisionRequiredError):
+            restarted.resume(plan, run_id=None, evidence_path=service.evidence_path)
+        with pytest.raises(CacheBlobMigrationOfflineDecisionRequiredError):
+            restarted.resume(plan, run_id=service.run_id, evidence_path=None)
+        with pytest.raises(CacheBlobMigrationEvidenceMismatchError):
+            restarted.resume(plan, run_id=service.run_id, evidence_path=tmp_path / "wrong.json")
+
+        result = restarted.resume(
+            plan, run_id=service.run_id, evidence_path=service.evidence_path
+        )
+        assert result.state is MaintenanceEvidenceState.VERIFIED
+        assert destination.lifecycle_authority.identity_snapshot().revision == destination_revision
+        assert destination.get("entry") is None
+    finally:
+        source.close()
+        destination.close()
+
+
+def test_resume_refuses_mismatched_output_or_stale_source_without_adoption(tmp_path: Path) -> None:
+    """Recorded output validation precedes any next state or authority mutation."""
+    provider = _SentinelKeyProvider()
+    source = _memory_store(tmp_path / "source", provider)
+    destination = _memory_store(tmp_path / "destination", provider)
+    try:
+        source.put_entry({"answer": 42}, key="entry")
+        service = _service(source, destination, tmp_path / "maintenance")
+        plan = service.plan(service.inspect())
+        service.stage(plan)
+        destination_revision = destination.lifecycle_authority.identity_snapshot().revision
+        candidate = service._candidate_entries[0]
+        destination.payload_backend.write_blob(candidate.locator, b"forged-candidate")
+
+        restarted = _service(source, destination, tmp_path / "maintenance")
+        with pytest.raises(CacheBlobMigrationEvidenceMismatchError, match="candidate"):
+            restarted.resume(
+                plan, run_id=service.run_id, evidence_path=service.evidence_path
+            )
+        assert destination.lifecycle_authority.identity_snapshot().revision == destination_revision
+        assert destination.get("entry") is None
+
+        source.put_entry({"new": "source-revision"}, key="new-entry")
+        with pytest.raises(CacheBlobMigrationPlanStaleError):
+            restarted.resume(
+                plan, run_id=service.run_id, evidence_path=service.evidence_path
+            )
+        assert destination.lifecycle_authority.identity_snapshot().revision == destination_revision
+    finally:
+        source.close()
+        destination.close()
