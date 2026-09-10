@@ -40,9 +40,12 @@ from .manifest import (
 )
 from .migration_authority import (
     ActivationReceipt,
+    AuthorityPublicationState,
     AuthorityIdentitySnapshot,
     AuthorityInventoryEntry,
+    FinalizeReceipt,
     MigrationAuthority,
+    RollbackReceipt,
     VerifiedCandidateReceipt,
     candidate_digest,
 )
@@ -1881,6 +1884,142 @@ class OfflineMigrationService:
             )
         )
         return MigrationStepResult(MaintenanceEvidenceState.ACTIVATED, True, self.evidence_path)
+
+    def _activated_evidence(self, plan: MigrationPlan) -> MaintenanceRunEvidence:
+        """Return the one authenticated activation still eligible for offline action."""
+        if not isinstance(plan, MigrationPlan) or plan.run_id != self.run_id:
+            raise CacheBlobMigrationEvidenceMismatchError(
+                "migration plan does not belong to this explicit run",
+                context={"operation": "migration.activation", "run_id": self.run_id},
+            )
+        evidence = self.read_evidence()
+        if evidence.state is not MaintenanceEvidenceState.ACTIVATED:
+            raise CacheBlobMigrationOfflineDecisionRequiredError(
+                "rollback or finalize requires the activated offline migration state",
+                context={"operation": "migration.activation", "run_id": self.run_id},
+            )
+        if evidence.plan_digest != plan.digest or evidence.activation_receipt is None:
+            raise CacheBlobMigrationEvidenceMismatchError(
+                "activated maintenance evidence does not bind the supplied plan",
+                context={"operation": "migration.activation", "run_id": self.run_id},
+            )
+        self._revalidate_activated_receipt(evidence, plan)
+        return evidence
+
+    @staticmethod
+    def _confirmation_digest(*, action: str, evidence: MaintenanceRunEvidence) -> str:
+        """Bind an explicit operator action to one authenticated activation receipt."""
+        receipt = evidence.activation_receipt
+        candidate = evidence.candidate_receipt
+        if receipt is None or candidate is None:
+            raise CacheBlobMigrationEvidenceMismatchError(
+                "offline action requires a complete activated authority receipt",
+                context={"operation": f"migration.{action}"},
+            )
+        material = json.dumps(
+            {
+                "action": action,
+                "activation_revision": receipt.activation_revision,
+                "candidate_digest": candidate.candidate_digest,
+                "plan_digest": evidence.plan_digest,
+                "prior_entry_count": (
+                    0 if receipt.prior_store is None else receipt.prior_store.entry_count
+                ),
+                "prior_revision": 0 if receipt.prior_store is None else receipt.prior_store.revision,
+                "run_id": evidence.run_id,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return hashlib.sha256(material).hexdigest()
+
+    def finalize_confirmation(self, plan: MigrationPlan) -> str:
+        """Return the exact D-15 confirmation required to seal one activation."""
+        evidence = self._activated_evidence(plan)
+        return self._confirmation_digest(action="finalize", evidence=evidence)
+
+    def rollback(self, plan: MigrationPlan) -> RollbackReceipt:
+        """Restore the retained prior selection while the activation remains offline."""
+        evidence = self._activated_evidence(plan)
+        rollback = self._destination_authority.rollback_verified_candidate(run_id=self.run_id)
+        rollback_digest = hashlib.sha256(
+            f"{rollback.rollback_revision}:{self.run_id}".encode("ascii")
+        ).hexdigest()
+        self._write_evidence(
+            self._new_evidence(
+                state=MaintenanceEvidenceState.ROLLED_BACK,
+                plan_digest=plan.digest,
+                source_identity=plan.source_identity,
+                destination_identity=plan.destination_identity,
+                completed_steps=("inspect", "plan", "stage", "verify", "activate", "rollback"),
+                candidate_receipt=evidence.candidate_receipt,
+                activation_receipt=evidence.activation_receipt,
+                authority_receipts=(*evidence.authority_receipts, rollback_digest),
+                completed_output_digests={
+                    **evidence.completed_output_digests,
+                    "rollback": rollback_digest,
+                },
+            )
+        )
+        return rollback
+
+    def finalize(self, plan: MigrationPlan, *, confirmation: str) -> FinalizeReceipt:
+        """Seal rollback eligibility after an explicit D-15-bound confirmation."""
+        evidence = self.read_evidence()
+        if evidence.state is MaintenanceEvidenceState.FINALIZED:
+            expected_confirmation = self._confirmation_digest(action="finalize", evidence=evidence)
+            if not isinstance(confirmation, str) or not hmac.compare_digest(
+                confirmation, expected_confirmation
+            ):
+                raise CacheBlobMigrationOfflineDecisionRequiredError(
+                    "finalize requires the exact explicit confirmation",
+                    context={"operation": "migration.finalize", "run_id": self.run_id},
+                )
+            if evidence.plan_digest != plan.digest or evidence.activation_receipt is None:
+                raise CacheBlobMigrationEvidenceMismatchError(
+                    "finalized maintenance evidence does not bind the supplied plan",
+                    context={"operation": "migration.finalize", "run_id": self.run_id},
+                )
+            if self._destination_authority.publication_state() is not AuthorityPublicationState.ACTIVE:
+                raise CacheBlobMigrationEvidenceMismatchError(
+                    "finalized evidence no longer matches the authority state",
+                    context={"operation": "migration.finalize", "run_id": self.run_id},
+                )
+            return FinalizeReceipt(
+                run_id=self.run_id,
+                finalized_revision=evidence.activation_receipt.activation_revision,
+            )
+
+        evidence = self._activated_evidence(plan)
+        expected_confirmation = self._confirmation_digest(action="finalize", evidence=evidence)
+        if not isinstance(confirmation, str) or not hmac.compare_digest(
+            confirmation, expected_confirmation
+        ):
+            raise CacheBlobMigrationOfflineDecisionRequiredError(
+                "finalize requires the exact explicit confirmation",
+                context={"operation": "migration.finalize", "run_id": self.run_id},
+            )
+        finalized = self._destination_authority.finalize_verified_candidate(run_id=self.run_id)
+        finalized_digest = hashlib.sha256(
+            f"{finalized.finalized_revision}:{expected_confirmation}".encode("ascii")
+        ).hexdigest()
+        self._write_evidence(
+            self._new_evidence(
+                state=MaintenanceEvidenceState.FINALIZED,
+                plan_digest=plan.digest,
+                source_identity=plan.source_identity,
+                destination_identity=plan.destination_identity,
+                completed_steps=("inspect", "plan", "stage", "verify", "activate", "finalize"),
+                candidate_receipt=evidence.candidate_receipt,
+                activation_receipt=evidence.activation_receipt,
+                authority_receipts=(*evidence.authority_receipts, finalized_digest),
+                completed_output_digests={
+                    **evidence.completed_output_digests,
+                    "finalize": finalized_digest,
+                },
+            )
+        )
+        return finalized
 
     def rebuild_projection(
         self,

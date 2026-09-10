@@ -304,10 +304,8 @@ def test_offline_service_finalize_requires_exact_confirmation_and_seals_rollback
         with pytest.raises(CacheBlobMigrationOfflineDecisionRequiredError, match="confirmation"):
             service.finalize(plan, confirmation="0" * 64)
 
-        finalized = service.finalize(
-            plan,
-            confirmation=service.finalize_confirmation(plan),
-        )
+        confirmation = service.finalize_confirmation(plan)
+        finalized = service.finalize(plan, confirmation=confirmation)
 
         assert finalized.run_id == service.run_id
         assert destination.lifecycle_authority.publication_state() is (
@@ -315,6 +313,7 @@ def test_offline_service_finalize_requires_exact_confirmation_and_seals_rollback
         )
         assert destination.get("entry") == {"answer": "candidate"}
         assert service.read_evidence().state is MaintenanceEvidenceState.FINALIZED
+        assert service.finalize(plan, confirmation=confirmation) == finalized
         with pytest.raises(CacheBlobMigrationOfflineDecisionRequiredError, match="finalize"):
             service.rollback(plan)
     finally:
