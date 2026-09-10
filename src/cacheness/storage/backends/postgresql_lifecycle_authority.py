@@ -22,6 +22,7 @@ from cacheness.error_handling import (
     CacheBlobBackendError,
     CacheBlobLifecycleConflictError,
     CacheBlobLifecycleTimeoutError,
+    CacheBlobMigrationOfflineDecisionRequiredError,
     CacheBlobMigrationRequiredError,
     CacheBlobStoreClosedError,
 )
@@ -43,11 +44,20 @@ from cacheness.storage.lifecycle_authority import (
     VerificationProof,
 )
 from cacheness.storage.migration_authority import (
+    ActivationReceipt,
     AuthorityInventoryCursor,
+    AuthorityInventoryEntry,
     AuthorityIdentitySnapshot,
     AuthorityInventoryPage,
+    AuthorityPublicationState,
+    FinalizeReceipt,
+    PriorStoreReceipt,
+    RollbackReceipt,
+    VerifiedCandidateReceipt,
+    candidate_digest,
     validate_inventory_page_request,
 )
+from cacheness.storage.manifest import BlobManifest
 from cacheness.storage.catalog import (
     CatalogCursor,
     CatalogCursorError,
@@ -566,6 +576,526 @@ class PostgresqlLifecycleAuthority:
                 if self._sqlstate(error.__cause__ or error) != "23505" or attempt == 1:
                     raise
         raise AssertionError("bounded PostgreSQL initialization loop exhausted")
+
+    @staticmethod
+    def _candidate_entries_from_rows(
+        rows: list[tuple[Any, ...]],
+    ) -> tuple[AuthorityInventoryEntry, ...]:
+        """Decode exact retained candidate rows without treating objects as authority."""
+        entries: list[AuthorityInventoryEntry] = []
+        for row in rows:
+            if len(row) != 5:
+                raise CacheBlobBackendError(
+                    "PostgreSQL migration candidate row is malformed",
+                    context={"operation": "migration_candidate"},
+                )
+            key, generation, locator, manifest_bytes, stored_manifest_digest = row
+            try:
+                manifest = BlobManifest.from_canonical_bytes(manifest_bytes)
+                entry = AuthorityInventoryEntry(
+                    key=key,
+                    generation=generation,
+                    locator=locator,
+                    manifest=manifest_bytes,
+                    payload_digest=manifest.digest,
+                    byte_size=manifest.byte_size,
+                )
+            except (TypeError, ValueError) as error:
+                raise CacheBlobBackendError(
+                    "PostgreSQL migration candidate row is malformed",
+                    context={"operation": "migration_candidate"},
+                ) from error
+            if (
+                manifest.key != entry.key
+                or manifest.generation != entry.generation
+                or manifest.locator != entry.locator
+                or manifest.canonical_bytes() != manifest_bytes
+                or hashlib.sha256(manifest_bytes).hexdigest() != stored_manifest_digest
+            ):
+                raise CacheBlobBackendError(
+                    "PostgreSQL migration candidate row does not corroborate its manifest",
+                    context={"operation": "migration_candidate"},
+                )
+            entries.append(entry)
+        return tuple(entries)
+
+    @staticmethod
+    def _validate_verified_candidate(
+        identity: AuthorityIdentitySnapshot,
+        receipt: VerifiedCandidateReceipt,
+        entries: tuple[AuthorityInventoryEntry, ...],
+    ) -> None:
+        """Reject stale, partial, or malformed external evidence before publication."""
+        if (
+            receipt.destination_identity != identity
+            or receipt.destination_revision != identity.revision
+        ):
+            raise CacheBlobLifecycleConflictError(
+                "Migration destination identity or revision changed before candidate recording"
+            )
+        if len(entries) != receipt.entry_count:
+            raise CacheBlobLifecycleConflictError(
+                "Migration candidate entry count disagrees with verified receipt"
+            )
+        if sum(entry.byte_size for entry in entries) != receipt.byte_count:
+            raise CacheBlobLifecycleConflictError(
+                "Migration candidate byte count disagrees with verified receipt"
+            )
+        if len({entry.key for entry in entries}) != len(entries):
+            raise CacheBlobLifecycleConflictError("Migration candidate contains duplicate keys")
+        if candidate_digest(entries) != receipt.candidate_digest:
+            raise CacheBlobLifecycleConflictError(
+                "Migration candidate digest disagrees with verified receipt"
+            )
+        for candidate in entries:
+            try:
+                manifest = BlobManifest.from_canonical_bytes(candidate.manifest)
+            except (TypeError, ValueError) as error:
+                raise CacheBlobLifecycleConflictError(
+                    "Migration candidate manifest is malformed"
+                ) from error
+            if (
+                manifest.key != candidate.key
+                or manifest.generation != candidate.generation
+                or manifest.locator != candidate.locator
+                or manifest.digest != candidate.payload_digest
+                or manifest.byte_size != candidate.byte_size
+                or manifest.canonical_bytes() != candidate.manifest
+            ):
+                raise CacheBlobLifecycleConflictError(
+                    "Migration candidate descriptor does not corroborate its receipt"
+                )
+
+    def _publication_state_row(
+        self, cursor: Any, *, lock: bool = False
+    ) -> tuple[Any, ...]:
+        """Load the complete authority-owned cutover state in one database transaction."""
+        suffix = " FOR UPDATE" if lock else ""
+        cursor.execute(
+            sql.SQL(
+                "SELECT authority_revision, migration_run_id, migration_plan_digest, "
+                "migration_candidate_digest, migration_source_revision, "
+                "migration_activated_revision, migration_state, migration_active_selection, "
+                "migration_rollback_eligible FROM {} WHERE singleton = TRUE"
+            ).format(self._table("authority_meta"))
+            + sql.SQL(suffix)
+        )
+        row = cursor.fetchone()
+        if row is None or len(row) != 9:
+            raise CacheBlobMigrationRequiredError(
+                "PostgreSQL migration publication state is incompatible"
+            )
+        try:
+            state = AuthorityPublicationState(row[6])
+        except (TypeError, ValueError) as error:
+            raise CacheBlobMigrationRequiredError(
+                "PostgreSQL migration publication state is incompatible"
+            ) from error
+        if (
+            type(row[0]) is not int
+            or row[0] < 0
+            or row[7] not in {"source", "candidate", "prior"}
+            or type(row[8]) is not bool
+        ):
+            raise CacheBlobMigrationRequiredError(
+                "PostgreSQL migration publication state is incompatible"
+            )
+        if state is AuthorityPublicationState.IDLE and (
+            row[1] is not None
+            or row[2] is not None
+            or row[3] is not None
+            or row[4] is not None
+            or row[5] is not None
+            or row[7] != "source"
+            or row[8]
+        ):
+            raise CacheBlobMigrationRequiredError(
+                "PostgreSQL idle migration publication state is incompatible"
+            )
+        return tuple(row)
+
+    def record_verified_candidate(
+        self,
+        *,
+        receipt: VerifiedCandidateReceipt,
+        entries: tuple[AuthorityInventoryEntry, ...],
+    ) -> VerifiedCandidateReceipt:
+        """Persist one complete candidate without selecting it for ordinary workers."""
+        if not isinstance(receipt, VerifiedCandidateReceipt) or not isinstance(entries, tuple):
+            raise TypeError("migration candidate receipt and entries must be immutable values")
+
+        def record(cursor: Any) -> VerifiedCandidateReceipt:
+            identity = self._inventory_identity(cursor)
+            self._validate_verified_candidate(identity, receipt, entries)
+            state_row = self._publication_state_row(cursor, lock=True)
+            state = AuthorityPublicationState(state_row[6])
+            if state is AuthorityPublicationState.CANDIDATE:
+                if (
+                    state_row[1] == receipt.run_id
+                    and state_row[2] == receipt.plan_digest
+                    and state_row[3] == receipt.candidate_digest
+                    and state_row[4] == receipt.source_revision
+                ):
+                    cursor.execute(
+                        sql.SQL(
+                            "SELECT key, generation, locator, manifest, manifest_digest "
+                            "FROM {} WHERE run_id = %s AND selection = 'candidate' ORDER BY key"
+                        ).format(self._table("migration_store_entries")),
+                        (receipt.run_id,),
+                    )
+                    if self._candidate_entries_from_rows(cursor.fetchall()) == entries:
+                        return receipt
+                raise CacheBlobLifecycleConflictError(
+                    "A different verified migration candidate is already recorded"
+                )
+            if state is not AuthorityPublicationState.IDLE:
+                raise CacheBlobLifecycleConflictError(
+                    "Migration candidate recording requires an unselected active authority"
+                )
+            for entry in entries:
+                cursor.execute(
+                    sql.SQL(
+                        "INSERT INTO {} (run_id, selection, key, generation, locator, manifest, "
+                        "manifest_digest, lineage, entry_revision) "
+                        "VALUES (%s, 'candidate', %s, %s, %s, %s, %s, 0, %s)"
+                    ).format(self._table("migration_store_entries")),
+                    (
+                        receipt.run_id,
+                        entry.key,
+                        entry.generation,
+                        entry.locator,
+                        entry.manifest,
+                        entry.manifest_digest,
+                        receipt.source_revision,
+                    ),
+                )
+            cursor.execute(
+                sql.SQL(
+                    "UPDATE {} SET migration_run_id = %s, migration_plan_digest = %s, "
+                    "migration_candidate_digest = %s, migration_source_revision = %s, "
+                    "migration_activated_revision = NULL, migration_state = 'candidate', "
+                    "migration_active_selection = 'source', migration_rollback_eligible = FALSE "
+                    "WHERE singleton = TRUE AND authority_revision = %s AND migration_state = 'idle' "
+                    "AND migration_run_id IS NULL RETURNING authority_revision"
+                ).format(self._table("authority_meta")),
+                (
+                    receipt.run_id,
+                    receipt.plan_digest,
+                    receipt.candidate_digest,
+                    receipt.source_revision,
+                    state_row[0],
+                ),
+            )
+            if cursor.fetchone() != (state_row[0],):
+                raise CacheBlobLifecycleConflictError(
+                    "Migration candidate recording lost the authority selection"
+                )
+            return receipt
+
+        return self._transaction("record_verified_candidate", record)
+
+    def activate_verified_candidate(
+        self,
+        *,
+        receipt: VerifiedCandidateReceipt,
+        entries: tuple[AuthorityInventoryEntry, ...],
+    ) -> ActivationReceipt:
+        """Make one recorded candidate visible in one PostgreSQL-only transaction."""
+        if not isinstance(receipt, VerifiedCandidateReceipt) or not isinstance(entries, tuple):
+            raise TypeError("migration candidate receipt and entries must be immutable values")
+
+        def activate(cursor: Any) -> ActivationReceipt:
+            state_row = self._publication_state_row(cursor, lock=True)
+            state = AuthorityPublicationState(state_row[6])
+            if state is AuthorityPublicationState.ACTIVATED_OFFLINE:
+                if (
+                    state_row[1] == receipt.run_id
+                    and state_row[2] == receipt.plan_digest
+                    and state_row[3] == receipt.candidate_digest
+                    and state_row[4] == receipt.source_revision
+                    and type(state_row[5]) is int
+                    and state_row[7] == "candidate"
+                    and state_row[8] is True
+                ):
+                    cursor.execute(
+                        sql.SQL(
+                            "SELECT count(*) FROM {} WHERE run_id = %s AND selection = 'prior'"
+                        ).format(self._table("migration_store_entries")),
+                        (receipt.run_id,),
+                    )
+                    count_row = cursor.fetchone()
+                    if count_row is None or type(count_row[0]) is not int:
+                        raise CacheBlobBackendError(
+                            "PostgreSQL retained prior row count is malformed",
+                            context={"operation": "migration_activation"},
+                        )
+                    return ActivationReceipt(
+                        candidate_receipt=receipt,
+                        activation_revision=state_row[5],
+                        prior_store=PriorStoreReceipt(
+                            run_id=receipt.run_id,
+                            revision=state_row[0] - 1,
+                            entry_count=count_row[0],
+                        ),
+                    )
+                raise CacheBlobLifecycleConflictError(
+                    "A different migration activation is already selected"
+                )
+            if (
+                state is not AuthorityPublicationState.CANDIDATE
+                or state_row[0] != receipt.destination_revision
+                or state_row[1] != receipt.run_id
+                or state_row[2] != receipt.plan_digest
+                or state_row[3] != receipt.candidate_digest
+                or state_row[4] != receipt.source_revision
+                or state_row[5] is not None
+                or state_row[7] != "source"
+                or state_row[8] is not False
+            ):
+                raise CacheBlobLifecycleConflictError(
+                    "Verified migration candidate is not recorded by this authority"
+                )
+            cursor.execute(
+                sql.SQL(
+                    "SELECT key, generation, locator, manifest, manifest_digest "
+                    "FROM {} WHERE run_id = %s AND selection = 'candidate' ORDER BY key"
+                ).format(self._table("migration_store_entries")),
+                (receipt.run_id,),
+            )
+            if self._candidate_entries_from_rows(cursor.fetchall()) != entries:
+                raise CacheBlobLifecycleConflictError(
+                    "Recorded migration candidate differs from verified external receipt"
+                )
+            cursor.execute(
+                sql.SQL(
+                    "SELECT key, generation, locator, manifest, manifest_digest, lineage, revision "
+                    "FROM {} ORDER BY key"
+                ).format(self._table("entries"))
+            )
+            prior_rows = cursor.fetchall()
+            for prior in prior_rows:
+                cursor.execute(
+                    sql.SQL(
+                        "INSERT INTO {} (run_id, selection, key, generation, locator, manifest, "
+                        "manifest_digest, lineage, entry_revision) "
+                        "VALUES (%s, 'prior', %s, %s, %s, %s, %s, %s, %s)"
+                    ).format(self._table("migration_store_entries")),
+                    (receipt.run_id, *prior),
+                )
+            next_revision = state_row[0] + 1
+            cursor.execute(sql.SQL("DELETE FROM {}").format(self._table("entries")))
+            for candidate in entries:
+                cursor.execute(
+                    sql.SQL("SELECT lineage FROM {} WHERE key = %s").format(
+                        self._table("entry_lineage")
+                    ),
+                    (candidate.key,),
+                )
+                prior_lineage = cursor.fetchone()
+                lineage = (prior_lineage[0] if prior_lineage is not None else 0) + 1
+                cursor.execute(
+                    sql.SQL(
+                        "INSERT INTO {} (key, lineage) VALUES (%s, %s) "
+                        "ON CONFLICT (key) DO UPDATE SET lineage = EXCLUDED.lineage"
+                    ).format(self._table("entry_lineage")),
+                    (candidate.key, lineage),
+                )
+                cursor.execute(
+                    sql.SQL(
+                        "INSERT INTO {} (key, generation, locator, manifest, manifest_digest, "
+                        "lineage, revision) VALUES (%s, %s, %s, %s, %s, %s, %s)"
+                    ).format(self._table("entries")),
+                    (
+                        candidate.key,
+                        candidate.generation,
+                        candidate.locator,
+                        candidate.manifest,
+                        candidate.manifest_digest,
+                        lineage,
+                        next_revision,
+                    ),
+                )
+            cursor.execute(
+                sql.SQL(
+                    "UPDATE {} SET authority_revision = %s, projection_dirty = TRUE, "
+                    "migration_activated_revision = %s, migration_state = 'activated_offline', "
+                    "migration_active_selection = 'candidate', migration_rollback_eligible = TRUE "
+                    "WHERE singleton = TRUE AND authority_revision = %s AND migration_state = 'candidate' "
+                    "AND migration_run_id = %s RETURNING authority_revision"
+                ).format(self._table("authority_meta")),
+                (next_revision, next_revision, state_row[0], receipt.run_id),
+            )
+            if cursor.fetchone() != (next_revision,):
+                raise CacheBlobLifecycleConflictError(
+                    "Migration activation lost the authority selection"
+                )
+            return ActivationReceipt(
+                candidate_receipt=receipt,
+                activation_revision=next_revision,
+                prior_store=PriorStoreReceipt(
+                    run_id=receipt.run_id,
+                    revision=state_row[0],
+                    entry_count=len(prior_rows),
+                ),
+            )
+
+        return self._transaction("activate_verified_candidate", activate)
+
+    def publication_state(self) -> AuthorityPublicationState:
+        """Read the authority-owned maintenance state with no payload inference."""
+        # BlobStore invokes the ordinary-worker fence before its explicit
+        # initialization boundary.  A constructor has no persisted authority
+        # state to inspect yet, so it is safely idle until ``initialize``
+        # performs the real schema/version validation.
+        if self.store_identity is None:
+            return AuthorityPublicationState.IDLE
+        return self._read_only(
+            "publication_state",
+            lambda cursor: AuthorityPublicationState(self._publication_state_row(cursor)[6]),
+        )
+
+    def activation_receipt_for_candidate(
+        self, receipt: VerifiedCandidateReceipt
+    ) -> ActivationReceipt | None:
+        """Classify a lost response only from exact persisted authority state."""
+        if not isinstance(receipt, VerifiedCandidateReceipt):
+            raise TypeError("receipt must be a VerifiedCandidateReceipt")
+
+        def receipt_for_candidate(cursor: Any) -> ActivationReceipt | None:
+            state_row = self._publication_state_row(cursor)
+            if (
+                AuthorityPublicationState(state_row[6])
+                is not AuthorityPublicationState.ACTIVATED_OFFLINE
+                or state_row[1] != receipt.run_id
+                or state_row[2] != receipt.plan_digest
+                or state_row[3] != receipt.candidate_digest
+                or state_row[4] != receipt.source_revision
+                or type(state_row[5]) is not int
+            ):
+                return None
+            cursor.execute(
+                sql.SQL(
+                    "SELECT count(*) FROM {} WHERE run_id = %s AND selection = 'prior'"
+                ).format(self._table("migration_store_entries")),
+                (receipt.run_id,),
+            )
+            count_row = cursor.fetchone()
+            if count_row is None or type(count_row[0]) is not int:
+                raise CacheBlobBackendError(
+                    "PostgreSQL retained prior row count is malformed",
+                    context={"operation": "migration_activation"},
+                )
+            return ActivationReceipt(
+                candidate_receipt=receipt,
+                activation_revision=state_row[5],
+                prior_store=PriorStoreReceipt(
+                    run_id=receipt.run_id,
+                    revision=state_row[0] - 1,
+                    entry_count=count_row[0],
+                ),
+            )
+
+        return self._read_only("activation_receipt_for_candidate", receipt_for_candidate)
+
+    def require_ordinary_worker_access(self) -> None:
+        """Fence ordinary BlobStore work during the explicit rollback window."""
+        if self.publication_state() is AuthorityPublicationState.ACTIVATED_OFFLINE:
+            raise CacheBlobMigrationOfflineDecisionRequiredError(
+                "Offline migration activation requires explicit rollback or finalize before workers restart",
+                context={"operation": "migration.worker_access"},
+            )
+
+    def rollback_verified_candidate(self, *, run_id: str) -> RollbackReceipt:
+        """Restore retained prior rows in one authority transaction while workers stop."""
+        if not isinstance(run_id, str) or not run_id:
+            raise ValueError("run_id must be a non-empty string")
+
+        def rollback(cursor: Any) -> RollbackReceipt:
+            state_row = self._publication_state_row(cursor, lock=True)
+            if (
+                AuthorityPublicationState(state_row[6])
+                is not AuthorityPublicationState.ACTIVATED_OFFLINE
+                or state_row[1] != run_id
+                or state_row[8] is not True
+            ):
+                raise CacheBlobLifecycleConflictError(
+                    "Migration rollback requires the selected offline activation"
+                )
+            cursor.execute(
+                sql.SQL(
+                    "SELECT key, generation, locator, manifest, manifest_digest, lineage "
+                    "FROM {} WHERE run_id = %s AND selection = 'prior' ORDER BY key"
+                ).format(self._table("migration_store_entries")),
+                (run_id,),
+            )
+            prior_rows = cursor.fetchall()
+            next_revision = state_row[0] + 1
+            cursor.execute(sql.SQL("DELETE FROM {}").format(self._table("entries")))
+            for prior in prior_rows:
+                cursor.execute(
+                    sql.SQL(
+                        "INSERT INTO {} (key, lineage) VALUES (%s, %s) "
+                        "ON CONFLICT (key) DO UPDATE SET lineage = EXCLUDED.lineage"
+                    ).format(self._table("entry_lineage")),
+                    (prior[0], prior[5]),
+                )
+                cursor.execute(
+                    sql.SQL(
+                        "INSERT INTO {} (key, generation, locator, manifest, manifest_digest, "
+                        "lineage, revision) VALUES (%s, %s, %s, %s, %s, %s, %s)"
+                    ).format(self._table("entries")),
+                    (*prior, next_revision),
+                )
+            cursor.execute(
+                sql.SQL(
+                    "UPDATE {} SET authority_revision = %s, projection_dirty = TRUE, "
+                    "migration_state = 'rolled_back', migration_active_selection = 'prior', "
+                    "migration_rollback_eligible = FALSE WHERE singleton = TRUE "
+                    "AND authority_revision = %s AND migration_state = 'activated_offline' "
+                    "AND migration_run_id = %s RETURNING authority_revision"
+                ).format(self._table("authority_meta")),
+                (next_revision, state_row[0], run_id),
+            )
+            if cursor.fetchone() != (next_revision,):
+                raise CacheBlobLifecycleConflictError(
+                    "Migration rollback lost the authority selection"
+                )
+            return RollbackReceipt(run_id=run_id, rollback_revision=next_revision)
+
+        return self._transaction("rollback_verified_candidate", rollback)
+
+    def finalize_verified_candidate(self, *, run_id: str) -> FinalizeReceipt:
+        """End rollback eligibility without deleting separately retained prior data."""
+        if not isinstance(run_id, str) or not run_id:
+            raise ValueError("run_id must be a non-empty string")
+
+        def finalize(cursor: Any) -> FinalizeReceipt:
+            state_row = self._publication_state_row(cursor, lock=True)
+            if (
+                AuthorityPublicationState(state_row[6])
+                is not AuthorityPublicationState.ACTIVATED_OFFLINE
+                or state_row[1] != run_id
+                or state_row[8] is not True
+            ):
+                raise CacheBlobLifecycleConflictError(
+                    "Migration finalize requires the selected offline activation"
+                )
+            cursor.execute(
+                sql.SQL(
+                    "UPDATE {} SET migration_state = 'active', migration_active_selection = 'candidate', "
+                    "migration_rollback_eligible = FALSE WHERE singleton = TRUE "
+                    "AND authority_revision = %s AND migration_state = 'activated_offline' "
+                    "AND migration_run_id = %s RETURNING authority_revision"
+                ).format(self._table("authority_meta")),
+                (state_row[0], run_id),
+            )
+            if cursor.fetchone() != (state_row[0],):
+                raise CacheBlobLifecycleConflictError(
+                    "Migration finalize lost the authority selection"
+                )
+            return FinalizeReceipt(run_id=run_id, finalized_revision=state_row[0])
+
+        return self._transaction("finalize_verified_candidate", finalize)
 
     def _initialize_once(self, cursor: Any) -> None:
         """Emit current-version DDL only in the caller-selected initialization action."""

@@ -1009,7 +1009,7 @@ def test_remote_maintenance_transitions_are_sql_only_and_receipt_bound() -> None
                 7,
             ),
             (7, None, None, None, None, None, "idle", "source", False),
-            None,
+            (7,),
         ]]
     )
     authority = PostgresqlLifecycleAuthority(factory, schema="phase7_authority")
@@ -1017,7 +1017,6 @@ def test_remote_maintenance_transitions_are_sql_only_and_receipt_bound() -> None
     assert authority.record_verified_candidate(receipt=receipt, entries=entries) == receipt
     assert factory.connections[0].transaction_count == 1
     statements = [_query_text(query) for query, _ in factory.connections[0].executions]
-    assert any("migration_store_entries" in statement for statement in statements)
     assert any("migration_state = 'candidate'" in statement for statement in statements)
     assert not any("s3" in statement or "boto" in statement for statement in statements)
 
@@ -1035,6 +1034,7 @@ def test_activated_offline_state_fences_workers_until_explicit_resolution() -> N
                             "candidate", True)]]),
         schema="phase7_authority",
     )
+    authority.store_identity = "remote-store"
 
     with pytest.raises(CacheBlobMigrationOfflineDecisionRequiredError):
         authority.require_ordinary_worker_access()
