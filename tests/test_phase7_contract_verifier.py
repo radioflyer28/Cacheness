@@ -47,6 +47,7 @@ EXPECTED_TEST_NODES = (
     "tests/test_handler_registration.py",
     "tests/test_blob_store_read_contract.py",
     "tests/test_migration_public_contract.py",
+    "tests/test_phase7_contract_verifier.py",
 )
 
 EXPECTED_PROHIBITIONS = (
@@ -90,6 +91,11 @@ def test_fixed_manifest_is_complete_and_not_discovery_derived() -> None:
         node
         for node in EXPECTED_TEST_NODES
         if node != "tests/contracts/test_postgresql_lifecycle_authority.py"
+    )
+    assert verifier.PHASE8_LIVE_UNQUALIFIED_NODES == (
+        "tests/integration/test_postgresql_authority.py",
+        "tests/integration/test_remote_topology.py",
+        "tests/integration/test_s3_generation.py",
     )
     assert set(verifier.MIGRATION_REQUIREMENT_NODES) == {
         "MIGR-03",
@@ -156,8 +162,8 @@ def test_source_mutation_cannot_drop_a_fixed_test_node() -> None:
     )
 
     assert verifier.validate_fixed_manifest(REPOSITORY_ROOT) == (
-        "Phase 7 test inventory differs from the fixed reviewed set: "
-        "missing=['tests/test_migration_public_contract.py'], unexpected=[]",
+            "Phase 7 test inventory differs from the fixed reviewed set: "
+        "missing=['tests/test_phase7_contract_verifier.py'], unexpected=[]",
     )
 
 

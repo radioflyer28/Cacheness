@@ -64,6 +64,7 @@ _PHASE7_REVIEWED_TEST_NODES = (
     "tests/test_handler_registration.py",
     "tests/test_blob_store_read_contract.py",
     "tests/test_migration_public_contract.py",
+    "tests/test_phase7_contract_verifier.py",
 )
 PHASE7_TEST_NODES = tuple(_PHASE7_REVIEWED_TEST_NODES)
 # The base runtime intentionally does not install optional PostgreSQL drivers.
@@ -84,6 +85,12 @@ PHASE7_QUICK_TEST_NODES = (
     "tests/test_handler_registration.py",
     "tests/test_blob_store_read_contract.py",
     "tests/test_migration_public_contract.py",
+    "tests/test_phase7_contract_verifier.py",
+)
+PHASE8_LIVE_UNQUALIFIED_NODES = (
+    "tests/integration/test_postgresql_authority.py",
+    "tests/integration/test_remote_topology.py",
+    "tests/integration/test_s3_generation.py",
 )
 
 PHASE7_PLAN_PATHS = (
@@ -160,19 +167,52 @@ _DECLARED_PHASE7_THREAT_IDS = (
     *(f"T-07-{number:02d}" for number in range(42, 51)),
 )
 SECURITY_THREAT_NODES = {
-    threat: (
-        (
-            "tests/test_migration_run_evidence.py"
-            if threat
-            in {"T-07-05", "T-07-11", "T-07-16", "T-07-18", "T-07-19", "T-07-20"}
-            else "tests/test_migration_remote_contract.py"
-            if threat in {"T-07-26", "T-07-27", "T-07-28", "T-07-29"}
-            else "tests/test_rebuild_workflow.py"
-            if threat in {"T-07-36", "T-07-37", "T-07-38", "T-07-39", "T-07-40"}
-            else "tests/test_migration_cutover.py"
-        ),
-    )
-    for threat in _DECLARED_PHASE7_THREAT_IDS
+    "T-07-01": ("tests/test_migration_cutover.py",),
+    "T-07-02": ("tests/test_stored_compatibility.py",),
+    "T-07-03": ("tests/test_blob_store_read_contract.py",),
+    "T-07-04": ("tests/test_migration_inspection.py",),
+    "T-07-05": ("tests/test_migration_run_evidence.py",),
+    "T-07-06": ("tests/test_migration_plan_contract.py",),
+    "T-07-07": ("tests/test_migration_plan_contract.py",),
+    "T-07-08": ("tests/test_migration_plan_contract.py",),
+    "T-07-09": ("tests/test_migration_plan_contract.py",),
+    "T-07-10": ("tests/test_migration_plan_contract.py",),
+    "T-07-11": ("tests/test_migration_run_evidence.py",),
+    "T-07-12": ("tests/test_migration_inspection.py",),
+    "T-07-13": ("tests/test_migration_inspection.py",),
+    "T-07-14": ("tests/test_migration_inspection.py",),
+    "T-07-15": ("tests/test_migration_inspection.py",),
+    "T-07-16": ("tests/test_migration_run_evidence.py",),
+    "T-07-17": ("tests/test_migration_run_evidence.py",),
+    "T-07-18": ("tests/test_migration_run_evidence.py",),
+    "T-07-19": ("tests/test_migration_run_evidence.py",),
+    "T-07-20": ("tests/test_migration_run_evidence.py",),
+    "T-07-21": ("tests/test_migration_cutover.py",),
+    "T-07-22": ("tests/test_migration_cutover.py",),
+    "T-07-23": ("tests/test_migration_cutover.py",),
+    "T-07-24": ("tests/test_projection_sql_atomicity.py",),
+    "T-07-26": ("tests/contracts/test_postgresql_lifecycle_authority.py",),
+    "T-07-27": ("tests/test_migration_remote_contract.py",),
+    "T-07-28": ("tests/test_migration_remote_contract.py",),
+    "T-07-29": ("tests/test_migration_remote_contract.py",),
+    "T-07-31": ("tests/test_migration_cutover.py",),
+    "T-07-32": ("tests/test_migration_cutover.py",),
+    "T-07-33": ("tests/test_migration_cutover.py",),
+    "T-07-34": ("tests/test_migration_cutover.py",),
+    "T-07-36": ("tests/test_rebuild_workflow.py",),
+    "T-07-37": ("tests/test_rebuild_workflow.py",),
+    "T-07-38": ("tests/test_handler_registration.py",),
+    "T-07-39": ("tests/test_rebuild_workflow.py",),
+    "T-07-40": ("tests/test_rebuild_workflow.py",),
+    "T-07-42": ("tests/test_migration_public_contract.py",),
+    "T-07-43": ("tests/test_migration_public_contract.py",),
+    "T-07-44": ("tests/test_migration_public_contract.py",),
+    "T-07-45": ("tests/test_migration_public_contract.py",),
+    "T-07-46": ("tests/test_phase7_contract_verifier.py",),
+    "T-07-47": ("tests/test_phase7_contract_verifier.py",),
+    "T-07-48": ("tests/test_phase7_contract_verifier.py",),
+    "T-07-49": ("tests/test_phase7_contract_verifier.py",),
+    "T-07-50": ("tests/test_phase7_contract_verifier.py",),
 }
 
 FLAGGED_ASSUMPTION_NODES = {
@@ -602,9 +642,24 @@ def _validate_live_detector(root: Path, coverage: str) -> tuple[str, ...]:
     return ()
 
 
-def _run_pytest(root: Path, nodes: Sequence[str], label: str) -> tuple[bool, str]:
+def _run_pytest(
+    root: Path,
+    nodes: Sequence[str],
+    label: str,
+    *,
+    options: Sequence[str] = (),
+) -> tuple[bool, str]:
     """Run one finite pytest invocation and preserve non-green output."""
-    command = [sys.executable, "-m", "pytest", "-q", *nodes, "-o", "log_cli=false"]
+    command = [
+        sys.executable,
+        "-m",
+        "pytest",
+        "-q",
+        *nodes,
+        *options,
+        "-o",
+        "log_cli=false",
+    ]
     try:
         completed = subprocess.run(
             command,
@@ -701,7 +756,13 @@ def verify_repository(root: Path, quick: bool) -> tuple[bool, tuple[str, ...]]:
         if not passed:
             errors.append(evidence)
     if not quick and not errors:
-        passed, evidence = _run_pytest(root, (), "full deterministic non-live suite")
+        live_options = tuple(f"--ignore={node}" for node in PHASE8_LIVE_UNQUALIFIED_NODES)
+        passed, evidence = _run_pytest(
+            root,
+            (),
+            "full deterministic non-live suite",
+            options=live_options,
+        )
         if not passed:
             errors.append(evidence)
         else:
@@ -757,6 +818,11 @@ def main(argv: list[str] | None = None) -> int:
         print(
             "Deterministic PostgreSQL adapter contract: NOT RUN in --quick; "
             "--all requires the locked all-extras environment"
+        )
+    else:
+        print(
+            "Phase 8 live PostgreSQL/AWS S3 modules: NOT RUN and NOT QUALIFIED; "
+            "they are excluded by the fixed non-live inventory"
         )
     print("Remote/platform/performance: Phase 8 only; deterministic adapters are not qualification")
     if errors:
