@@ -431,7 +431,7 @@ Plans:
   4. Incompatible formats and cross-backend moves offer an explicit, scoped, confirmed rebuild path rather than implicit deletion or a promise of universal physical migration.
   5. Define the supported source-version window explicitly; it may exclude pre-production development layouts. Distinguish catalog/payload migration from rebuilding derived indexes; a missing or stale index cannot require rewriting valid payloads or become a second cutover authority.
 
-**Plans**: 6/11 plans executed
+**Plans**: 7/11 plans executed
 
 Plans:
 
@@ -458,7 +458,7 @@ Plans:
 
 **Wave 5** *(blocked on local cutover)*
 
-- [ ] 07-07-PLAN.md — Extend deterministic PostgreSQL/S3 maintenance contracts without claiming live qualification.
+- [x] 07-07-PLAN.md — Extend deterministic PostgreSQL/S3 maintenance contracts without claiming live qualification.
 - [ ] 07-08-PLAN.md — Implement offline rollback, finalize, abort, and separately confirmed idempotent purge.
 
 **Wave 6** *(blocked on retirement semantics)*
@@ -499,7 +499,7 @@ Plans:
 | 4. Metadata Composition and Topology Contracts | 14/14 | Complete    | 2026-09-08 |
 | 5. Payload Backends and Supported Topology Qualification | 9/9 | Complete    | 2026-09-08 |
 | 6. UnifiedCache Policy Composition | 11/11 | Complete    | 2026-09-09 |
-| 7. Explicit Migration and Rebuild Cutover | 6/11 | In Progress|  |
+| 7. Explicit Migration and Rebuild Cutover | 7/11 | In Progress|  |
 | 8. Production Gates and Performance Stabilization | 0/TBD | Not started | - |
 
 ## Backlog

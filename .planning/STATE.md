@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 07
 current_phase_name: Explicit Migration and Rebuild Cutover
 status: executing
-stopped_at: Completed 07-06-PLAN.md
-last_updated: "2026-09-10T03:00:51.186Z"
+stopped_at: Completed 07-07-PLAN.md
+last_updated: "2026-09-10T03:30:23.599Z"
 last_activity: 2026-09-09
 last_activity_desc: Phase 07 execution started
-state_head: dffe75ffe148ebf7bf349749fdc4e491ff41bcb9
+state_head: 3026d57627e54d1f244e360d0861086d30366ce9
 progress:
   total_phases: 8
   completed_phases: 5
   total_plans: 92
-  completed_plans: 86
+  completed_plans: 87
 milestone_name: milestone
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-09-06)
 ## Current Position
 
 Phase: 07 (Explicit Migration and Rebuild Cutover) — EXECUTING
-Plan: 7 of 11
+Plan: 8 of 11
 Status: Ready to execute
 Last activity: 2026-09-09 — Phase 07 execution started
 
@@ -169,6 +169,7 @@ Phase 03 rows in this historical table include superseded attempts and do not de
 | Phase 07-explicit-migration-and-rebuild-cutover P04 | 672s | 2 tasks | 8 files |
 | Phase 07 P05 | 16m | 2 tasks | 4 files |
 | Phase 07 P06 | 20min | 3 tasks | 9 files |
+| Phase 07 P07 | 11min | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -366,6 +367,8 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - [Phase 07]: Maintenance evidence remains non-authoritative; exact authenticated run evidence only corroborates offline work.
 - [Phase 07]: Resume accepts only an exact run ID and evidence path, then revalidates recorded outputs without latest-run discovery or candidate adoption.
 - [Phase 07]: [Phase 07]: RQ-01 accepted via proceed RQ-01: SQLite authority schema 8 and PostgreSQL capability/schema 4 are the first release baseline; one lifecycle authority owns candidate/activated_offline/active/rolled_back and exact candidate/prior rows; activated_offline blocks every ordinary worker entry point until rollback or finalize; authority ACID stops at authority state while payload/evidence are immutable attributed external effects; schemas 7/3 have no compatibility promise.
+- [Phase 07]: PostgreSQL transactions end at authority state; S3 candidate receipts corroborate immutable effects and never select visibility.
+- [Phase 07]: S3 candidate locators are exact run-owned receipts; listings and ETags never authorize discovery or adoption.
 
 ### Pending Todos
 
@@ -396,6 +399,6 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 
 ## Session Continuity
 
-Last session: 2026-09-10T03:00:51.052Z
-Stopped at: Completed 07-06-PLAN.md
+Last session: 2026-09-10T03:30:23.464Z
+Stopped at: Completed 07-07-PLAN.md
 Resume file: None
