@@ -42,6 +42,12 @@ from cacheness.storage.lifecycle_authority import (
     ReconciliationWork,
     VerificationProof,
 )
+from cacheness.storage.migration_authority import (
+    AuthorityInventoryCursor,
+    AuthorityIdentitySnapshot,
+    AuthorityInventoryPage,
+    validate_inventory_page_request,
+)
 from cacheness.storage.catalog import (
     CatalogCursor,
     CatalogCursorError,
@@ -352,6 +358,45 @@ class PostgresqlLifecycleAuthority:
         )
         return cursor.fetchone()
 
+    def _inventory_identity(self, cursor: Any) -> AuthorityIdentitySnapshot:
+        """Read the persisted remote identity and revision in one transaction."""
+        cursor.execute(
+            sql.SQL(
+                "SELECT schema_version, store_identity, capability, authority_revision "
+                "FROM {} WHERE singleton = TRUE"
+            ).format(self._table("authority_meta"))
+        )
+        metadata = cursor.fetchone()
+        if metadata is None or len(metadata) != 4:
+            raise CacheBlobMigrationRequiredError("PostgreSQL lifecycle authority is absent")
+        version, identity, capability, revision = metadata
+        try:
+            identity = _bounded_identity(identity)
+        except ValueError as error:
+            raise CacheBlobMigrationRequiredError(
+                "PostgreSQL lifecycle authority store identity is incompatible"
+            ) from error
+        if version != POSTGRESQL_AUTHORITY_SCHEMA_VERSION:
+            raise CacheBlobMigrationRequiredError(
+                "PostgreSQL lifecycle authority schema version is incompatible"
+            )
+        if capability != POSTGRESQL_AUTHORITY_CAPABILITY:
+            raise CacheBlobMigrationRequiredError(
+                "PostgreSQL lifecycle authority capability is incompatible"
+            )
+        if type(revision) is not int or revision < 0:
+            raise CacheBlobMigrationRequiredError(
+                "PostgreSQL lifecycle authority revision is incompatible"
+            )
+        self.store_identity = identity
+        return AuthorityIdentitySnapshot(
+            store_id=identity,
+            revision=revision,
+            authority_kind="postgresql",
+            capability=capability,
+            schema_version=version,
+        )
+
     def _known_table_names(self, cursor: Any) -> set[str]:
         """Return only tables belonging to this exact persisted authority layout."""
         cursor.execute(
@@ -415,6 +460,96 @@ class PostgresqlLifecycleAuthority:
         """Validate an existing authority without creating, upgrading, or repairing it."""
         self._read_only("schema_validate", self._validate_schema)
         return self
+
+    def identity_snapshot(self) -> AuthorityIdentitySnapshot:
+        """Return persisted PostgreSQL capability, schema, identity, and revision."""
+        return self._read_only("migration_identity_snapshot", self._inventory_identity)
+
+    def inventory_page(
+        self,
+        cursor: AuthorityInventoryCursor | None = None,
+        *,
+        limit: int | None = None,
+        work_cap: int | None = None,
+    ) -> AuthorityInventoryPage:
+        """Return one raw indexed page without materializing a remote catalog.
+
+        This deterministic contract keeps PostgreSQL's transaction and typed
+        progress outcomes intact.  It is not live-service qualification.
+        """
+        effective_limit, effective_work_cap = validate_inventory_page_request(
+            limit=limit,
+            work_cap=work_cap,
+            default_limit=self.lifecycle_limits.manifest_page_size,
+            default_work_cap=self.lifecycle_limits.max_operation_record_bytes,
+        )
+
+        def page(read_cursor: Any) -> AuthorityInventoryPage:
+            identity = self._inventory_identity(read_cursor)
+            if cursor is not None and (
+                cursor.store_id != identity.store_id
+                or cursor.revision != identity.revision
+            ):
+                raise CacheBlobLifecycleConflictError(
+                    "Migration inventory changed; reinspection is required"
+                )
+            if cursor is None or cursor.last_key is None:
+                statement = sql.SQL(
+                    "SELECT key, generation, locator, manifest, manifest_digest, lineage, revision "
+                    "FROM {} ORDER BY key, generation LIMIT %s"
+                ).format(self._table("entries"))
+                parameters: tuple[Any, ...] = (effective_limit + 1,)
+            else:
+                statement = sql.SQL(
+                    "SELECT key, generation, locator, manifest, manifest_digest, lineage, revision "
+                    "FROM {} WHERE key > %s OR (key = %s AND generation > %s) "
+                    "ORDER BY key, generation LIMIT %s"
+                ).format(self._table("entries"))
+                parameters = (
+                    cursor.last_key,
+                    cursor.last_key,
+                    cursor.last_generation,
+                    effective_limit + 1,
+                )
+            read_cursor.execute(statement, parameters)
+            rows = read_cursor.fetchall()
+            entries: list[EntrySnapshot] = []
+            work_seen = 0
+            for row in rows:
+                if len(entries) == effective_limit:
+                    break
+                entry = self._entry_from_row(row, stage="inventory_page")
+                entry_bytes = len(entry.manifest)
+                if work_seen + entry_bytes > effective_work_cap:
+                    if not entries:
+                        raise CacheBlobBackendError(
+                            "Migration inventory entry exceeds the configured work bound",
+                            context={
+                                "operation": "postgresql_lifecycle_authority",
+                                "stage": "inventory_page",
+                            },
+                        )
+                    break
+                entries.append(entry)
+                work_seen += entry_bytes
+            exhausted = len(entries) == len(rows) and len(rows) <= effective_limit
+            next_cursor = None
+            if not exhausted:
+                last = entries[-1]
+                next_cursor = AuthorityInventoryCursor(
+                    store_id=identity.store_id,
+                    revision=identity.revision,
+                    last_key=last.key,
+                    last_generation=last.generation,
+                )
+            return AuthorityInventoryPage(
+                identity=identity,
+                entries=tuple(entries),
+                next_cursor=next_cursor,
+                exhausted=exhausted,
+            )
+
+        return self._read_only("inventory_page", page)
 
     def initialize(self) -> None:
         """Create only the exact current schema at an explicit stopped-worker boundary."""
