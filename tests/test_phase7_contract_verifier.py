@@ -86,6 +86,11 @@ def test_fixed_manifest_is_complete_and_not_discovery_derived() -> None:
 
     assert verifier.PHASE7_PRODUCTION_PATHS == EXPECTED_PRODUCTION_PATHS
     assert verifier.PHASE7_TEST_NODES == EXPECTED_TEST_NODES
+    assert verifier.PHASE7_QUICK_TEST_NODES == tuple(
+        node
+        for node in EXPECTED_TEST_NODES
+        if node != "tests/contracts/test_postgresql_lifecycle_authority.py"
+    )
     assert set(verifier.MIGRATION_REQUIREMENT_NODES) == {
         "MIGR-03",
         "MIGR-04",
@@ -94,7 +99,11 @@ def test_fixed_manifest_is_complete_and_not_discovery_derived() -> None:
     }
     assert set(verifier.DECISION_NODES) == {f"D-{number:02d}" for number in range(1, 23)}
     assert set(verifier.SECURITY_THREAT_NODES) == {
-        f"T-07-{number:02d}" for number in range(1, 9)
+        *(f"T-07-{number:02d}" for number in range(1, 25)),
+        *(f"T-07-{number:02d}" for number in range(26, 30)),
+        *(f"T-07-{number:02d}" for number in range(31, 35)),
+        *(f"T-07-{number:02d}" for number in range(36, 41)),
+        *(f"T-07-{number:02d}" for number in range(42, 51)),
     }
     assert set(verifier.FLAGGED_ASSUMPTION_NODES) == set(
         verifier.MIGRATION_REQUIREMENT_NODES
@@ -111,7 +120,7 @@ def test_fixed_mapping_validator_rejects_each_omission() -> None:
     assert verifier.validate_mapping_inventory(
         requirements={"MIGR-03": ("x",)},
         decisions={f"D-{number:02d}": ("x",) for number in range(1, 23)},
-        threats={f"T-07-{number:02d}": ("x",) for number in range(1, 9)},
+        threats={threat: ("x",) for threat in verifier.SECURITY_THREAT_NODES},
         assumptions={requirement: ("x",) for requirement in verifier.MIGRATION_REQUIREMENT_NODES},
         prohibitions=EXPECTED_PROHIBITIONS,
     ) == (
@@ -121,7 +130,7 @@ def test_fixed_mapping_validator_rejects_each_omission() -> None:
 
     valid_requirements = {requirement: ("x",) for requirement in verifier.MIGRATION_REQUIREMENT_NODES}
     valid_decisions = {f"D-{number:02d}": ("x",) for number in range(1, 23)}
-    valid_threats = {f"T-07-{number:02d}": ("x",) for number in range(1, 9)}
+    valid_threats = {threat: ("x",) for threat in verifier.SECURITY_THREAT_NODES}
     valid_assumptions = {requirement: ("x",) for requirement in valid_requirements}
     assert verifier.validate_mapping_inventory(
         requirements=valid_requirements,
