@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 07
 current_phase_name: Explicit Migration and Rebuild Cutover
 status: executing
-stopped_at: Completed 07-08-PLAN.md
-last_updated: "2026-09-10T03:48:36.154Z"
+stopped_at: Completed 07-09-PLAN.md
+last_updated: "2026-09-10T04:12:44.910Z"
 last_activity: 2026-09-09
 last_activity_desc: Phase 07 execution started
-state_head: d5461678bd450aea80d18c9e7c31952d7a47a877
+state_head: dd15b177d66054332e937c975b3b88fce438ecc3
 progress:
   total_phases: 8
   completed_phases: 5
   total_plans: 92
-  completed_plans: 88
+  completed_plans: 89
 milestone_name: milestone
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-09-06)
 ## Current Position
 
 Phase: 07 (Explicit Migration and Rebuild Cutover) — EXECUTING
-Plan: 9 of 11
+Plan: 10 of 11
 Status: Ready to execute
 Last activity: 2026-09-09 — Phase 07 execution started
 
@@ -171,6 +171,7 @@ Phase 03 rows in this historical table include superseded attempts and do not de
 | Phase 07 P06 | 20min | 3 tasks | 9 files |
 | Phase 07 P07 | 11min | 2 tasks | 5 files |
 | Phase 07 P08 | 24m | 2 tasks | 6 files |
+| Phase 07 P09 | 1178s | 3 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -373,6 +374,9 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - [Phase 07]: Rollback and finalization consume authenticated activated evidence; finalization is replay-safe only with the same exact confirmation.
 - [Phase 07]: Purge confirmation binds exact retained-prior identities, locators, manifest digests, counts, and bytes.
 - [Phase 07]: Purge failures remain evidence-backed cleanup debt and never change the active candidate selection.
+- [Phase 07]: Rebuild scope defaults to all inspected keys; exclusions are exact regenerated and separately confirmed plan inputs.
+- [Phase 07]: Registered store-local handlers own payload transformations; the migration coordinator has no native-format switch.
+- [Phase 07]: Rebuild writes remain in BlobStore lifecycle ownership; accepted rebuild evidence only unlocks derived projections.
 
 ### Pending Todos
 
@@ -403,6 +407,6 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 
 ## Session Continuity
 
-Last session: 2026-09-10T03:48:36.026Z
-Stopped at: Completed 07-08-PLAN.md
+Last session: 2026-09-10T04:12:44.768Z
+Stopped at: Completed 07-09-PLAN.md
 Resume file: None
