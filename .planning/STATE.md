@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 07
 current_phase_name: Explicit Migration and Rebuild Cutover
 status: executing
-stopped_at: Completed 07-03-PLAN.md
-last_updated: "2026-09-09T23:44:14.541Z"
+stopped_at: Completed 07-04-PLAN.md
+last_updated: "2026-09-10T00:02:17.971Z"
 last_activity: 2026-09-09
 last_activity_desc: Phase 07 execution started
-state_head: be3275b0f46996e73ef7148d4594e49cae08db16
+state_head: 56b0eedb9f6e295559a318533075f33101b67afa
 progress:
   total_phases: 8
   completed_phases: 5
   total_plans: 92
-  completed_plans: 83
+  completed_plans: 84
 milestone_name: milestone
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-09-06)
 ## Current Position
 
 Phase: 07 (Explicit Migration and Rebuild Cutover) — EXECUTING
-Plan: 4 of 11
+Plan: 5 of 11
 Status: Ready to execute
 Last activity: 2026-09-09 — Phase 07 execution started
 
@@ -166,6 +166,7 @@ Phase 03 rows in this historical table include superseded attempts and do not de
 | Phase 07 P01 | 1348s | 2 tasks | 6 files |
 | Phase 07 P02 | 125s | 3 tasks | 4 files |
 | Phase 07 P03 | 969s | 2 tasks | 5 files |
+| Phase 07-explicit-migration-and-rebuild-cutover P04 | 672s | 2 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -358,6 +359,8 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - [Phase 07]: D-15 accepted via proceed D-15: finalize ends rollback; separately confirmed idempotent purge may remove the retained prior copy and leaves retryable cleanup debt on failure.
 - [Phase 07]: D-02 is enforced by a bounded current-plus-immediately-previous ReleaseWindow with no development-layout edge.
 - [Phase 07]: Migration plans are canonical bounded JSON; human reports render only validated plan state.
+- [Phase 07]: Administrative inventory returns raw EntrySnapshot pages bound to store identity, revision, and key/generation continuation; manifests are authenticated only by maintenance.
+- [Phase 07]: PostgreSQL inventory reports its persisted capability/schema and retains typed retryable progress causes; deterministic contract coverage is not live-service qualification.
 
 ### Pending Todos
 
@@ -388,6 +391,6 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 
 ## Session Continuity
 
-Last session: 2026-09-09T23:44:14.390Z
-Stopped at: Completed 07-03-PLAN.md
+Last session: 2026-09-10T00:02:17.842Z
+Stopped at: Completed 07-04-PLAN.md
 Resume file: None
