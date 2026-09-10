@@ -22,6 +22,13 @@ from cacheness.storage.lifecycle_authority import (
     ProjectionRevision,
     VerificationProof,
 )
+from cacheness.storage.migration_authority import (
+    AuthorityIdentitySnapshot,
+    AuthorityInventoryEntry,
+    AuthorityPublicationState,
+    VerifiedCandidateReceipt,
+    candidate_digest,
+)
 
 
 @dataclass
@@ -946,3 +953,88 @@ def test_complete_workflow_calls_stay_at_the_authority_boundary() -> None:
     ]
     assert not any("advisory" in statement or "listen" in statement for statement in statements)
     assert not any("s3" in statement or "boto" in statement for statement in statements)
+
+
+# =============================================================================
+# Explicit offline whole-store publication contracts
+# =============================================================================
+
+
+def _verified_empty_candidate() -> tuple[VerifiedCandidateReceipt, tuple[AuthorityInventoryEntry, ...]]:
+    """Build a complete bounded candidate without a payload or service dependency."""
+    from cacheness.storage.backends.postgresql_lifecycle_authority import (
+        POSTGRESQL_AUTHORITY_CAPABILITY,
+        POSTGRESQL_AUTHORITY_SCHEMA_VERSION,
+    )
+
+    identity = AuthorityIdentitySnapshot(
+        store_id="remote-store",
+        revision=7,
+        authority_kind="postgresql",
+        capability=POSTGRESQL_AUTHORITY_CAPABILITY,
+        schema_version=POSTGRESQL_AUTHORITY_SCHEMA_VERSION,
+    )
+    entries: tuple[AuthorityInventoryEntry, ...] = ()
+    return (
+        VerifiedCandidateReceipt(
+            run_id="run-remote-cutover",
+            plan_digest="a" * 64,
+            source_identity=identity,
+            source_revision=7,
+            destination_identity=identity,
+            destination_revision=7,
+            candidate_digest=candidate_digest(entries),
+            entry_count=0,
+            byte_count=0,
+        ),
+        entries,
+    )
+
+
+def test_remote_maintenance_transitions_are_sql_only_and_receipt_bound() -> None:
+    """Deterministic PostgreSQL coverage is not a live-service qualification."""
+    from cacheness.storage.backends.postgresql_lifecycle_authority import (
+        POSTGRESQL_AUTHORITY_CAPABILITY,
+        POSTGRESQL_AUTHORITY_SCHEMA_VERSION,
+        PostgresqlLifecycleAuthority,
+    )
+
+    receipt, entries = _verified_empty_candidate()
+    factory = _Factory(
+        scripts=[[
+            (
+                POSTGRESQL_AUTHORITY_SCHEMA_VERSION,
+                "remote-store",
+                POSTGRESQL_AUTHORITY_CAPABILITY,
+                7,
+            ),
+            (7, None, None, None, None, None, "idle", "source", False),
+            None,
+        ]]
+    )
+    authority = PostgresqlLifecycleAuthority(factory, schema="phase7_authority")
+
+    assert authority.record_verified_candidate(receipt=receipt, entries=entries) == receipt
+    assert factory.connections[0].transaction_count == 1
+    statements = [_query_text(query) for query, _ in factory.connections[0].executions]
+    assert any("migration_store_entries" in statement for statement in statements)
+    assert any("migration_state = 'candidate'" in statement for statement in statements)
+    assert not any("s3" in statement or "boto" in statement for statement in statements)
+
+
+def test_activated_offline_state_fences_workers_until_explicit_resolution() -> None:
+    """Only maintenance rollback/finalize may resolve the remote offline fence."""
+    from cacheness.error_handling import CacheBlobMigrationOfflineDecisionRequiredError
+    from cacheness.storage.backends.postgresql_lifecycle_authority import (
+        PostgresqlLifecycleAuthority,
+    )
+
+    authority = PostgresqlLifecycleAuthority(
+        _Factory(scripts=[[(7, "run-remote-cutover", "a" * 64, "b" * 64, 7, 8,
+                            AuthorityPublicationState.ACTIVATED_OFFLINE.value,
+                            "candidate", True)]]),
+        schema="phase7_authority",
+    )
+
+    with pytest.raises(CacheBlobMigrationOfflineDecisionRequiredError):
+        authority.require_ordinary_worker_access()
