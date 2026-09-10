@@ -468,6 +468,168 @@ class MigrationInspection:
     assessments: tuple[MigrationEntryAssessment, ...]
 
 
+@dataclass(frozen=True)
+class RebuildExclusion:
+    """One explicit, bounded omission selected from a complete rebuild inventory.
+
+    Rebuild starts with the entire inventory included.  An operator may name
+    exact keys or one closed disposition category, but the resulting canonical
+    plan always stores the resolved keys and a stable reason.  Wildcards and
+    open-ended predicates therefore cannot change the set after confirmation.
+    """
+
+    kind: str
+    reason: str
+    keys: tuple[str, ...] = ()
+    disposition: MigrationDisposition | None = None
+
+    def __post_init__(self) -> None:
+        if self.kind not in {"keys", "disposition"}:
+            raise ValueError("rebuild exclusion kind is invalid")
+        object.__setattr__(self, "reason", _compatibility_text(self.reason, "exclusion reason"))
+        if self.kind == "keys":
+            if self.disposition is not None or not self.keys:
+                raise ValueError("key exclusions require exact keys only")
+            normalized = tuple(
+                _compatibility_text(key, "excluded key") for key in self.keys
+            )
+            if len(normalized) != len(set(normalized)):
+                raise ValueError("rebuild exclusion keys must be unique")
+            object.__setattr__(self, "keys", tuple(sorted(normalized)))
+            return
+        if self.keys or not isinstance(self.disposition, MigrationDisposition):
+            raise ValueError("category exclusions require one disposition")
+
+    @classmethod
+    def exact_keys(cls, keys: tuple[str, ...], *, reason: str) -> "RebuildExclusion":
+        """Name one explicit immutable set of source keys for omission."""
+        return cls(kind="keys", keys=keys, reason=reason)
+
+    @classmethod
+    def by_disposition(
+        cls, disposition: MigrationDisposition, *, reason: str
+    ) -> "RebuildExclusion":
+        """Name one closed inventory category, resolved before confirmation."""
+        return cls(kind="disposition", disposition=disposition, reason=reason)
+
+    def resolve(
+        self, entries: tuple[MigrationEntryAssessment, ...]
+    ) -> Mapping[str, object]:
+        """Resolve this selector against one fixed complete inventory."""
+        entries_by_key = {entry.entry.key: entry for entry in entries}
+        if self.kind == "keys":
+            selected = self.keys
+            unknown = set(selected) - set(entries_by_key)
+            if unknown:
+                raise ValueError("rebuild exclusion names a key outside the inventory")
+            return MappingProxyType(
+                {"kind": "keys", "keys": selected, "reason": self.reason}
+            )
+        assert self.disposition is not None
+        selected = tuple(
+            sorted(
+                entry.entry.key
+                for entry in entries
+                if entry.disposition is self.disposition
+            )
+        )
+        if not selected:
+            raise ValueError("rebuild exclusion category matches no inventory entries")
+        return MappingProxyType(
+            {
+                "disposition": self.disposition.value,
+                "keys": selected,
+                "kind": "disposition",
+                "reason": self.reason,
+            }
+        )
+
+
+def _normalize_rebuild_exclusions(
+    exclusions: tuple[Mapping[str, object], ...],
+    entries: tuple[MigrationEntryAssessment, ...],
+) -> tuple[Mapping[str, object], ...]:
+    """Validate canonical rebuild omissions against the complete plan inventory."""
+    inventory = {entry.entry.key: entry for entry in entries}
+    selected_keys: set[str] = set()
+    normalized: list[Mapping[str, object]] = []
+    for exclusion in exclusions:
+        if not isinstance(exclusion, Mapping):
+            raise TypeError("rebuild exclusions must be mappings")
+        kind = exclusion.get("kind")
+        reason = exclusion.get("reason")
+        if kind == "keys":
+            if set(exclusion) != {"kind", "keys", "reason"}:
+                raise ValueError("exact rebuild exclusion fields are invalid")
+            raw_keys = exclusion["keys"]
+            expected_keys: tuple[str, ...] | None = None
+        elif kind == "disposition":
+            if set(exclusion) != {"disposition", "kind", "keys", "reason"}:
+                raise ValueError("category rebuild exclusion fields are invalid")
+            raw_keys = exclusion["keys"]
+            try:
+                disposition = MigrationDisposition(exclusion["disposition"])
+            except (TypeError, ValueError) as exc:
+                raise ValueError("rebuild exclusion disposition is invalid") from exc
+            expected_keys = tuple(
+                sorted(
+                    entry.entry.key
+                    for entry in entries
+                    if entry.disposition is disposition
+                )
+            )
+        else:
+            raise ValueError("rebuild exclusion kind is invalid")
+        if not isinstance(raw_keys, (list, tuple)) or not raw_keys:
+            raise ValueError("rebuild exclusion requires a non-empty exact key set")
+        keys = tuple(sorted(_compatibility_text(key, "excluded key") for key in raw_keys))
+        if len(keys) != len(set(keys)):
+            raise ValueError("rebuild exclusion keys must be unique")
+        if set(keys) - set(inventory):
+            raise ValueError("rebuild exclusion names a key outside the inventory")
+        if expected_keys is not None and keys != expected_keys:
+            raise ValueError("rebuild exclusion category does not match the inventory")
+        if selected_keys.intersection(keys):
+            raise ValueError("rebuild exclusions cannot overlap")
+        selected_keys.update(keys)
+        record: dict[str, object] = {
+            "kind": kind,
+            "keys": keys,
+            "reason": _compatibility_text(reason, "exclusion reason"),
+        }
+        if kind == "disposition":
+            record["disposition"] = exclusion["disposition"]
+        normalized.append(MappingProxyType(record))
+    return tuple(normalized)
+
+
+def _rebuild_plan_id(
+    *,
+    source_identity: AuthorityIdentitySnapshot,
+    destination_identity: AuthorityIdentitySnapshot,
+    source_revision: int,
+    entries: tuple[MigrationEntryAssessment, ...],
+    exclusions: tuple[Mapping[str, object], ...],
+) -> str:
+    """Derive a non-reusable public plan identifier from exact rebuild scope."""
+    record = {
+        "destination_identity": _identity_record(destination_identity),
+        "entries": [
+            {
+                "generation": entry.entry.generation,
+                "key": entry.entry.key,
+                "manifest_digest": hashlib.sha256(entry.entry.manifest).hexdigest(),
+            }
+            for entry in sorted(entries, key=lambda item: item.entry.key)
+        ],
+        "exclusions": [_thaw_json(item) for item in exclusions],
+        "source_identity": _identity_record(source_identity),
+        "source_revision": source_revision,
+    }
+    digest = hashlib.sha256(_canonical_plan_bytes(record)).hexdigest()
+    return f"rebuild-{digest[:24]}"
+
+
 class MigrationPlanKind(str, Enum):
     """The offline workflow selected by one complete, non-mutating inspection."""
 
@@ -639,6 +801,8 @@ class MigrationPlan:
     release_window: ReleaseWindow = field(default_factory=ReleaseWindow.first_release_baseline)
     compatibility: CompatibilityResult | None = None
     totals: MigrationTotals | None = None
+    included_totals: MigrationTotals | None = None
+    excluded_totals: MigrationTotals | None = None
     intended_actions: tuple[str, ...] = ()
     exclusions: tuple[Mapping[str, object], ...] = ()
     state: MigrationPlanState = MigrationPlanState.PLANNED
@@ -658,10 +822,6 @@ class MigrationPlan:
             raise ValueError("migration plan entries cannot contain duplicate keys")
         if type(self.plan_version) is not int or self.plan_version != 1:
             raise ValueError("unsupported migration plan version")
-        if not self.plan_id:
-            object.__setattr__(self, "plan_id", self.run_id)
-        if self.plan_id != self.run_id:
-            raise ValueError("plan_id must bind exactly to the explicit run_id")
         if not isinstance(self.plan_kind, MigrationPlanKind) or not isinstance(
             self.state, MigrationPlanState
         ):
@@ -691,21 +851,72 @@ class MigrationPlan:
             not isinstance(exclusion, Mapping) for exclusion in self.exclusions
         ):
             raise TypeError("exclusions must be immutable mappings")
-        frozen_exclusions = tuple(_freeze_plan_json(exclusion) for exclusion in self.exclusions)
-        if not all(isinstance(exclusion, Mapping) for exclusion in frozen_exclusions):
-            raise TypeError("exclusions must remain mappings")
-        object.__setattr__(self, "exclusions", frozen_exclusions)
+        if self.plan_kind is MigrationPlanKind.REBUILD:
+            normalized_exclusions = _normalize_rebuild_exclusions(self.exclusions, self.entries)
+        elif self.exclusions:
+            raise ValueError("only rebuild plans may exclude inventory entries")
+        else:
+            normalized_exclusions = ()
+        object.__setattr__(self, "exclusions", normalized_exclusions)
+        excluded_keys = {
+            key for exclusion in normalized_exclusions for key in exclusion["keys"]
+        }
+        included_entries = tuple(
+            entry for entry in self.entries if entry.entry.key not in excluded_keys
+        )
+        excluded_entries = tuple(
+            entry for entry in self.entries if entry.entry.key in excluded_keys
+        )
+        if self.included_totals is None:
+            object.__setattr__(
+                self, "included_totals", MigrationTotals.from_entries(included_entries)
+            )
+        if self.excluded_totals is None:
+            object.__setattr__(
+                self, "excluded_totals", MigrationTotals.from_entries(excluded_entries)
+            )
+        if not isinstance(self.included_totals, MigrationTotals) or not isinstance(
+            self.excluded_totals, MigrationTotals
+        ):
+            raise TypeError("rebuild plan selection totals must be MigrationTotals")
+        if self.included_totals != MigrationTotals.from_entries(included_entries) or self.excluded_totals != MigrationTotals.from_entries(excluded_entries):
+            raise ValueError("rebuild plan selection totals disagree with exclusions")
         if self.plan_kind is MigrationPlanKind.MIGRATION and self.state is not MigrationPlanState.PLANNED:
             raise ValueError("a migration plan must be planned before any mutation")
-        if self.plan_kind is not MigrationPlanKind.MIGRATION and self.state is not MigrationPlanState.REFUSED:
-            raise ValueError("rebuild-only and refused plans must remain non-mutating")
+        if self.plan_kind is MigrationPlanKind.REBUILD and self.state not in {
+            MigrationPlanState.PLANNED,
+            MigrationPlanState.REFUSED,
+        }:
+            raise ValueError("a rebuild plan has an invalid state")
+        if self.plan_kind is MigrationPlanKind.REFUSED and self.state is not MigrationPlanState.REFUSED:
+            raise ValueError("a refused plan must remain non-mutating")
         required_actions = {
             MigrationPlanKind.MIGRATION: ("stage", "verify", "activate"),
-            MigrationPlanKind.REBUILD: ("rebuild",),
             MigrationPlanKind.REFUSED: (),
         }
+        if self.plan_kind is MigrationPlanKind.REBUILD:
+            required_actions[MigrationPlanKind.REBUILD] = (
+                ("stage_rebuild", "verify_rebuild", "accept_rebuild")
+                if self.state is MigrationPlanState.PLANNED
+                else ("rebuild",)
+            )
         if self.intended_actions != required_actions[self.plan_kind]:
             raise ValueError("plan kind has an invalid intended action sequence")
+        expected_plan_id = (
+            _rebuild_plan_id(
+                source_identity=self.source_identity,
+                destination_identity=self.destination_identity,
+                source_revision=self.source_revision,
+                entries=self.entries,
+                exclusions=normalized_exclusions,
+            )
+            if self.plan_kind is MigrationPlanKind.REBUILD
+            else self.run_id
+        )
+        if not self.plan_id:
+            object.__setattr__(self, "plan_id", expected_plan_id)
+        if self.plan_id != expected_plan_id:
+            raise ValueError("plan_id does not bind the exact maintenance scope")
         expected_digest = self._expected_digest()
         if self.digest:
             if not isinstance(self.digest, str) or not re.fullmatch(r"[0-9a-f]{64}", self.digest):
@@ -723,7 +934,34 @@ class MigrationPlan:
     @property
     def stopped_worker_acknowledgement_required(self) -> bool:
         """Require an explicit offline acknowledgement for every mutating intended action."""
-        return bool(set(self.intended_actions) & {"stage", "verify", "activate", "rebuild"})
+        return bool(
+            set(self.intended_actions)
+            & {
+                "stage",
+                "verify",
+                "activate",
+                "rebuild",
+                "stage_rebuild",
+                "verify_rebuild",
+                "accept_rebuild",
+            }
+        )
+
+    @property
+    def excluded_entries(self) -> tuple[MigrationEntryAssessment, ...]:
+        """Return only exact inventory members covered by explicit exclusions."""
+        excluded_keys = {
+            key for exclusion in self.exclusions for key in exclusion["keys"]
+        }
+        return tuple(entry for entry in self.entries if entry.entry.key in excluded_keys)
+
+    @property
+    def included_entries(self) -> tuple[MigrationEntryAssessment, ...]:
+        """Return the complete inventory less only exact confirmed exclusions."""
+        excluded_keys = {
+            key for exclusion in self.exclusions for key in exclusion["keys"]
+        }
+        return tuple(entry for entry in self.entries if entry.entry.key not in excluded_keys)
 
     @classmethod
     def create(
@@ -767,6 +1005,30 @@ class MigrationPlan:
             state=state,
         )
 
+    @classmethod
+    def create_rebuild(
+        cls,
+        *,
+        run_id: str,
+        source_identity: AuthorityIdentitySnapshot,
+        destination_identity: AuthorityIdentitySnapshot,
+        entries: tuple[MigrationEntryAssessment, ...],
+        exclusions: tuple[Mapping[str, object], ...],
+    ) -> "MigrationPlan":
+        """Build a separately actionable rebuild plan from an exact inventory."""
+        return cls(
+            run_id=run_id,
+            source_identity=source_identity,
+            destination_identity=destination_identity,
+            entries=entries,
+            plan_kind=MigrationPlanKind.REBUILD,
+            release_window=ReleaseWindow.first_release_baseline(),
+            compatibility=_all_supported_compatibility(),
+            intended_actions=("stage_rebuild", "verify_rebuild", "accept_rebuild"),
+            exclusions=exclusions,
+            state=MigrationPlanState.PLANNED,
+        )
+
     def _entry_record(self, assessment: MigrationEntryAssessment) -> dict[str, object]:
         entry = assessment.entry
         return {
@@ -790,7 +1052,9 @@ class MigrationPlan:
             "compatibility": _compatibility_record(self.compatibility),
             "destination_identity": _identity_record(self.destination_identity),
             "entries": [self._entry_record(entry) for entry in sorted(self.entries, key=lambda item: item.entry.key)],
+            "excluded_totals": _totals_record(self.excluded_totals),
             "exclusions": [_thaw_json(item) for item in self.exclusions],
+            "included_totals": _totals_record(self.included_totals),
             "intended_actions": list(self.intended_actions),
             "plan_id": self.plan_id,
             "plan_kind": self.plan_kind.value,
@@ -840,7 +1104,9 @@ class MigrationPlan:
             "destination_identity",
             "digest",
             "entries",
+            "excluded_totals",
             "exclusions",
+            "included_totals",
             "intended_actions",
             "plan_id",
             "plan_kind",
@@ -887,6 +1153,8 @@ class MigrationPlan:
                 ),
                 compatibility=_compatibility_from_record(record["compatibility"]),
                 totals=totals,
+                included_totals=_totals_from_record(record["included_totals"]),
+                excluded_totals=_totals_from_record(record["excluded_totals"]),
                 intended_actions=tuple(record["intended_actions"]),
                 exclusions=tuple(record["exclusions"]),
                 state=MigrationPlanState(record["state"]),
@@ -965,6 +1233,20 @@ def _totals_from_record(record: object) -> MigrationTotals:
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError("totals contain an invalid value") from exc
+
+
+def _totals_record(totals: MigrationTotals | None) -> dict[str, object]:
+    """Render one complete exact selection aggregate for canonical plans."""
+    if not isinstance(totals, MigrationTotals):
+        raise TypeError("migration totals are unavailable")
+    return {
+        "bytes_by_disposition": {
+            item.value: totals.bytes_by_disposition[item] for item in MigrationDisposition
+        },
+        "counts": {item.value: totals.counts[item] for item in MigrationDisposition},
+        "total_bytes": totals.total_bytes,
+        "total_entries": totals.total_entries,
+    }
 
 
 def _current_contract(authority_kind: str) -> CompatibilityIdentity:
@@ -1581,6 +1863,93 @@ class OfflineMigrationService:
         )
         return plan
 
+    def create_rebuild_plan(
+        self,
+        inspection: MigrationInspection,
+        *,
+        exclusions: tuple[RebuildExclusion, ...] = (),
+    ) -> MigrationPlan:
+        """Create an explicit include-all rebuild plan from one fixed inspection.
+
+        Unlike :meth:`plan`, this method never makes a same-backend physical
+        migration eligible.  It records a complete inventory and resolves any
+        category selectors into exact keys before an operator can confirm it.
+        """
+        if not isinstance(inspection, MigrationInspection):
+            raise TypeError("inspection must be a MigrationInspection")
+        if not isinstance(exclusions, tuple) or not all(
+            isinstance(exclusion, RebuildExclusion) for exclusion in exclusions
+        ):
+            raise TypeError("rebuild exclusions must contain RebuildExclusion values")
+        current_source, current_destination = self._revalidate_identities()
+        if (
+            current_source != inspection.source_identity
+            or current_destination != inspection.destination_identity
+        ):
+            raise CacheBlobMigrationPlanStaleError(
+                "inspection is stale; reinspection is required",
+                context={"operation": "migration.create_rebuild_plan", "run_id": self.run_id},
+            )
+        evidence = self._expect_evidence(MaintenanceEvidenceState.INSPECTED, plan_digest="")
+        if evidence.source_identity != inspection.source_identity:
+            raise CacheBlobMigrationEvidenceMismatchError(
+                "inspection evidence does not corroborate the source",
+                context={"operation": "migration.create_rebuild_plan", "run_id": self.run_id},
+            )
+        return MigrationPlan.create_rebuild(
+            run_id=self.run_id,
+            source_identity=inspection.source_identity,
+            destination_identity=inspection.destination_identity,
+            entries=inspection.assessments,
+            exclusions=tuple(exclusion.resolve(inspection.assessments) for exclusion in exclusions),
+        )
+
+    def rebuild_confirmation(self, plan: MigrationPlan) -> str:
+        """Return the exact operator token for one immutable rebuild plan."""
+        if not isinstance(plan, MigrationPlan) or plan.run_id != self.run_id:
+            raise CacheBlobMigrationEvidenceMismatchError(
+                "rebuild plan does not belong to this explicit run",
+                context={"operation": "migration.rebuild_confirmation", "run_id": self.run_id},
+            )
+        if plan.plan_kind is not MigrationPlanKind.REBUILD or plan.state is not MigrationPlanState.PLANNED:
+            raise CacheBlobMigrationEvidenceMismatchError(
+                "rebuild confirmation requires an actionable rebuild plan",
+                context={"operation": "migration.rebuild_confirmation", "run_id": self.run_id},
+            )
+        if not hmac.compare_digest(plan.digest, plan._expected_digest()):
+            raise CacheBlobMigrationEvidenceMismatchError(
+                "rebuild plan digest is invalid",
+                context={"operation": "migration.rebuild_confirmation", "run_id": self.run_id},
+            )
+        material = "\x00".join(("cacheness-rebuild-confirmation-v1", plan.plan_id, plan.digest))
+        return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+    def confirm_rebuild(self, plan: MigrationPlan, *, confirmation: str) -> MigrationStepResult:
+        """Bind an exact operator confirmation into authenticated offline evidence."""
+        self._validate_rebuild_plan(plan)
+        expected_confirmation = self.rebuild_confirmation(plan)
+        if not isinstance(confirmation, str) or not hmac.compare_digest(
+            confirmation, expected_confirmation
+        ):
+            raise CacheBlobMigrationEvidenceMismatchError(
+                "rebuild confirmation does not bind this exact plan",
+                context={"operation": "migration.confirm_rebuild", "run_id": self.run_id},
+            )
+        self._expect_evidence(MaintenanceEvidenceState.INSPECTED, plan_digest="")
+        self._write_evidence(
+            self._new_evidence(
+                state=MaintenanceEvidenceState.PLANNED,
+                plan_digest=plan.digest,
+                source_identity=plan.source_identity,
+                destination_identity=plan.destination_identity,
+                completed_steps=("inspect", "confirm_rebuild"),
+                completed_output_digests={
+                    "confirm_rebuild": expected_confirmation,
+                },
+            )
+        )
+        return MigrationStepResult(MaintenanceEvidenceState.PLANNED, True, self.evidence_path)
+
     def _validate_plan(self, plan: MigrationPlan) -> None:
         if not isinstance(plan, MigrationPlan) or plan.run_id != self.run_id:
             raise CacheBlobMigrationEvidenceMismatchError(
@@ -1594,9 +1963,23 @@ class OfflineMigrationService:
             )
         self._revalidate_identities(plan)
 
+    def _validate_rebuild_plan(self, plan: MigrationPlan) -> None:
+        """Reject physical-migration plans before a rebuild action can begin."""
+        self._validate_plan(plan)
+        if plan.plan_kind is not MigrationPlanKind.REBUILD or plan.state is not MigrationPlanState.PLANNED:
+            raise CacheBlobMigrationEvidenceMismatchError(
+                "rebuild action requires an actionable rebuild plan",
+                context={"operation": "migration.rebuild", "run_id": self.run_id},
+            )
+
     def stage(self, plan: MigrationPlan) -> MigrationStepResult:
         """Copy authenticated immutable payloads into an invisible candidate."""
         self._validate_plan(plan)
+        if plan.plan_kind is not MigrationPlanKind.MIGRATION:
+            raise CacheBlobMigrationEvidenceMismatchError(
+                "rebuild plans must use the explicit rebuild workflow",
+                context={"operation": "migration.stage", "run_id": self.run_id},
+            )
         current = self.read_evidence()
         if current.state is MaintenanceEvidenceState.PLANNED:
             self._expect_evidence(MaintenanceEvidenceState.PLANNED, plan_digest=plan.digest)
