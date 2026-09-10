@@ -248,6 +248,80 @@ def test_sqlite_activation_rollback_keeps_candidate_invisible(tmp_path: Path) ->
         destination.close()
 
 
+def test_offline_service_rolls_back_only_the_activated_receipt(tmp_path: Path) -> None:
+    """Rollback restores the retained authority selection before workers restart."""
+    key_provider = _SharedMemoryKeyProvider()
+    source = _memory_store(tmp_path / "source", key_provider)
+    destination = _memory_store(tmp_path / "destination", key_provider)
+    try:
+        source.put_entry({"answer": "candidate"}, key="entry")
+        destination.put_entry({"answer": "prior"}, key="entry")
+        service = _service(
+            source,
+            destination,
+            tmp_path / "maintenance",
+            run_id="rollback-service",
+        )
+        plan = service.plan(service.inspect())
+        service.stage(plan)
+        service.verify(plan)
+        service.activate(plan)
+
+        rollback = service.rollback(plan)
+
+        assert rollback.run_id == service.run_id
+        assert destination.lifecycle_authority.publication_state() is (
+            AuthorityPublicationState.ROLLED_BACK
+        )
+        assert destination.get("entry") == {"answer": "prior"}
+        assert service.read_evidence().state is MaintenanceEvidenceState.ROLLED_BACK
+    finally:
+        source.close()
+        destination.close()
+
+
+def test_offline_service_finalize_requires_exact_confirmation_and_seals_rollback(
+    tmp_path: Path,
+) -> None:
+    """Finalize accepts the activated run once and makes workers safe to restart."""
+    key_provider = _SharedMemoryKeyProvider()
+    source = _memory_store(tmp_path / "source", key_provider)
+    destination = _memory_store(tmp_path / "destination", key_provider)
+    try:
+        source.put_entry({"answer": "candidate"}, key="entry")
+        destination.put_entry({"answer": "prior"}, key="entry")
+        service = _service(
+            source,
+            destination,
+            tmp_path / "maintenance",
+            run_id="finalize-service",
+        )
+        plan = service.plan(service.inspect())
+        service.stage(plan)
+        service.verify(plan)
+        service.activate(plan)
+
+        with pytest.raises(CacheBlobMigrationOfflineDecisionRequiredError, match="confirmation"):
+            service.finalize(plan, confirmation="0" * 64)
+
+        finalized = service.finalize(
+            plan,
+            confirmation=service.finalize_confirmation(plan),
+        )
+
+        assert finalized.run_id == service.run_id
+        assert destination.lifecycle_authority.publication_state() is (
+            AuthorityPublicationState.ACTIVE
+        )
+        assert destination.get("entry") == {"answer": "candidate"}
+        assert service.read_evidence().state is MaintenanceEvidenceState.FINALIZED
+        with pytest.raises(CacheBlobMigrationOfflineDecisionRequiredError, match="finalize"):
+            service.rollback(plan)
+    finally:
+        source.close()
+        destination.close()
+
+
 def test_projection_failure_is_derived_after_memory_activation(tmp_path: Path) -> None:
     """A failed projection rebuild preserves the committed activation receipt and state."""
     key_provider = _SharedMemoryKeyProvider()
