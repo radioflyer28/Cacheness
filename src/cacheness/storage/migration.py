@@ -53,6 +53,12 @@ from .migration_evidence import (
     StoppedWorkerAcknowledgement,
     decode_bounded_canonical_json,
 )
+from .projections import (
+    ProjectionController,
+    ProjectionOutcome,
+    ProjectionResult,
+    ProjectionStatus,
+)
 
 
 _RUN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
@@ -1840,6 +1846,64 @@ class OfflineMigrationService:
         )
         return MigrationStepResult(MaintenanceEvidenceState.ACTIVATED, True, self.evidence_path)
 
+    def rebuild_projection(
+        self,
+        plan: MigrationPlan,
+        controller: ProjectionController,
+    ) -> ProjectionResult:
+        """Run an explicit derived rebuild only after authority activation is confirmed.
+
+        Projection publication is an external derived effect. Its failure is
+        reported beside the immutable activation receipt and can never revoke,
+        select, or otherwise redefine canonical authority state.
+        """
+        if not isinstance(plan, MigrationPlan) or plan.run_id != self.run_id:
+            raise CacheBlobMigrationEvidenceMismatchError(
+                "migration plan does not belong to this explicit run",
+                context={"operation": "migration.projection", "run_id": self.run_id},
+            )
+        if not isinstance(controller, ProjectionController):
+            raise TypeError("projection rebuild requires a ProjectionController")
+        evidence = self.read_evidence()
+        if evidence.state is not MaintenanceEvidenceState.ACTIVATED or (
+            evidence.plan_digest != plan.digest or evidence.activation_receipt is None
+        ):
+            raise CacheBlobMigrationOfflineDecisionRequiredError(
+                "projection rebuild requires a confirmed offline migration activation",
+                context={"operation": "migration.projection", "run_id": self.run_id},
+            )
+        self._revalidate_activated_receipt(evidence, plan)
+        receipt = evidence.activation_receipt
+        try:
+            result = controller.rebuild(requested="offline")
+        except Exception as error:
+            checkpoint = getattr(controller, "_active_checkpoint", None)
+            outcome = ProjectionOutcome(
+                controller.projection_name,
+                ProjectionStatus.DIRTY,
+                checkpoint,
+                type(error).__name__,
+            )
+            return ProjectionResult(
+                False,
+                checkpoint,
+                0,
+                receipt=receipt,
+                projection_status=ProjectionStatus.DIRTY.value,
+                outcome=outcome,
+            )
+        outcome = ProjectionOutcome(
+            controller.projection_name,
+            ProjectionStatus.CURRENT,
+            result.checkpoint,
+        )
+        return replace(
+            result,
+            receipt=receipt,
+            projection_status=ProjectionStatus.CURRENT.value,
+            outcome=outcome,
+        )
+
     def resume(
         self,
         plan: MigrationPlan,
@@ -1877,6 +1941,40 @@ class OfflineMigrationService:
         if evidence.state is MaintenanceEvidenceState.ACTIVATED:
             self._revalidate_activated_receipt(evidence, plan)
             return MigrationStepResult(MaintenanceEvidenceState.ACTIVATED, True, self.evidence_path)
+        if evidence.state is MaintenanceEvidenceState.VERIFIED:
+            receipt = evidence.candidate_receipt
+            assert receipt is not None
+            activation_reader = getattr(
+                self._destination_authority, "activation_receipt_for_candidate", None
+            )
+            activation = activation_reader(receipt) if callable(activation_reader) else None
+            if activation is not None:
+                activation_digest = hashlib.sha256(
+                    f"{activation.activation_revision}:{receipt.candidate_digest}".encode("ascii")
+                ).hexdigest()
+                self._write_evidence(
+                    self._new_evidence(
+                        state=MaintenanceEvidenceState.ACTIVATED,
+                        plan_digest=plan.digest,
+                        source_identity=plan.source_identity,
+                        destination_identity=plan.destination_identity,
+                        completed_steps=("inspect", "plan", "stage", "verify", "activate"),
+                        candidate_receipt=receipt,
+                        activation_receipt=activation,
+                        authority_receipts=(activation_digest,),
+                        completed_output_digests={
+                            **evidence.completed_output_digests,
+                            "activate": activation_digest,
+                        },
+                    )
+                )
+                self._revalidate_activated_receipt(self.read_evidence(), plan)
+                return MigrationStepResult(
+                    MaintenanceEvidenceState.ACTIVATED, True, self.evidence_path
+                )
+            self._candidate_from_evidence(evidence, plan)
+            self._validate_plan(plan)
+            return MigrationStepResult(MaintenanceEvidenceState.VERIFIED, True, self.evidence_path)
         self._validate_plan(plan)
         if evidence.state is MaintenanceEvidenceState.PLANNED:
             return self.stage(plan)
@@ -1888,10 +1986,6 @@ class OfflineMigrationService:
         if evidence.state is MaintenanceEvidenceState.VERIFYING:
             self._candidate_from_evidence(evidence, plan)
             return self.verify(plan)
-        if evidence.state is MaintenanceEvidenceState.VERIFIED:
-            self._expect_evidence(MaintenanceEvidenceState.VERIFIED, plan_digest=plan.digest)
-            self._candidate_from_evidence(evidence, plan)
-            return MigrationStepResult(MaintenanceEvidenceState.VERIFIED, True, self.evidence_path)
         raise CacheBlobMigrationOfflineDecisionRequiredError(
             "resume state requires reinspection or a separately confirmed offline action",
             context={"operation": "migration.resume", "run_id": self.run_id},

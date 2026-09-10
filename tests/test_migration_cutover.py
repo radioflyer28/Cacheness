@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -14,6 +15,8 @@ from cacheness.storage.migration import (
     OfflineMigrationService,
 )
 from cacheness.storage.migration_authority import AuthorityPublicationState
+from cacheness.storage.migration_evidence import MaintenanceEvidenceState
+from cacheness.storage.projections import ProjectionController, ProjectionStatus
 from cacheness.storage.sqlite_lifecycle_authority import SQLITE_USER_VERSION
 from cacheness.storage.manifest import CURRENT_SQLITE_USER_VERSION
 
@@ -240,6 +243,111 @@ def test_sqlite_activation_rollback_keeps_candidate_invisible(tmp_path: Path) ->
         assert authority.publication_state() is AuthorityPublicationState.CANDIDATE
         assert destination.get("entry") is None
         assert source.get("entry") == {"answer": 42}
+    finally:
+        source.close()
+        destination.close()
+
+
+def test_projection_failure_is_derived_after_memory_activation(tmp_path: Path) -> None:
+    """A failed projection rebuild preserves the committed activation receipt and state."""
+    key_provider = _SharedMemoryKeyProvider()
+    source = _memory_store(tmp_path / "source", key_provider)
+    destination = _memory_store(tmp_path / "destination", key_provider)
+
+    class ProjectionSource:
+        projection_store_id = "derived-projection-source"
+
+        def query_catalog(self, cursor: str | None):
+            assert cursor is None
+            return SimpleNamespace(
+                revision=1,
+                entries=(("entry", "generation"),),
+                cursor=None,
+                exhausted=True,
+            )
+
+    class ProjectionSink:
+        projection_name = "derived-projection"
+        topology_capabilities = {
+            "projection_rebuild": True,
+            "offline_rebuild": True,
+            "online_rebuild": False,
+        }
+
+        def __init__(self, *, fail: bool = False) -> None:
+            self.fail = fail
+            self.published = False
+            self.discarded = False
+
+        def begin_isolated_rebuild(self):
+            return ProjectionSink(fail=True)
+
+        def apply_projection_batch(self, batch) -> None:
+            if self.fail:
+                raise OSError("derived sink failed")
+
+        def save_projection_checkpoint(self, checkpoint) -> None:
+            return None
+
+        def publish_isolated_rebuild(self, candidate, checkpoint) -> None:
+            self.published = True
+
+        def discard_isolated_rebuild(self, candidate) -> None:
+            self.discarded = True
+
+    try:
+        source.put_entry({"answer": 42}, key="entry")
+        service = _service(source, destination, tmp_path / "maintenance", run_id="projection-run")
+        plan = service.plan(service.inspect())
+        service.stage(plan)
+        service.verify(plan)
+        service.activate(plan)
+        evidence = service.read_evidence()
+        assert evidence.activation_receipt is not None
+
+        sink = ProjectionSink()
+        result = service.rebuild_projection(
+            plan,
+            ProjectionController(ProjectionSource(), sink),
+        )
+
+        assert result.receipt == evidence.activation_receipt
+        assert result.projection_status == ProjectionStatus.DIRTY.value
+        assert sink.published is False
+        assert sink.discarded is True
+        assert destination.lifecycle_authority.publication_state() is (
+            AuthorityPublicationState.ACTIVATED_OFFLINE
+        )
+    finally:
+        source.close()
+        destination.close()
+
+
+def test_resume_classifies_authority_activation_after_lost_evidence_observation(
+    tmp_path: Path,
+) -> None:
+    """Resume reads exact authority state when activation committed before evidence observation."""
+    key_provider = _SharedMemoryKeyProvider()
+    source = _memory_store(tmp_path / "source", key_provider)
+    destination = _memory_store(tmp_path / "destination", key_provider)
+    try:
+        source.put_entry({"answer": 42}, key="entry")
+        service = _service(source, destination, tmp_path / "maintenance", run_id="lost-response-run")
+        plan = service.plan(service.inspect())
+        service.stage(plan)
+        service.verify(plan)
+        evidence = service.read_evidence()
+        assert evidence.candidate_receipt is not None
+        candidates = service._candidate_from_evidence(evidence, plan)
+        authority = destination.lifecycle_authority
+        authority.record_verified_candidate(receipt=evidence.candidate_receipt, entries=candidates)
+        authority.activate_verified_candidate(receipt=evidence.candidate_receipt, entries=candidates)
+
+        resumed = service.resume(plan, run_id=service.run_id, evidence_path=service.evidence_path)
+
+        assert resumed.state is MaintenanceEvidenceState.ACTIVATED
+        assert service.read_evidence().activation_receipt is not None
+        assert authority.publication_state() is AuthorityPublicationState.ACTIVATED_OFFLINE
     finally:
         source.close()
         destination.close()

@@ -12,6 +12,7 @@ from cacheness.config import LifecycleLimits
 from cacheness.error_handling import (
     CacheBlobBackendError,
     CacheBlobLifecycleConflictError,
+    CacheBlobMigrationOfflineDecisionRequiredError,
     CacheBlobStoreClosedError,
 )
 
@@ -38,6 +39,10 @@ from .migration_authority import (
     AuthorityIdentitySnapshot,
     AuthorityInventoryEntry,
     AuthorityInventoryPage,
+    AuthorityPublicationState,
+    FinalizeReceipt,
+    PriorStoreReceipt,
+    RollbackReceipt,
     VerifiedCandidateReceipt,
     candidate_digest,
     validate_inventory_page_request,
@@ -96,6 +101,11 @@ class InMemoryLifecycleAuthority:
         self._revision = 0
         self._catalog_store_id = uuid4().hex
         self._projection_dirty = False
+        self._migration_state = AuthorityPublicationState.IDLE
+        self._migration_receipt: VerifiedCandidateReceipt | None = None
+        self._migration_candidates: tuple[AuthorityInventoryEntry, ...] = ()
+        self._migration_prior_entries: dict[str, EntrySnapshot] = {}
+        self._migration_prior_revision = 0
         self._closed = False
         self.open_write_transactions = 0
 
@@ -409,14 +419,33 @@ class InMemoryLifecycleAuthority:
                 raise CacheBlobLifecycleConflictError(
                     "Migration candidate digest disagrees with verified receipt"
                 )
-            if self._entries:
+            if self._migration_state is AuthorityPublicationState.ACTIVATED_OFFLINE:
+                if self._migration_receipt == receipt:
+                    return ActivationReceipt(
+                        candidate_receipt=receipt,
+                        activation_revision=self._revision,
+                        prior_store=PriorStoreReceipt(
+                            run_id=receipt.run_id,
+                            revision=self._migration_prior_revision,
+                            entry_count=len(self._migration_prior_entries),
+                        ),
+                    )
                 raise CacheBlobLifecycleConflictError(
-                    "Migration destination must be empty before first cutover activation"
+                    "A different migration activation is already selected"
+                )
+            if (
+                self._migration_state is not AuthorityPublicationState.CANDIDATE
+                or self._migration_receipt != receipt
+                or self._migration_candidates != entries
+            ):
+                raise CacheBlobLifecycleConflictError(
+                    "Verified migration candidate is not recorded by this authority"
                 )
             if len({entry.key for entry in entries}) != len(entries):
                 raise CacheBlobLifecycleConflictError("Migration candidate contains duplicate keys")
 
             next_revision = self._revision + 1
+            prior_entries = {key: self._copy(entry) for key, entry in self._entries.items()}
             activated: dict[str, EntrySnapshot] = {}
             for candidate in entries:
                 manifest = BlobManifest.from_canonical_bytes(candidate.manifest)
@@ -447,12 +476,160 @@ class InMemoryLifecycleAuthority:
             self._entries = activated
             self._revision = next_revision
             self._projection_dirty = True
+            self._migration_prior_entries = prior_entries
+            self._migration_prior_revision = next_revision - 1
+            self._migration_state = AuthorityPublicationState.ACTIVATED_OFFLINE
             return ActivationReceipt(
                 candidate_receipt=receipt,
                 activation_revision=self._revision,
+                prior_store=PriorStoreReceipt(
+                    run_id=receipt.run_id,
+                    revision=self._migration_prior_revision,
+                    entry_count=len(prior_entries),
+                ),
             )
 
         return self._transition(activate)
+
+    def record_verified_candidate(
+        self,
+        *,
+        receipt: VerifiedCandidateReceipt,
+        entries: tuple[AuthorityInventoryEntry, ...],
+    ) -> VerifiedCandidateReceipt:
+        """Record a complete in-process candidate without selecting it for readers."""
+        if not isinstance(receipt, VerifiedCandidateReceipt) or not isinstance(entries, tuple):
+            raise TypeError("migration candidate receipt and entries must be immutable values")
+
+        def record() -> VerifiedCandidateReceipt:
+            identity = self.identity_snapshot()
+            if receipt.destination_identity != identity or receipt.destination_revision != self._revision:
+                raise CacheBlobLifecycleConflictError(
+                    "Migration destination identity or revision changed before candidate recording"
+                )
+            if (
+                len(entries) != receipt.entry_count
+                or sum(entry.byte_size for entry in entries) != receipt.byte_count
+                or candidate_digest(entries) != receipt.candidate_digest
+                or len({entry.key for entry in entries}) != len(entries)
+            ):
+                raise CacheBlobLifecycleConflictError(
+                    "Migration candidate does not match its verified receipt"
+                )
+            if self._migration_state is AuthorityPublicationState.CANDIDATE:
+                if self._migration_receipt == receipt and self._migration_candidates == entries:
+                    return receipt
+                raise CacheBlobLifecycleConflictError(
+                    "A different verified migration candidate is already recorded"
+                )
+            if self._migration_state is not AuthorityPublicationState.IDLE:
+                raise CacheBlobLifecycleConflictError(
+                    "Migration candidate recording requires an idle authority"
+                )
+            for candidate in entries:
+                try:
+                    manifest = BlobManifest.from_canonical_bytes(candidate.manifest)
+                except (TypeError, ValueError) as error:
+                    raise CacheBlobLifecycleConflictError(
+                        "Migration candidate manifest is malformed"
+                    ) from error
+                if (
+                    manifest.key != candidate.key
+                    or manifest.generation != candidate.generation
+                    or manifest.locator != candidate.locator
+                    or manifest.digest != candidate.payload_digest
+                    or manifest.byte_size != candidate.byte_size
+                    or manifest.canonical_bytes() != candidate.manifest
+                ):
+                    raise CacheBlobLifecycleConflictError(
+                        "Migration candidate descriptor does not corroborate its receipt"
+                    )
+            self._migration_receipt = receipt
+            self._migration_candidates = entries
+            self._migration_state = AuthorityPublicationState.CANDIDATE
+            return receipt
+
+        return self._transition(record)
+
+    def publication_state(self) -> AuthorityPublicationState:
+        """Return narrow maintenance status without admitting ordinary workers."""
+        self._require_open()
+        with self._lock:
+            return self._migration_state
+
+    def activation_receipt_for_candidate(
+        self, receipt: VerifiedCandidateReceipt
+    ) -> ActivationReceipt | None:
+        """Classify a lost activation response from exact authority-owned state."""
+        if not isinstance(receipt, VerifiedCandidateReceipt):
+            raise TypeError("receipt must be a VerifiedCandidateReceipt")
+        self._require_open()
+        with self._lock:
+            if (
+                self._migration_state is not AuthorityPublicationState.ACTIVATED_OFFLINE
+                or self._migration_receipt != receipt
+            ):
+                return None
+            return ActivationReceipt(
+                candidate_receipt=receipt,
+                activation_revision=self._revision,
+                prior_store=PriorStoreReceipt(
+                    run_id=receipt.run_id,
+                    revision=self._migration_prior_revision,
+                    entry_count=len(self._migration_prior_entries),
+                ),
+            )
+
+    def require_ordinary_worker_access(self) -> None:
+        """Reject ordinary reads, queries, and mutations during the rollback window."""
+        if self.publication_state() is AuthorityPublicationState.ACTIVATED_OFFLINE:
+            raise CacheBlobMigrationOfflineDecisionRequiredError(
+                "Offline migration activation requires explicit rollback or finalize before workers restart",
+                context={"operation": "migration.worker_access"},
+            )
+
+    def rollback_verified_candidate(self, *, run_id: str) -> RollbackReceipt:
+        """Restore the retained prior selection before ordinary worker restart."""
+        if not isinstance(run_id, str) or not run_id:
+            raise ValueError("run_id must be a non-empty string")
+
+        def rollback() -> RollbackReceipt:
+            if (
+                self._migration_state is not AuthorityPublicationState.ACTIVATED_OFFLINE
+                or self._migration_receipt is None
+                or self._migration_receipt.run_id != run_id
+            ):
+                raise CacheBlobLifecycleConflictError(
+                    "Migration rollback requires the selected offline activation"
+                )
+            self._revision += 1
+            self._entries = {
+                key: self._copy(entry) for key, entry in self._migration_prior_entries.items()
+            }
+            self._projection_dirty = True
+            self._migration_state = AuthorityPublicationState.ROLLED_BACK
+            return RollbackReceipt(run_id=run_id, rollback_revision=self._revision)
+
+        return self._transition(rollback)
+
+    def finalize_verified_candidate(self, *, run_id: str) -> FinalizeReceipt:
+        """End rollback eligibility without deleting the retained prior material."""
+        if not isinstance(run_id, str) or not run_id:
+            raise ValueError("run_id must be a non-empty string")
+
+        def finalize() -> FinalizeReceipt:
+            if (
+                self._migration_state is not AuthorityPublicationState.ACTIVATED_OFFLINE
+                or self._migration_receipt is None
+                or self._migration_receipt.run_id != run_id
+            ):
+                raise CacheBlobLifecycleConflictError(
+                    "Migration finalize requires the selected offline activation"
+                )
+            self._migration_state = AuthorityPublicationState.ACTIVE
+            return FinalizeReceipt(run_id=run_id, finalized_revision=self._revision)
+
+        return self._transition(finalize)
 
     def catalog_page(
         self,

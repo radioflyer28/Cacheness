@@ -1945,6 +1945,40 @@ class SqliteLifecycleAuthority:
                 return AuthorityPublicationState.IDLE
             return AuthorityPublicationState(self._publication_state_row(connection)[6])
 
+    def activation_receipt_for_candidate(
+        self, receipt: VerifiedCandidateReceipt
+    ) -> ActivationReceipt | None:
+        """Classify a lost activation response without inferring state from candidate paths."""
+        if not isinstance(receipt, VerifiedCandidateReceipt):
+            raise TypeError("receipt must be a VerifiedCandidateReceipt")
+        with self._read_connection() as connection:
+            if connection is None:
+                return None
+            state_row = self._publication_state_row(connection)
+            if (
+                AuthorityPublicationState(state_row[6])
+                is not AuthorityPublicationState.ACTIVATED_OFFLINE
+                or state_row[1] != receipt.run_id
+                or state_row[2] != receipt.plan_digest
+                or state_row[3] != receipt.candidate_digest
+                or state_row[4] != receipt.source_revision
+                or type(state_row[5]) is not int
+            ):
+                return None
+            return ActivationReceipt(
+                candidate_receipt=receipt,
+                activation_revision=state_row[5],
+                prior_store=PriorStoreReceipt(
+                    run_id=receipt.run_id,
+                    revision=state_row[0] - 1,
+                    entry_count=connection.execute(
+                        "SELECT count(*) FROM migration_store_entries "
+                        "WHERE run_id = ? AND selection = 'prior'",
+                        (receipt.run_id,),
+                    ).fetchone()[0],
+                ),
+            )
+
     def require_ordinary_worker_access(self) -> None:
         """Seal all normal BlobStore work until offline rollback or finalize."""
         if self.publication_state() is AuthorityPublicationState.ACTIVATED_OFFLINE:
