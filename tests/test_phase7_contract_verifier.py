@@ -18,6 +18,8 @@ EXPECTED_PRODUCTION_PATHS = (
     "src/cacheness/interfaces.py",
     "src/cacheness/storage/__init__.py",
     "src/cacheness/storage/blob_store.py",
+    "src/cacheness/storage/lifecycle.py",
+    "src/cacheness/storage/lifecycle_authority.py",
     "src/cacheness/storage/memory_lifecycle_authority.py",
     "src/cacheness/storage/migration.py",
     "src/cacheness/storage/migration_authority.py",
@@ -46,6 +48,8 @@ EXPECTED_TEST_NODES = (
     "tests/test_rebuild_workflow.py",
     "tests/test_handler_registration.py",
     "tests/test_blob_store_read_contract.py",
+    "tests/test_blob_store_atomic_lifecycle.py",
+    "tests/contracts/test_lifecycle_authority.py",
     "tests/test_migration_public_contract.py",
     "tests/test_phase7_contract_verifier.py",
 )
@@ -110,10 +114,14 @@ def test_fixed_manifest_is_complete_and_not_discovery_derived() -> None:
         *(f"T-07-{number:02d}" for number in range(31, 35)),
         *(f"T-07-{number:02d}" for number in range(36, 41)),
         *(f"T-07-{number:02d}" for number in range(42, 51)),
+        *verifier.GAP_PLAN_THREAT_IDS,
     }
-    assert set(verifier.FLAGGED_ASSUMPTION_NODES) == set(
-        verifier.MIGRATION_REQUIREMENT_NODES
-    )
+    assert set(verifier.FLAGGED_ASSUMPTION_NODES) == {
+        "A-MIGR03",
+        "A-MIGR04",
+        "A-MIGR05",
+        "A-MIGR06",
+    }
     assert verifier.PLAN01_PROHIBITIONS == EXPECTED_PROHIBITIONS
     assert not hasattr(verifier, "discover_tests")
     assert not hasattr(verifier, "git_diff")
@@ -127,7 +135,7 @@ def test_fixed_mapping_validator_rejects_each_omission() -> None:
         requirements={"MIGR-03": ("x",)},
         decisions={f"D-{number:02d}": ("x",) for number in range(1, 23)},
         threats={threat: ("x",) for threat in verifier.SECURITY_THREAT_NODES},
-        assumptions={requirement: ("x",) for requirement in verifier.MIGRATION_REQUIREMENT_NODES},
+        assumptions={assumption: ("x",) for assumption in verifier.FLAGGED_ASSUMPTION_NODES},
         prohibitions=EXPECTED_PROHIBITIONS,
     ) == (
         "MIGR mapping differs from the fixed Phase 7 set: missing=['MIGR-04', "
@@ -137,7 +145,7 @@ def test_fixed_mapping_validator_rejects_each_omission() -> None:
     valid_requirements = {requirement: ("x",) for requirement in verifier.MIGRATION_REQUIREMENT_NODES}
     valid_decisions = {f"D-{number:02d}": ("x",) for number in range(1, 23)}
     valid_threats = {threat: ("x",) for threat in verifier.SECURITY_THREAT_NODES}
-    valid_assumptions = {requirement: ("x",) for requirement in valid_requirements}
+    valid_assumptions = {assumption: ("x",) for assumption in verifier.FLAGGED_ASSUMPTION_NODES}
     assert verifier.validate_mapping_inventory(
         requirements=valid_requirements,
         decisions=valid_decisions,

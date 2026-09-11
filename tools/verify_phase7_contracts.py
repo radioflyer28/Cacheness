@@ -34,6 +34,8 @@ _PHASE7_REVIEWED_PRODUCTION_PATHS = (
     "src/cacheness/interfaces.py",
     "src/cacheness/storage/__init__.py",
     "src/cacheness/storage/blob_store.py",
+    "src/cacheness/storage/lifecycle.py",
+    "src/cacheness/storage/lifecycle_authority.py",
     "src/cacheness/storage/memory_lifecycle_authority.py",
     "src/cacheness/storage/migration.py",
     "src/cacheness/storage/migration_authority.py",
@@ -63,6 +65,8 @@ _PHASE7_REVIEWED_TEST_NODES = (
     "tests/test_rebuild_workflow.py",
     "tests/test_handler_registration.py",
     "tests/test_blob_store_read_contract.py",
+    "tests/test_blob_store_atomic_lifecycle.py",
+    "tests/contracts/test_lifecycle_authority.py",
     "tests/test_migration_public_contract.py",
     "tests/test_phase7_contract_verifier.py",
 )
@@ -84,6 +88,8 @@ PHASE7_QUICK_TEST_NODES = (
     "tests/test_rebuild_workflow.py",
     "tests/test_handler_registration.py",
     "tests/test_blob_store_read_contract.py",
+    "tests/test_blob_store_atomic_lifecycle.py",
+    "tests/contracts/test_lifecycle_authority.py",
     "tests/test_migration_public_contract.py",
     "tests/test_phase7_contract_verifier.py",
 )
@@ -105,121 +111,195 @@ PHASE7_PLAN_PATHS = (
     ".planning/phases/07-explicit-migration-and-rebuild-cutover/07-09-PLAN.md",
     ".planning/phases/07-explicit-migration-and-rebuild-cutover/07-10-PLAN.md",
     ".planning/phases/07-explicit-migration-and-rebuild-cutover/07-11-PLAN.md",
+    ".planning/phases/07-explicit-migration-and-rebuild-cutover/07-12-PLAN.md",
+    ".planning/phases/07-explicit-migration-and-rebuild-cutover/07-13-PLAN.md",
+    ".planning/phases/07-explicit-migration-and-rebuild-cutover/07-14-PLAN.md",
+    ".planning/phases/07-explicit-migration-and-rebuild-cutover/07-15-PLAN.md",
+    ".planning/phases/07-explicit-migration-and-rebuild-cutover/07-16-PLAN.md",
+    ".planning/phases/07-explicit-migration-and-rebuild-cutover/07-17-PLAN.md",
+    ".planning/phases/07-explicit-migration-and-rebuild-cutover/07-18-PLAN.md",
+    ".planning/phases/07-explicit-migration-and-rebuild-cutover/07-19-PLAN.md",
 )
 PHASE7_CONTEXT_PATH = (
-    ".planning/phases/07-explicit-migration-and-rebuild-cutover/07-CONTEXT.md"
+    ".planning/phases/07-explicit-migration-and-rebuild-cutover/07-CONTEXT.md",
 )
 
 MIGRATION_REQUIREMENT_NODES = {
     "MIGR-03": (
-        "tests/test_migration_inspection.py",
-        "tests/test_migration_plan_contract.py",
-        "tests/test_migration_public_contract.py",
+        "tests/test_migration_inspection.py::test_raw_inventory_pages_every_canonical_entry_without_manifest_filtering",
+        "tests/test_migration_plan_contract.py::test_machine_plan_digest_binds_sensitive_catalog_and_manifest_without_serializing_them",
+        "tests/test_migration_public_contract.py::test_documented_public_workflow_uses_one_model_and_offline_fencing",
     ),
     "MIGR-04": (
-        "tests/test_migration_cutover.py",
-        "tests/test_stored_compatibility.py",
-        "tests/test_lifecycle_authority_contract.py",
+        "tests/test_migration_cutover.py::test_migration_run_enforces_entry_byte_and_evidence_limits_with_split_plan",
+        "tests/test_migration_cutover.py::test_uncheckpointed_candidate_orphan_remains_invisible_unadopted_and_outside_exact_cleanup",
+        "tests/test_migration_cutover.py::test_resume_and_abort_staging_use_only_authority_attributed_batches",
+        "tests/test_migration_cutover.py::test_transformed_candidate_checkpointed_metadata_recovers_within_limits_and_uncheckpointed_orphan_remains_invisible",
+        "tests/contracts/test_postgresql_lifecycle_authority.py::test_fresh_blobstore_initialize_rechecks_activated_offline_after_postgresql_identity_load",
     ),
     "MIGR-05": (
-        "tests/test_migration_run_evidence.py",
-        "tests/test_migration_cutover.py",
-        "tests/test_projection_sql_atomicity.py",
-        "tests/test_migration_remote_contract.py",
+        "tests/test_blob_store_atomic_lifecycle.py::test_blobstore_maintenance_canonical_put_replays_projection_free_receipt_after_response_loss",
+        "tests/test_rebuild_workflow.py::test_rebuild_response_loss_rederives_operation_id_and_replays_authority_receipt",
+        "tests/test_rebuild_workflow.py::test_projection_equipped_rebuild_replays_canonical_receipt_without_preacceptance_or_duplicate_derived_work",
+        "tests/test_rebuild_workflow.py::test_rebuild_checkpoints_exact_destination_receipts_and_resumes_each_rebuild_state",
+        "tests/test_rebuild_workflow.py::test_rebuild_verification_failure_cleans_only_exact_receipts_and_persists_debt",
+        "tests/test_migration_run_evidence.py::test_execution_rereads_authenticates_and_rejects_plan_bound_manifest_or_catalog_drift",
     ),
     "MIGR-06": (
-        "tests/test_rebuild_workflow.py",
-        "tests/test_handler_registration.py",
-        "tests/test_blob_store_read_contract.py",
+        "tests/test_rebuild_workflow.py::test_rebuild_uses_registered_source_handler_and_destination_blobstore_lifecycle",
+        "tests/test_migration_plan_contract.py::test_compatibility_edge_requires_exact_destination_dimensions",
+        "tests/test_handler_registration.py::test_registered_custom_handler_resolves_one_exact_directed_transformation",
+        "tests/test_handler_registration.py::test_registered_handler_rejects_declared_edge_without_concrete_transform",
     ),
 }
 
 DECISION_NODES = {
-    "D-01": ("tests/test_stored_compatibility.py",),
-    "D-02": ("tests/test_migration_plan_contract.py",),
-    "D-03": ("tests/test_migration_plan_contract.py",),
-    "D-04": ("tests/test_migration_inspection.py",),
-    "D-05": ("tests/test_stored_compatibility.py",),
-    "D-06": ("tests/test_migration_inspection.py",),
-    "D-07": ("tests/test_migration_cutover.py",),
-    "D-08": ("tests/test_rebuild_workflow.py",),
-    "D-09": ("tests/test_migration_run_evidence.py",),
-    "D-10": ("tests/test_handler_registration.py",),
-    "D-11": ("tests/test_projection_sql_atomicity.py",),
-    "D-12": ("tests/test_migration_cutover.py",),
-    "D-13": ("tests/test_migration_cutover.py",),
-    "D-14": ("tests/test_migration_cutover.py",),
-    "D-15": ("tests/test_migration_cutover.py",),
-    "D-16": ("tests/test_migration_cutover.py",),
-    "D-17": ("tests/test_migration_run_evidence.py",),
-    "D-18": ("tests/test_migration_plan_contract.py",),
-    "D-19": ("tests/test_migration_run_evidence.py",),
-    "D-20": ("tests/test_migration_run_evidence.py",),
-    "D-21": ("tests/test_migration_cutover.py",),
-    "D-22": ("tests/test_migration_run_evidence.py",),
+    "D-01": ("tests/test_stored_compatibility.py::test_current_format_two_store_reopens_with_catalog_values_and_payload",),
+    "D-02": ("tests/test_migration_plan_contract.py::test_release_window_accepts_only_current_and_immediately_previous_release",),
+    "D-03": ("tests/test_migration_plan_contract.py::test_matrix_requires_one_exact_edge_per_changed_dimension",),
+    "D-04": ("tests/test_migration_inspection.py::test_raw_inventory_pages_every_canonical_entry_without_manifest_filtering",),
+    "D-05": ("tests/test_stored_compatibility.py::test_development_and_foreign_markers_require_offline_migration_without_mutation",),
+    "D-06": ("tests/test_migration_inspection.py::test_historical_path_is_rebuild_only_without_writing",),
+    "D-07": ("tests/test_migration_cutover.py::test_migration_run_enforces_entry_byte_and_evidence_limits_with_split_plan",),
+    "D-08": ("tests/test_rebuild_workflow.py::test_rebuild_plan_defaults_to_every_entry_and_cannot_use_migration_stage",),
+    "D-09": ("tests/test_migration_run_evidence.py::test_evidence_store_requires_inspection_first_and_rejects_hostile_raw_bytes",),
+    "D-10": ("tests/test_handler_registration.py::test_registered_custom_handler_resolves_one_exact_directed_transformation",),
+    "D-11": ("tests/test_blob_store_atomic_lifecycle.py::test_blobstore_maintenance_canonical_put_replays_projection_free_receipt_after_response_loss",),
+    "D-12": ("tests/test_migration_cutover.py::test_candidate_and_evidence_never_authorize_activation",),
+    "D-13": ("tests/test_migration_cutover.py::test_memory_tracer_requires_explicit_whole_store_activation",),
+    "D-14": ("tests/test_migration_cutover.py::test_offline_service_finalize_requires_exact_confirmation_and_seals_rollback",),
+    "D-15": ("tests/test_migration_cutover.py::test_offline_service_abort_removes_only_its_unactivated_candidate",),
+    "D-16": ("tests/test_migration_cutover.py::test_resume_and_abort_staging_use_only_authority_attributed_batches",),
+    "D-17": ("tests/test_migration_cutover.py::test_uncheckpointed_candidate_orphan_remains_invisible_unadopted_and_outside_exact_cleanup",),
+    "D-18": ("tests/test_migration_plan_contract.py::test_canonical_plan_round_trips_and_human_report_uses_the_same_model",),
+    "D-19": ("tests/test_rebuild_workflow.py::test_rebuild_response_loss_rederives_operation_id_and_replays_authority_receipt",),
+    "D-20": ("tests/contracts/test_lifecycle_authority.py::test_local_authorities_expose_exact_operation_replay_without_new_authority_state",),
+    "D-21": ("tests/test_migration_cutover.py::test_resume_and_abort_staging_use_only_authority_attributed_batches",),
+    "D-22": ("tests/test_migration_plan_contract.py::test_machine_plan_digest_binds_sensitive_catalog_and_manifest_without_serializing_them",),
 }
 
-_DECLARED_PHASE7_THREAT_IDS = (
+ORIGINAL_PHASE7_THREAT_IDS = (
     *(f"T-07-{number:02d}" for number in range(1, 25)),
     *(f"T-07-{number:02d}" for number in range(26, 30)),
     *(f"T-07-{number:02d}" for number in range(31, 35)),
     *(f"T-07-{number:02d}" for number in range(36, 41)),
     *(f"T-07-{number:02d}" for number in range(42, 51)),
 )
+GAP_PLAN_THREAT_IDS = (
+    "T-07-G12-01", "T-07-G12-02", "T-07-G12-03", "T-07-G12-04", "T-07-G12-05",
+    "T-07-13-01", "T-07-13-02", "T-07-13-03", "T-07-13-04", "T-07-13-SC",
+    "T-07-14-01",
+    "T-07-15-01", "T-07-15-02", "T-07-15-03", "T-07-15-04",
+    "T-07-16-01", "T-07-16-02", "T-07-16-03", "T-07-16-04", "T-07-16-05",
+    "T-07-17-01", "T-07-17-02", "T-07-17-03", "T-07-17-04", "T-07-17-05", "T-07-17-SC",
+    "T-07-18-01", "T-07-18-02", "T-07-18-03", "T-07-18-04", "T-07-18-05", "T-07-18-SC",
+    "T-07-19-01", "T-07-19-02", "T-07-19-03", "T-07-19-04", "T-07-19-05", "T-07-19-SC",
+)
+_DECLARED_PHASE7_THREAT_IDS = (*ORIGINAL_PHASE7_THREAT_IDS, *GAP_PLAN_THREAT_IDS)
+
+GAP_PLAN_THREAT_OWNERS = {
+    ".planning/phases/07-explicit-migration-and-rebuild-cutover/07-12-PLAN.md": GAP_PLAN_THREAT_IDS[:5],
+    ".planning/phases/07-explicit-migration-and-rebuild-cutover/07-13-PLAN.md": GAP_PLAN_THREAT_IDS[5:10],
+    ".planning/phases/07-explicit-migration-and-rebuild-cutover/07-14-PLAN.md": GAP_PLAN_THREAT_IDS[10:11],
+    ".planning/phases/07-explicit-migration-and-rebuild-cutover/07-15-PLAN.md": GAP_PLAN_THREAT_IDS[11:15],
+    ".planning/phases/07-explicit-migration-and-rebuild-cutover/07-16-PLAN.md": GAP_PLAN_THREAT_IDS[15:20],
+    ".planning/phases/07-explicit-migration-and-rebuild-cutover/07-17-PLAN.md": GAP_PLAN_THREAT_IDS[20:26],
+    ".planning/phases/07-explicit-migration-and-rebuild-cutover/07-18-PLAN.md": GAP_PLAN_THREAT_IDS[26:32],
+    ".planning/phases/07-explicit-migration-and-rebuild-cutover/07-19-PLAN.md": GAP_PLAN_THREAT_IDS[32:38],
+}
+
 SECURITY_THREAT_NODES = {
-    "T-07-01": ("tests/test_migration_cutover.py",),
-    "T-07-02": ("tests/test_stored_compatibility.py",),
-    "T-07-03": ("tests/test_blob_store_read_contract.py",),
-    "T-07-04": ("tests/test_migration_inspection.py",),
-    "T-07-05": ("tests/test_migration_run_evidence.py",),
-    "T-07-06": ("tests/test_migration_plan_contract.py",),
-    "T-07-07": ("tests/test_migration_plan_contract.py",),
-    "T-07-08": ("tests/test_migration_plan_contract.py",),
-    "T-07-09": ("tests/test_migration_plan_contract.py",),
-    "T-07-10": ("tests/test_migration_plan_contract.py",),
-    "T-07-11": ("tests/test_migration_run_evidence.py",),
-    "T-07-12": ("tests/test_migration_inspection.py",),
-    "T-07-13": ("tests/test_migration_inspection.py",),
-    "T-07-14": ("tests/test_migration_inspection.py",),
-    "T-07-15": ("tests/test_migration_inspection.py",),
-    "T-07-16": ("tests/test_migration_run_evidence.py",),
-    "T-07-17": ("tests/test_migration_run_evidence.py",),
-    "T-07-18": ("tests/test_migration_run_evidence.py",),
-    "T-07-19": ("tests/test_migration_run_evidence.py",),
-    "T-07-20": ("tests/test_migration_run_evidence.py",),
-    "T-07-21": ("tests/test_migration_cutover.py",),
-    "T-07-22": ("tests/test_migration_cutover.py",),
-    "T-07-23": ("tests/test_migration_cutover.py",),
-    "T-07-24": ("tests/test_projection_sql_atomicity.py",),
-    "T-07-26": ("tests/contracts/test_postgresql_lifecycle_authority.py",),
-    "T-07-27": ("tests/test_migration_remote_contract.py",),
-    "T-07-28": ("tests/test_migration_remote_contract.py",),
-    "T-07-29": ("tests/test_migration_remote_contract.py",),
-    "T-07-31": ("tests/test_migration_cutover.py",),
-    "T-07-32": ("tests/test_migration_cutover.py",),
-    "T-07-33": ("tests/test_migration_cutover.py",),
-    "T-07-34": ("tests/test_migration_cutover.py",),
-    "T-07-36": ("tests/test_rebuild_workflow.py",),
-    "T-07-37": ("tests/test_rebuild_workflow.py",),
-    "T-07-38": ("tests/test_handler_registration.py",),
-    "T-07-39": ("tests/test_rebuild_workflow.py",),
-    "T-07-40": ("tests/test_rebuild_workflow.py",),
-    "T-07-42": ("tests/test_migration_public_contract.py",),
-    "T-07-43": ("tests/test_migration_public_contract.py",),
-    "T-07-44": ("tests/test_migration_public_contract.py",),
-    "T-07-45": ("tests/test_migration_public_contract.py",),
-    "T-07-46": ("tests/test_phase7_contract_verifier.py",),
-    "T-07-47": ("tests/test_phase7_contract_verifier.py",),
-    "T-07-48": ("tests/test_phase7_contract_verifier.py",),
-    "T-07-49": ("tests/test_phase7_contract_verifier.py",),
-    "T-07-50": ("tests/test_phase7_contract_verifier.py",),
+    "T-07-01": ("tests/test_migration_cutover.py::test_candidate_and_evidence_never_authorize_activation",),
+    "T-07-02": ("tests/test_stored_compatibility.py::test_ordinary_entry_points_never_adopt_or_modify_unsupported_roots",),
+    "T-07-03": ("tests/test_blob_store_read_contract.py::test_composed_store_reopens_one_authenticated_canonical_generation",),
+    "T-07-04": ("tests/test_migration_inspection.py::test_raw_inventory_pages_every_canonical_entry_without_manifest_filtering",),
+    "T-07-05": ("tests/test_migration_run_evidence.py::test_evidence_store_round_trips_canonically_and_rejects_forgery",),
+    "T-07-06": ("tests/test_migration_plan_contract.py::test_release_window_accepts_only_current_and_immediately_previous_release",),
+    "T-07-07": ("tests/test_migration_plan_contract.py::test_matrix_requires_one_exact_edge_per_changed_dimension",),
+    "T-07-08": ("tests/test_migration_plan_contract.py::test_matrix_rejects_ambiguous_or_out_of_window_edges",),
+    "T-07-09": ("tests/test_migration_plan_contract.py::test_plan_decoder_rejects_duplicate_json_keys",),
+    "T-07-10": ("tests/test_migration_plan_contract.py::test_canonical_plan_round_trips_and_human_report_uses_the_same_model",),
+    "T-07-11": ("tests/test_migration_run_evidence.py::test_checkpoint_requires_exact_previous_bytes_and_legal_state_transition",),
+    "T-07-12": ("tests/test_migration_inspection.py::test_inventory_continuation_rejects_revision_drift_without_refreshing",),
+    "T-07-13": ("tests/test_migration_inspection.py::test_initialized_sqlite_store_is_current_without_a_format_marker",),
+    "T-07-14": ("tests/test_migration_inspection.py::test_historical_path_is_rebuild_only_without_writing",),
+    "T-07-15": ("tests/test_migration_inspection.py::test_corrupt_authority_path_is_refused_without_writing",),
+    "T-07-16": ("tests/test_migration_run_evidence.py::test_evidence_never_renders_or_logs_key_material",),
+    "T-07-17": ("tests/test_migration_run_evidence.py::test_resume_requires_exact_run_and_evidence_then_revalidates_next_step",),
+    "T-07-18": ("tests/test_migration_run_evidence.py::test_resume_refuses_mismatched_output_or_stale_source_without_adoption",),
+    "T-07-19": ("tests/test_migration_run_evidence.py::test_execution_rereads_authenticates_and_rejects_plan_bound_manifest_or_catalog_drift",),
+    "T-07-20": ("tests/test_migration_run_evidence.py::test_execution_rereads_authenticates_and_rejects_plan_bound_manifest_or_catalog_drift",),
+    "T-07-21": ("tests/test_migration_cutover.py::test_memory_tracer_requires_explicit_whole_store_activation",),
+    "T-07-22": ("tests/test_migration_cutover.py::test_sqlite_activation_seals_workers_until_explicit_finalize",),
+    "T-07-23": ("tests/test_migration_cutover.py::test_offline_service_abort_removes_only_its_unactivated_candidate",),
+    "T-07-24": ("tests/test_projection_sql_atomicity.py::test_failed_sql_projection_rebuild_discards_the_candidate_without_publishing",),
+    "T-07-26": ("tests/contracts/test_postgresql_lifecycle_authority.py::test_constructor_is_non_materializing_and_initialize_is_explicit",),
+    "T-07-27": ("tests/test_migration_remote_contract.py::test_s3_candidate_response_loss_revalidates_exact_receipt_without_listing",),
+    "T-07-28": ("tests/test_migration_remote_contract.py::test_s3_candidate_rejects_unowned_locator_before_mutating",),
+    "T-07-29": ("tests/test_migration_remote_contract.py::test_s3_candidate_rejects_unowned_locator_before_mutating",),
+    "T-07-31": ("tests/test_migration_cutover.py::test_sqlite_activation_rollback_keeps_candidate_invisible",),
+    "T-07-32": ("tests/test_migration_cutover.py::test_offline_service_rolls_back_only_the_activated_receipt",),
+    "T-07-33": ("tests/test_migration_cutover.py::test_offline_service_finalize_requires_exact_confirmation_and_seals_rollback",),
+    "T-07-34": ("tests/test_migration_cutover.py::test_offline_service_purge_is_separate_idempotent_retryable_cleanup",),
+    "T-07-36": ("tests/test_rebuild_workflow.py::test_rebuild_plan_defaults_to_every_entry_and_cannot_use_migration_stage",),
+    "T-07-37": ("tests/test_rebuild_workflow.py::test_rebuild_exclusion_regenerates_exact_plan_and_requires_its_confirmation",),
+    "T-07-38": ("tests/test_handler_registration.py::test_invalid_transformation_edges_are_rejected_without_global_fallback",),
+    "T-07-39": ("tests/test_rebuild_workflow.py::test_rebuild_uses_registered_source_handler_and_destination_blobstore_lifecycle",),
+    "T-07-40": ("tests/test_rebuild_workflow.py::test_rebuild_integrity_failure_runs_before_custom_handler_and_discards_candidates",),
+    "T-07-42": ("tests/test_migration_public_contract.py::test_public_storage_maintenance_exports_and_signatures_are_explicit",),
+    "T-07-43": ("tests/test_migration_public_contract.py::test_documented_public_workflow_uses_one_model_and_offline_fencing",),
+    "T-07-44": ("tests/test_migration_public_contract.py::test_runbook_marks_stop_conditions_and_non_claims",),
+    "T-07-45": ("tests/test_migration_public_contract.py::test_ordinary_construction_exposes_no_migration_switch_or_cli",),
+    "T-07-46": ("tests/test_phase7_contract_verifier.py::test_fixed_manifest_is_complete_and_not_discovery_derived",),
+    "T-07-47": ("tests/test_phase7_contract_verifier.py::test_fixed_mapping_validator_rejects_each_omission",),
+    "T-07-48": ("tests/test_phase7_contract_verifier.py::test_source_mutation_cannot_drop_a_fixed_test_node",),
+    "T-07-49": ("tests/test_phase7_contract_verifier.py::test_architecture_audit_rejects_each_executable_prohibition",),
+    "T-07-50": ("tests/test_phase7_contract_verifier.py::test_document_and_coverage_audits_reject_false_qualification_and_secrets",),
+    "T-07-G12-01": ("tests/test_migration_cutover.py::test_migration_run_enforces_entry_byte_and_evidence_limits_with_split_plan", "tests/test_migration_cutover.py::test_uncheckpointed_candidate_orphan_remains_invisible_unadopted_and_outside_exact_cleanup", "tests/test_migration_cutover.py::test_transformed_candidate_checkpointed_metadata_recovers_within_limits_and_uncheckpointed_orphan_remains_invisible"),
+    "T-07-G12-02": ("tests/test_migration_cutover.py::test_resume_and_abort_staging_use_only_authority_attributed_batches",),
+    "T-07-G12-03": ("tests/test_migration_cutover.py::test_resume_and_abort_staging_use_only_authority_attributed_batches",),
+    "T-07-G12-04": ("tests/test_migration_cutover.py::test_migration_run_enforces_entry_byte_and_evidence_limits_with_split_plan", "tests/test_migration_cutover.py::test_uncheckpointed_candidate_orphan_remains_invisible_unadopted_and_outside_exact_cleanup", "tests/test_migration_cutover.py::test_transformed_candidate_checkpointed_metadata_recovers_within_limits_and_uncheckpointed_orphan_remains_invisible"),
+    "T-07-G12-05": ("tests/test_migration_cutover.py::test_migration_run_enforces_entry_byte_and_evidence_limits_with_split_plan", "tests/test_migration_cutover.py::test_uncheckpointed_candidate_orphan_remains_invisible_unadopted_and_outside_exact_cleanup", "tests/test_migration_cutover.py::test_transformed_candidate_checkpointed_metadata_recovers_within_limits_and_uncheckpointed_orphan_remains_invisible"),
+    "T-07-13-01": ("tests/contracts/test_postgresql_lifecycle_authority.py::test_fresh_blobstore_initialize_rechecks_activated_offline_after_postgresql_identity_load",),
+    "T-07-13-02": ("tests/contracts/test_postgresql_lifecycle_authority.py::test_postgresql_preflight_mutation_checks_persisted_worker_fence_after_open",),
+    "T-07-13-03": ("tests/contracts/test_postgresql_lifecycle_authority.py::test_fresh_blobstore_initialize_rechecks_activated_offline_after_postgresql_identity_load",),
+    "T-07-13-04": ("tests/contracts/test_postgresql_lifecycle_authority.py::test_postgresql_preflight_mutation_checks_persisted_worker_fence_after_open",),
+    "T-07-13-SC": ("tests/test_phase7_contract_verifier.py::test_fixed_gap_supply_chain_threats_map_to_frozen_command_contracts",),
+    "T-07-14-01": ("tests/test_blob_store_atomic_lifecycle.py::test_blobstore_maintenance_canonical_put_replays_projection_free_receipt_after_response_loss", "tests/contracts/test_lifecycle_authority.py::test_local_authorities_expose_exact_operation_replay_without_new_authority_state", "tests/contracts/test_postgresql_lifecycle_authority.py::test_postgresql_read_mutation_returns_exact_prepared_and_promoted_replay"),
+    "T-07-15-01": ("tests/test_rebuild_workflow.py::test_rebuild_response_loss_rederives_operation_id_and_replays_authority_receipt", "tests/test_rebuild_workflow.py::test_projection_equipped_rebuild_replays_canonical_receipt_without_preacceptance_or_duplicate_derived_work"),
+    "T-07-15-02": ("tests/test_rebuild_workflow.py::test_rebuild_verification_failure_cleans_only_exact_receipts_and_persists_debt",),
+    "T-07-15-03": ("tests/test_rebuild_workflow.py::test_rebuild_verification_failure_cleans_only_exact_receipts_and_persists_debt",),
+    "T-07-15-04": ("tests/test_rebuild_workflow.py::test_rebuild_response_loss_rederives_operation_id_and_replays_authority_receipt",),
+    "T-07-16-01": ("tests/test_migration_plan_contract.py::test_compatibility_edge_requires_exact_destination_dimensions",),
+    "T-07-16-02": ("tests/test_handler_registration.py::test_registered_custom_handler_resolves_one_exact_directed_transformation", "tests/test_handler_registration.py::test_registered_handler_rejects_declared_edge_without_concrete_transform"),
+    "T-07-16-03": ("tests/test_migration_cutover.py::test_migration_executes_one_handler_transform_and_publishes_destination_manifest_identity", "tests/test_migration_cutover.py::test_transformed_candidate_checkpointed_metadata_recovers_within_limits_and_uncheckpointed_orphan_remains_invisible"),
+    "T-07-16-04": ("tests/test_migration_cutover.py::test_migration_executes_one_handler_transform_and_publishes_destination_manifest_identity",),
+    "T-07-16-05": ("tests/test_migration_cutover.py::test_migration_executes_one_handler_transform_and_publishes_destination_manifest_identity", "tests/test_migration_cutover.py::test_transformed_candidate_checkpointed_metadata_recovers_within_limits_and_uncheckpointed_orphan_remains_invisible"),
+    "T-07-17-01": ("tests/test_migration_plan_contract.py::test_machine_plan_digest_binds_sensitive_catalog_and_manifest_without_serializing_them",),
+    "T-07-17-02": ("tests/test_migration_run_evidence.py::test_execution_rereads_authenticates_and_rejects_plan_bound_manifest_or_catalog_drift",),
+    "T-07-17-03": ("tests/test_migration_run_evidence.py::test_execution_rereads_authenticates_and_rejects_plan_bound_manifest_or_catalog_drift",),
+    "T-07-17-04": ("tests/test_migration_run_evidence.py::test_execution_rereads_authenticates_and_rejects_plan_bound_manifest_or_catalog_drift",),
+    "T-07-17-05": ("tests/test_migration_run_evidence.py::test_execution_rereads_authenticates_and_rejects_plan_bound_manifest_or_catalog_drift",),
+    "T-07-17-SC": ("tests/test_phase7_contract_verifier.py::test_fixed_gap_supply_chain_threats_map_to_frozen_command_contracts",),
+    "T-07-18-01": ("tests/test_phase7_contract_verifier.py::test_fixed_manifest_requires_exact_path_and_test_name_selectors",),
+    "T-07-18-02": ("tests/test_phase7_contract_verifier.py::test_source_mutation_cannot_drop_a_fixed_test_node",),
+    "T-07-18-03": ("tests/test_phase7_contract_verifier.py::test_fixed_manifest_requires_exact_path_and_test_name_selectors",),
+    "T-07-18-04": ("tests/test_phase7_contract_verifier.py::test_fixed_manifest_requires_exact_path_and_test_name_selectors",),
+    "T-07-18-05": ("tests/test_phase7_contract_verifier.py::test_fixed_manifest_requires_exact_path_and_test_name_selectors",),
+    "T-07-18-SC": ("tests/test_phase7_contract_verifier.py::test_fixed_gap_supply_chain_threats_map_to_frozen_command_contracts",),
+    "T-07-19-01": ("tests/test_phase7_contract_verifier.py::test_main_never_renders_failed_requirement_as_pass",),
+    "T-07-19-02": ("tests/test_phase7_contract_verifier.py::test_main_never_renders_failed_requirement_as_pass",),
+    "T-07-19-03": ("tests/test_phase7_contract_verifier.py::test_main_never_renders_failed_requirement_as_pass",),
+    "T-07-19-04": ("tests/test_phase7_contract_verifier.py::test_document_and_coverage_audits_reject_false_qualification_and_secrets",),
+    "T-07-19-05": ("tests/test_phase7_contract_verifier.py::test_document_and_coverage_audits_reject_false_qualification_and_secrets",),
+    "T-07-19-SC": ("tests/test_phase7_contract_verifier.py::test_fixed_gap_supply_chain_threats_map_to_frozen_command_contracts",),
 }
 
 FLAGGED_ASSUMPTION_NODES = {
-    "MIGR-03": ("tests/test_migration_inspection.py",),
-    "MIGR-04": ("tests/test_migration_cutover.py",),
-    "MIGR-05": ("tests/test_migration_run_evidence.py",),
-    "MIGR-06": ("tests/test_rebuild_workflow.py",),
+    "A-MIGR03": ("tests/test_migration_plan_contract.py::test_machine_plan_digest_binds_sensitive_catalog_and_manifest_without_serializing_them", "tests/test_migration_run_evidence.py::test_execution_rereads_authenticates_and_rejects_plan_bound_manifest_or_catalog_drift"),
+    "A-MIGR04": ("tests/test_migration_plan_contract.py::test_compatibility_edge_requires_exact_destination_dimensions", "tests/test_handler_registration.py::test_registered_custom_handler_resolves_one_exact_directed_transformation", "tests/test_migration_cutover.py::test_transformed_candidate_checkpointed_metadata_recovers_within_limits_and_uncheckpointed_orphan_remains_invisible"),
+    "A-MIGR05": ("tests/test_migration_cutover.py::test_resume_and_abort_staging_use_only_authority_attributed_batches", "tests/test_blob_store_atomic_lifecycle.py::test_blobstore_maintenance_canonical_put_replays_projection_free_receipt_after_response_loss"),
+    "A-MIGR06": ("tests/test_rebuild_workflow.py::test_projection_equipped_rebuild_replays_canonical_receipt_without_preacceptance_or_duplicate_derived_work", "tests/test_handler_registration.py::test_registered_custom_handler_resolves_one_exact_directed_transformation"),
 }
 
 PLAN01_PROHIBITIONS = (
@@ -233,12 +313,44 @@ PLAN01_PROHIBITIONS = (
     "No unbounded inventory/evidence or Phase 8 live PostgreSQL/AWS S3/performance qualification claim may enter Phase 7.",
 )
 
+PLAN01_PROHIBITION_NODES = {
+    PLAN01_PROHIBITIONS[0]: (
+        "tests/test_migration_public_contract.py::test_ordinary_construction_exposes_no_migration_switch_or_cli",
+    ),
+    PLAN01_PROHIBITIONS[1]: (
+        "tests/test_migration_cutover.py::test_candidate_and_evidence_never_authorize_activation",
+        "tests/test_migration_cutover.py::test_uncheckpointed_candidate_orphan_remains_invisible_unadopted_and_outside_exact_cleanup",
+    ),
+    PLAN01_PROHIBITIONS[2]: (
+        "tests/test_phase7_contract_verifier.py::test_architecture_audit_rejects_each_executable_prohibition",
+    ),
+    PLAN01_PROHIBITIONS[3]: (
+        "tests/test_migration_inspection.py::test_historical_path_is_rebuild_only_without_writing",
+        "tests/test_handler_registration.py::test_invalid_transformation_edges_are_rejected_without_global_fallback",
+    ),
+    PLAN01_PROHIBITIONS[4]: (
+        "tests/test_migration_cutover.py::test_uncheckpointed_candidate_orphan_remains_invisible_unadopted_and_outside_exact_cleanup",
+    ),
+    PLAN01_PROHIBITIONS[5]: (
+        "tests/test_migration_run_evidence.py::test_resume_refuses_mismatched_output_or_stale_source_without_adoption",
+    ),
+    PLAN01_PROHIBITIONS[6]: (
+        "tests/test_migration_plan_contract.py::test_machine_plan_digest_binds_sensitive_catalog_and_manifest_without_serializing_them",
+        "tests/test_migration_run_evidence.py::test_evidence_never_renders_or_logs_key_material",
+    ),
+    PLAN01_PROHIBITIONS[7]: (
+        "tests/test_phase7_contract_verifier.py::test_document_and_coverage_audits_reject_false_qualification_and_secrets",
+    ),
+}
+
 PHASE7_RUFF_PATHS = (
     "src/cacheness/error_handling.py",
     "src/cacheness/handlers.py",
     "src/cacheness/interfaces.py",
     "src/cacheness/storage/__init__.py",
     "src/cacheness/storage/blob_store.py",
+    "src/cacheness/storage/lifecycle.py",
+    "src/cacheness/storage/lifecycle_authority.py",
     "src/cacheness/storage/memory_lifecycle_authority.py",
     "src/cacheness/storage/migration.py",
     "src/cacheness/storage/migration_authority.py",
@@ -315,6 +427,134 @@ def validate_paths(root: Path, paths: Iterable[str]) -> tuple[str, ...]:
     return tuple(errors)
 
 
+def _parse_selector(selector: str) -> tuple[str, str] | None:
+    """Return a safe repository-relative pytest selector or ``None``."""
+    if selector.count("::") < 1:
+        return None
+    path, symbol = selector.split("::", maxsplit=1)
+    candidate = PurePosixPath(path)
+    if (
+        not path.startswith("tests/")
+        or candidate.is_absolute()
+        or ".." in candidate.parts
+        or not symbol
+        or any(not part.isidentifier() for part in symbol.split("::"))
+    ):
+        return None
+    return candidate.as_posix(), symbol
+
+
+def _module_symbols(path: Path) -> frozenset[str]:
+    """Read pytest-style module and class test names without executing it."""
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    symbols: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            symbols.add(node.name)
+        elif isinstance(node, ast.ClassDef):
+            for member in node.body:
+                if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    symbols.add(f"{node.name}::{member.name}")
+    return frozenset(symbols)
+
+
+def _validate_selector_mapping(
+    root: Path,
+    label: str,
+    mapping: Mapping[str, Sequence[str]],
+    known_paths: frozenset[str],
+) -> tuple[str, ...]:
+    """Fail closed before pytest if a claim's exact evidence is malformed."""
+    errors: list[str] = []
+    symbol_cache: dict[str, frozenset[str]] = {}
+    for claim, selectors in mapping.items():
+        if not selectors:
+            errors.append(f"{label} mapping has no executable evidence: {claim}")
+            continue
+        if len(selectors) != len(set(selectors)):
+            errors.append(f"{label} mapping has duplicate exact selector: {claim}")
+        for selector in selectors:
+            parsed = _parse_selector(selector)
+            if parsed is None:
+                errors.append(f"{label} mapping has malformed selector: {claim}: {selector}")
+                continue
+            path, symbol = parsed
+            if path not in known_paths:
+                errors.append(
+                    f"{label} mapping references non-manifest node: {claim}: {selector}"
+                )
+                continue
+            try:
+                symbols = symbol_cache.setdefault(path, _module_symbols(root / path))
+            except (OSError, SyntaxError) as error:
+                errors.append(
+                    f"{label} mapping cannot inspect selector: {claim}: {selector}: {error}"
+                )
+                continue
+            if symbol not in symbols:
+                errors.append(
+                    f"{label} mapping references missing test selector: {claim}: {selector}"
+                )
+    return tuple(errors)
+
+
+def _plan_threat_ids(path: Path) -> tuple[str, ...]:
+    """Parse one plan's threat table without interpreting prose outside it."""
+    text = path.read_text(encoding="utf-8")
+    match = re.search(r"<threat_model>(.*?)</threat_model>", text, re.DOTALL)
+    if match is None:
+        raise ValueError("missing threat model")
+    return tuple(
+        re.findall(r"^\|\s*(T-07-[A-Za-z0-9-]+)\s*\|", match.group(1), re.MULTILINE)
+    )
+
+
+def validate_gap_plan_threat_inventory(root: Path) -> tuple[str, ...]:
+    """Require the eight gap plans to retain their exact threat ownership."""
+    errors: list[str] = []
+    observed_all: list[str] = []
+    for relative_path, expected in GAP_PLAN_THREAT_OWNERS.items():
+        try:
+            observed = _plan_threat_ids(root / relative_path)
+        except (OSError, ValueError) as error:
+            errors.append(f"gap threat inventory unreadable: {relative_path}: {error}")
+            continue
+        observed_all.extend(observed)
+        duplicate_ids = sorted(threat_id for threat_id in set(observed) if observed.count(threat_id) > 1)
+        for threat_id in duplicate_ids:
+            errors.append(f"gap threat inventory duplicate: {relative_path}: {threat_id}")
+        for threat_id in expected:
+            if threat_id not in observed:
+                errors.append(f"gap threat inventory missing: {relative_path}: {threat_id}")
+        for threat_id in observed:
+            if threat_id not in expected:
+                errors.append(f"gap threat inventory unexpected: {relative_path}: {threat_id}")
+    for threat_id in sorted(set(observed_all)):
+        if observed_all.count(threat_id) > 1:
+            errors.append(f"gap threat inventory has multiple owners: {threat_id}")
+    if tuple(sorted(GAP_PLAN_THREAT_IDS)) != tuple(sorted(set(GAP_PLAN_THREAT_IDS))):
+        errors.append("literal gap threat inventory has duplicate IDs")
+    return tuple(errors)
+
+
+def audit_gap_plan_command_contracts(root: Path) -> tuple[str, ...]:
+    """Keep fixed plan execution on checked-in frozen dependencies only."""
+    errors: list[str] = []
+    install_action = re.compile(r"\b(?:pip|uv|npm|pnpm|yarn|cargo)\s+(?:install|add|sync|lock)\b")
+    for relative_path in GAP_PLAN_THREAT_OWNERS:
+        try:
+            text = (root / relative_path).read_text(encoding="utf-8")
+        except OSError as error:
+            errors.append(f"gap command contract unreadable: {relative_path}: {error}")
+            continue
+        for command in re.findall(r"\buv run\b[^\n<`]*", text):
+            if "--frozen" not in command.split():
+                errors.append(f"gap command lacks --frozen: {relative_path}: {command.strip()}")
+        if install_action.search(text):
+            errors.append(f"gap plan contains package-install action: {relative_path}")
+    return tuple(errors)
+
+
 def validate_mapping_inventory(
     *,
     requirements: Mapping[str, Sequence[str]],
@@ -334,7 +574,7 @@ def validate_mapping_inventory(
     )
     errors.extend(
         _mapping_difference(
-            assumptions, MIGRATION_REQUIREMENT_NODES, "Flagged-assumption mapping"
+            assumptions, FLAGGED_ASSUMPTION_NODES, "Flagged-assumption mapping"
         )
     )
     if tuple(prohibitions) != PLAN01_PROHIBITIONS:
@@ -363,7 +603,7 @@ def validate_fixed_manifest(root: Path) -> tuple[str, ...]:
     if errors:
         return tuple(errors)
     errors.extend(validate_paths(root, (*PHASE7_PRODUCTION_PATHS, *PHASE7_TEST_NODES)))
-    errors.extend(validate_paths(root, (*PHASE7_PLAN_PATHS, PHASE7_CONTEXT_PATH)))
+    errors.extend(validate_paths(root, (*PHASE7_PLAN_PATHS, *PHASE7_CONTEXT_PATH)))
     errors.extend(
         validate_mapping_inventory(
             requirements=MIGRATION_REQUIREMENT_NODES,
@@ -373,19 +613,17 @@ def validate_fixed_manifest(root: Path) -> tuple[str, ...]:
             prohibitions=PLAN01_PROHIBITIONS,
         )
     )
+    errors.extend(validate_gap_plan_threat_inventory(root))
+    errors.extend(audit_gap_plan_command_contracts(root))
     known_nodes = frozenset(PHASE7_TEST_NODES)
     for label, mapping in (
         ("MIGR", MIGRATION_REQUIREMENT_NODES),
         ("D", DECISION_NODES),
         ("threat", SECURITY_THREAT_NODES),
         ("flagged assumption", FLAGGED_ASSUMPTION_NODES),
+        ("prohibition", PLAN01_PROHIBITION_NODES),
     ):
-        for item, nodes in mapping.items():
-            if not nodes:
-                errors.append(f"{label} mapping has no executable evidence: {item}")
-            for node in nodes:
-                if node not in known_nodes:
-                    errors.append(f"{label} mapping references non-manifest node: {item}: {node}")
+        errors.extend(_validate_selector_mapping(root, label, mapping, known_nodes))
     return tuple(errors)
 
 
@@ -486,6 +724,24 @@ def audit_phase7_text(text: str) -> tuple[str, ...]:
         findings.append("Phase 7 performance qualification claim")
     if re.search(r"(?:credential|secret|signing)[ _-]?path\s*=", normalized):
         findings.append("secret provider path appears in rendered text")
+    if (
+        "obstore" in normalized
+        and "conditional" in normalized
+        and "bounded-memory" in normalized
+        and re.search(r"claim|guarantee|is bounded-memory", normalized)
+    ):
+        findings.append("false obstore bounded-memory conditional-publication claim")
+    if (
+        "multipart" in normalized
+        and "copy" in normalized
+        and re.search(r"silent|automatic|selected", normalized)
+    ):
+        findings.append("silent multipart-copy publication policy claim")
+    if re.search(
+        r"(?:handlers? receive|expose.{0,40}handlers?).{0,80}(?:participant handle|managed locator)",
+        normalized,
+    ):
+        findings.append("handler exposure of participant handle or managed locator")
     return tuple(findings)
 
 
@@ -679,6 +935,27 @@ def _run_pytest(
     return True, f"{label}: {output}"
 
 
+def fixed_pytest_nodes(quick: bool) -> tuple[str, ...]:
+    """Return the ordered, de-duplicated exact evidence selectors for one mode."""
+    allowed_paths = frozenset(
+        PHASE7_QUICK_TEST_NODES if quick else PHASE7_TEST_NODES
+    )
+    nodes: list[str] = []
+    for mapping in (
+        MIGRATION_REQUIREMENT_NODES,
+        DECISION_NODES,
+        SECURITY_THREAT_NODES,
+        FLAGGED_ASSUMPTION_NODES,
+        PLAN01_PROHIBITION_NODES,
+    ):
+        for selectors in mapping.values():
+            for selector in selectors:
+                parsed = _parse_selector(selector)
+                if parsed is not None and parsed[0] in allowed_paths and selector not in nodes:
+                    nodes.append(selector)
+    return tuple(nodes)
+
+
 def _run_ruff(root: Path) -> tuple[bool, str]:
     """Lint only the reviewed Phase 7 Python surface; no baseline is hidden."""
     command = [sys.executable, "-m", "ruff", "check", *PHASE7_RUFF_PATHS]
@@ -751,7 +1028,7 @@ def verify_repository(root: Path, quick: bool) -> tuple[bool, tuple[str, ...]]:
     except OSError as error:
         errors.append(f"Phase 7 context audit unreadable: {error}")
     if not errors:
-        nodes = PHASE7_QUICK_TEST_NODES if quick else PHASE7_TEST_NODES
+        nodes = fixed_pytest_nodes(quick)
         passed, evidence = _run_pytest(root, nodes, "fixed Phase 7 behavioral inventory")
         if not passed:
             errors.append(evidence)
