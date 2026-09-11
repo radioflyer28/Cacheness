@@ -252,6 +252,7 @@ def test_blob_store_public_initialize_provisions_a_fresh_postgresql_authority(
     finally:
         store.close()
         authority.close()
+        payload.close()
 
 
 def test_fresh_blobstore_initialize_rechecks_activated_offline_after_postgresql_identity_load(
@@ -376,6 +377,148 @@ def test_fresh_blobstore_initialize_rechecks_activated_offline_after_postgresql_
         store.close()
         authority.close()
         payload.close()
+
+
+def test_postgresql_preflight_mutation_checks_persisted_worker_fence_after_open() -> None:
+    """Preflight reloads remote authority state before admitting an ordinary worker."""
+    from cacheness.storage.backends.postgresql_lifecycle_authority import (
+        POSTGRESQL_AUTHORITY_CAPABILITY,
+        POSTGRESQL_AUTHORITY_SCHEMA_VERSION,
+        PostgresqlLifecycleAuthority,
+    )
+
+    required_tables = [
+        ("authority_meta",),
+        ("entry_lineage",),
+        ("entries",),
+        ("mutations",),
+        ("cleanup_debt",),
+        ("clear_runs",),
+        ("clear_targets",),
+        ("reconciliation_runs",),
+        ("reconciliation_actions",),
+        ("migration_store_entries",),
+    ]
+    required_constraints = [
+        ("authority_meta_singleton_check",),
+        ("mutations_operation_id_key",),
+        ("mutations_mutation_id_key",),
+        ("cleanup_debt_operation_locator_role_key",),
+        ("clear_targets_run_id_key_key",),
+        ("reconciliation_actions_run_id_source_action_id_key",),
+        ("migration_store_entries_run_id_selection_key_key",),
+    ]
+    factory = _Factory(
+        scripts=[
+            [
+                (
+                    POSTGRESQL_AUTHORITY_SCHEMA_VERSION,
+                    "persisted-store",
+                    POSTGRESQL_AUTHORITY_CAPABILITY,
+                ),
+                required_tables,
+                required_constraints,
+            ],
+            [
+                (
+                    7,
+                    "run-remote-cutover",
+                    "a" * 64,
+                    "b" * 64,
+                    7,
+                    8,
+                    AuthorityPublicationState.ACTIVATED_OFFLINE.value,
+                    "candidate",
+                    True,
+                )
+            ],
+        ]
+    )
+    authority = PostgresqlLifecycleAuthority(factory, schema="phase7_authority")
+
+    with pytest.raises(CacheBlobMigrationOfflineDecisionRequiredError):
+        authority.preflight_mutation()
+
+    assert authority.store_identity == "persisted-store"
+    assert factory.calls == 2
+
+
+@pytest.mark.parametrize(
+    ("state_row", "expected_error"),
+    [
+        pytest.param(
+            (7, None, None, None, None, None, "idle", "source", False),
+            None,
+            id="idle",
+        ),
+        pytest.param(
+            (8, "run-remote-cutover", "a" * 64, "b" * 64, 7, 8, "active", "candidate", False),
+            None,
+            id="active",
+        ),
+        pytest.param(
+            ("invalid", None, None, None, None, None, "idle", "source", False),
+            CacheBlobMigrationRequiredError,
+            id="malformed",
+        ),
+    ],
+)
+def test_postgresql_preflight_mutation_preserves_worker_states_and_fails_closed(
+    state_row: tuple[object, ...],
+    expected_error: type[Exception] | None,
+) -> None:
+    """Preflight permits persisted ordinary states and preserves typed corruption errors."""
+    from cacheness.storage.backends.postgresql_lifecycle_authority import (
+        POSTGRESQL_AUTHORITY_CAPABILITY,
+        POSTGRESQL_AUTHORITY_SCHEMA_VERSION,
+        PostgresqlLifecycleAuthority,
+    )
+
+    required_tables = [
+        ("authority_meta",),
+        ("entry_lineage",),
+        ("entries",),
+        ("mutations",),
+        ("cleanup_debt",),
+        ("clear_runs",),
+        ("clear_targets",),
+        ("reconciliation_runs",),
+        ("reconciliation_actions",),
+        ("migration_store_entries",),
+    ]
+    required_constraints = [
+        ("authority_meta_singleton_check",),
+        ("mutations_operation_id_key",),
+        ("mutations_mutation_id_key",),
+        ("cleanup_debt_operation_locator_role_key",),
+        ("clear_targets_run_id_key_key",),
+        ("reconciliation_actions_run_id_source_action_id_key",),
+        ("migration_store_entries_run_id_selection_key_key",),
+    ]
+    factory = _Factory(
+        scripts=[
+            [
+                (
+                    POSTGRESQL_AUTHORITY_SCHEMA_VERSION,
+                    "persisted-store",
+                    POSTGRESQL_AUTHORITY_CAPABILITY,
+                ),
+                required_tables,
+                required_constraints,
+            ],
+            [state_row],
+        ]
+    )
+    authority = PostgresqlLifecycleAuthority(factory, schema="phase7_authority")
+
+    if expected_error is None:
+        authority.preflight_mutation()
+    else:
+        with pytest.raises(expected_error):
+            authority.preflight_mutation()
+
+    assert authority.store_identity == "persisted-store"
+    assert factory.calls == 2
 
 
 def test_reopen_rejects_wrong_version_without_ddl_or_mutation() -> None:
