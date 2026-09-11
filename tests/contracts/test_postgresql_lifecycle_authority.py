@@ -227,6 +227,8 @@ def test_blob_store_public_initialize_provisions_a_fresh_postgresql_authority(
                 required_tables,
                 required_constraints,
             ],
+            [(0, None, None, None, None, None, "idle", "source", False)],
+            [(0, None, None, None, None, None, "idle", "source", False)],
         ]
     )
     authority = PostgresqlLifecycleAuthority(
@@ -244,7 +246,7 @@ def test_blob_store_public_initialize_provisions_a_fresh_postgresql_authority(
     )
     try:
         store.initialize()
-        assert factory.calls == 2
+        assert factory.calls == 4
         first = [_query_text(query) for query, _ in factory.connections[0].executions]
         second = [_query_text(query) for query, _ in factory.connections[1].executions]
         assert any("create schema" in statement for statement in first)

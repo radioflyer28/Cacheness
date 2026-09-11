@@ -1325,6 +1325,7 @@ class PostgresqlLifecycleAuthority:
     def preflight_mutation(self) -> None:
         """Require explicit successful initialization before mutation work starts."""
         self.open()
+        self.require_ordinary_worker_access()
 
     @staticmethod
     def _matches(expected: EntryExpectation, observed: EntryExpectation) -> bool:
