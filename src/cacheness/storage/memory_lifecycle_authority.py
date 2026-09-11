@@ -580,6 +580,31 @@ class InMemoryLifecycleAuthority:
                 return ()
             return self._migration_candidates
 
+    def discard_verified_candidate(
+        self,
+        *,
+        receipt: VerifiedCandidateReceipt,
+        entries: tuple[AuthorityInventoryEntry, ...],
+    ) -> None:
+        """Clear one exact unactivated candidate after external retirement succeeds."""
+        if not isinstance(receipt, VerifiedCandidateReceipt) or not isinstance(entries, tuple):
+            raise TypeError("migration candidate receipt and entries must be immutable values")
+
+        def discard() -> None:
+            if (
+                self._migration_state is not AuthorityPublicationState.CANDIDATE
+                or self._migration_receipt != receipt
+                or self._migration_candidates != entries
+            ):
+                raise CacheBlobLifecycleConflictError(
+                    "Only the exact unactivated migration candidate may be discarded"
+                )
+            self._migration_receipt = None
+            self._migration_candidates = ()
+            self._migration_state = AuthorityPublicationState.IDLE
+
+        self._transition(discard)
+
     def publication_state(self) -> AuthorityPublicationState:
         """Return narrow maintenance status without admitting ordinary workers."""
         self._require_open()

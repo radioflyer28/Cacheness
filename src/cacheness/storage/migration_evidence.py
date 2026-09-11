@@ -41,6 +41,7 @@ _MAX_CANONICAL_NODES = 16_384
 _MAX_CANONICAL_ITEMS = 4_096
 _MAX_COMPLETED_STEPS = 16
 _MAX_CANDIDATE_BATCH_REFERENCES = 256
+_MAX_CLEANUP_DEBT_REFERENCES = _MAX_CANDIDATE_BATCH_REFERENCES
 _RUN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
 
 
@@ -171,13 +172,25 @@ _LEGAL_TRANSITIONS: Mapping[MaintenanceEvidenceState, frozenset[MaintenanceEvide
         }
     ),
     MaintenanceEvidenceState.STAGED: frozenset(
-        {MaintenanceEvidenceState.VERIFYING, MaintenanceEvidenceState.ABORTED}
+        {
+            MaintenanceEvidenceState.STAGING,
+            MaintenanceEvidenceState.VERIFYING,
+            MaintenanceEvidenceState.ABORTED,
+        }
     ),
     MaintenanceEvidenceState.VERIFYING: frozenset(
-        {MaintenanceEvidenceState.VERIFIED, MaintenanceEvidenceState.ABORTED}
+        {
+            MaintenanceEvidenceState.STAGING,
+            MaintenanceEvidenceState.VERIFIED,
+            MaintenanceEvidenceState.ABORTED,
+        }
     ),
     MaintenanceEvidenceState.VERIFIED: frozenset(
-        {MaintenanceEvidenceState.ACTIVATED, MaintenanceEvidenceState.ABORTED}
+        {
+            MaintenanceEvidenceState.STAGING,
+            MaintenanceEvidenceState.ACTIVATED,
+            MaintenanceEvidenceState.ABORTED,
+        }
     ),
     MaintenanceEvidenceState.REBUILDING: frozenset(
         {MaintenanceEvidenceState.REBUILD_STAGED, MaintenanceEvidenceState.ABORTED}
@@ -434,12 +447,16 @@ class MaintenanceRunEvidence:
             raise ValueError("candidate receipt disagrees with attributed progress")
         if self.activation_receipt is not None and self.candidate_receipt is None:
             raise ValueError("activation_receipt requires candidate_receipt")
-        for field_name, values in (
-            ("authority_receipts", self.authority_receipts),
-            ("cleanup_debt", self.cleanup_debt),
+        if (
+            not isinstance(self.authority_receipts, tuple)
+            or len(self.authority_receipts) > _MAX_COMPLETED_STEPS
         ):
-            if not isinstance(values, tuple) or len(values) > _MAX_COMPLETED_STEPS:
-                raise ValueError(f"{field_name} must be a bounded tuple")
+            raise ValueError("authority_receipts must be a bounded tuple")
+        if (
+            not isinstance(self.cleanup_debt, tuple)
+            or len(self.cleanup_debt) > _MAX_CLEANUP_DEBT_REFERENCES
+        ):
+            raise ValueError("cleanup_debt must be a bounded tuple")
         for value in (*self.authority_receipts, *self.cleanup_debt):
             _sha256(value, "maintenance receipt")
         if not isinstance(self.completed_output_digests, Mapping):

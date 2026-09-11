@@ -1877,6 +1877,53 @@ class SqliteLifecycleAuthority:
                     connection.execute("ROLLBACK")
                 raise
 
+    def discard_verified_candidate(
+        self,
+        *,
+        receipt: VerifiedCandidateReceipt,
+        entries: tuple[AuthorityInventoryEntry, ...],
+    ) -> None:
+        """Clear one exact unactivated candidate after external retirement succeeds."""
+        if not isinstance(receipt, VerifiedCandidateReceipt) or not isinstance(entries, tuple):
+            raise TypeError("migration candidate receipt and entries must be immutable values")
+
+        def discard(connection: sqlite3.Connection) -> None:
+            identity = self._inventory_identity(connection)
+            self._validate_verified_candidate(identity, receipt, entries)
+            state_row = self._publication_state_row(connection)
+            if (
+                AuthorityPublicationState(state_row[6]) is not AuthorityPublicationState.CANDIDATE
+                or state_row[1] != receipt.run_id
+                or state_row[2] != receipt.plan_digest
+                or state_row[3] != receipt.candidate_digest
+            ):
+                raise CacheBlobLifecycleConflictError(
+                    "Only the exact unactivated migration candidate may be discarded"
+                )
+            rows = connection.execute(
+                "SELECT key, generation, locator, manifest, manifest_digest "
+                "FROM migration_store_entries WHERE run_id = ? AND selection = 'candidate' "
+                "ORDER BY key",
+                (receipt.run_id,),
+            ).fetchall()
+            if self._candidate_entries_from_rows(rows) != entries:
+                raise CacheBlobLifecycleConflictError(
+                    "Migration candidate entries changed before discard"
+                )
+            connection.execute(
+                "DELETE FROM migration_store_entries WHERE run_id = ? AND selection = 'candidate'",
+                (receipt.run_id,),
+            )
+            connection.execute(
+                "UPDATE authority_state SET migration_run_id = NULL, migration_plan_digest = NULL, "
+                "migration_candidate_digest = NULL, migration_source_revision = NULL, "
+                "migration_activated_revision = NULL, migration_state = 'idle', "
+                "migration_active_selection = 'source', migration_rollback_eligible = 0 "
+                "WHERE singleton = 1",
+            )
+
+        self._transaction(discard)
+
     def activate_verified_candidate(
         self,
         *,

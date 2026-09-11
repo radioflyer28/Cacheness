@@ -1551,8 +1551,11 @@ class AbortReceipt:
             raise ValueError("abort receipt requires a non-empty run_id")
         if type(self.deleted_entries) is not int or self.deleted_entries < 0:
             raise ValueError("abort receipt deleted_entries must be non-negative")
-        if self.state is not MaintenanceEvidenceState.ABORTED:
-            raise ValueError("abort receipt must record aborted state")
+        if self.state not in {
+            MaintenanceEvidenceState.STAGING,
+            MaintenanceEvidenceState.ABORTED,
+        }:
+            raise ValueError("abort receipt must record staging or aborted state")
 
 
 @dataclass(frozen=True)
@@ -2634,10 +2637,35 @@ class OfflineMigrationService:
 
         candidates = list(self._authority_candidate_entries(plan))
         batch_references = list(current.candidate_batch_references)
-        if len(batch_references) != len(candidates):
+        observed_batches = tuple(
+            self._batch_receipt(plan, entry, ordinal)
+            for ordinal, entry in enumerate(candidates)
+        )
+        observed_references = tuple(batch.candidate_digest for batch in observed_batches)
+        if (
+            len(batch_references) > len(candidates)
+            or tuple(batch_references) != observed_references[: len(batch_references)]
+        ):
             raise CacheBlobMigrationEvidenceMismatchError(
                 "staging evidence and authority candidate progress disagree",
                 context={"operation": "migration.stage", "run_id": self.run_id},
+            )
+        if len(batch_references) != len(candidates):
+            batch_references = list(observed_references)
+            self._write_evidence(
+                self._new_evidence(
+                    state=MaintenanceEvidenceState.STAGING,
+                    plan_digest=plan.digest,
+                    source_identity=plan.source_identity,
+                    destination_identity=plan.destination_identity,
+                    completed_steps=("inspect", "plan"),
+                    candidate_batch_references=tuple(batch_references),
+                    candidate_checkpoint_revision=plan.destination_identity.revision,
+                    candidate_entry_count=len(candidates),
+                    candidate_byte_count=sum(entry.byte_size for entry in candidates),
+                    cleanup_debt=current.cleanup_debt,
+                    completed_output_digests={"plan": plan.digest},
+                )
             )
         expected = {assessment.entry.key: assessment for assessment in plan.assessments}
         seen_keys: set[str] = set()
@@ -2808,6 +2836,47 @@ class OfflineMigrationService:
                 context={"operation": "migration.resume", "run_id": self.run_id},
             )
         self._verify_candidate_outputs(candidates)
+        return candidates
+
+    def _attributed_staging_candidates(
+        self, evidence: MaintenanceRunEvidence, plan: MigrationPlan
+    ) -> tuple[AuthorityInventoryEntry, ...]:
+        """Load only exact candidate effects attributable to a STAGING run.
+
+        Candidate payload presence is deliberately not consulted.  An empty
+        authority result is valid only for evidence that records no completed
+        candidate batch, which keeps the pre-checkpoint orphan boundary
+        outside resume and abort authority.
+        """
+        candidates = self._authority_candidate_entries(plan)
+        if not candidates:
+            if (
+                evidence.candidate_batch_references
+                or evidence.candidate_checkpoint_revision is not None
+                or evidence.candidate_entry_count
+                or evidence.candidate_byte_count
+                or evidence.cleanup_debt
+            ):
+                raise CacheBlobMigrationEvidenceMismatchError(
+                    "staging evidence claims candidate effects absent from authority evidence",
+                    context={"operation": "migration.abort", "run_id": self.run_id},
+                )
+            return ()
+        batches = tuple(
+            self._batch_receipt(plan, entry, ordinal)
+            for ordinal, entry in enumerate(candidates)
+        )
+        if (
+            evidence.candidate_checkpoint_revision != plan.destination_identity.revision
+            or evidence.candidate_entry_count != len(candidates)
+            or evidence.candidate_byte_count != sum(entry.byte_size for entry in candidates)
+            or evidence.candidate_batch_references
+            != tuple(batch.candidate_digest for batch in batches)
+        ):
+            raise CacheBlobMigrationEvidenceMismatchError(
+                "staging candidate batches do not match authority evidence",
+                context={"operation": "migration.abort", "run_id": self.run_id},
+            )
         return candidates
 
     def _verify_candidate_outputs(
@@ -3195,11 +3264,12 @@ class OfflineMigrationService:
                     "aborted maintenance evidence does not bind the supplied plan",
                     context={"operation": "migration.abort", "run_id": self.run_id},
                 )
-            deleted_entries = 0 if evidence.candidate_receipt is None else evidence.candidate_receipt.entry_count
+            deleted_entries = evidence.candidate_entry_count
             return AbortReceipt(run_id=self.run_id, deleted_entries=deleted_entries)
         if evidence.state not in {
             MaintenanceEvidenceState.INSPECTED,
             MaintenanceEvidenceState.PLANNED,
+            MaintenanceEvidenceState.STAGING,
             MaintenanceEvidenceState.STAGED,
             MaintenanceEvidenceState.VERIFYING,
             MaintenanceEvidenceState.VERIFIED,
@@ -3211,18 +3281,69 @@ class OfflineMigrationService:
         self._validate_plan(plan)
         evidence = self._expect_evidence(evidence.state, plan_digest=plan.digest)
         candidates = (
-            ()
-            if evidence.candidate_receipt is None
+            self._attributed_staging_candidates(evidence, plan)
+            if evidence.state is MaintenanceEvidenceState.STAGING
             else self._candidate_from_evidence(evidence, plan)
         )
-        try:
-            for candidate in candidates:
+        cleanup_debt: list[str] = []
+        for candidate in candidates:
+            retirement = self._retirement_digest(candidate)
+            try:
+                manifest = self._authenticated_manifest(candidate.manifest, role="candidate")
+                destination_io = self.destination._materialize_authority_store()
+                try:
+                    with destination_io.open_snapshot(candidate.locator, {}) as snapshot:
+                        payload = snapshot.path.read_bytes()
+                except FileNotFoundError:
+                    continue
+                except OSError:
+                    cleanup_debt.append(retirement)
+                    continue
+                if (
+                    manifest.key != candidate.key
+                    or manifest.generation != candidate.generation
+                    or manifest.locator != candidate.locator
+                    or manifest.digest != candidate.payload_digest
+                    or manifest.byte_size != candidate.byte_size
+                    or hashlib.sha256(payload).hexdigest() != candidate.payload_digest
+                    or len(payload) != candidate.byte_size
+                ):
+                    cleanup_debt.append(retirement)
+                    continue
                 self.destination.delete_migration_payload(candidate.locator)
-        except Exception as exc:
-            raise CacheBlobMigrationEvidenceError(
-                "abort could not retire an exact run-owned candidate",
-                context={"operation": "migration.abort", "run_id": self.run_id},
-            ) from exc
+            except (OSError, ValueError):
+                cleanup_debt.append(retirement)
+        cleanup_debt = list(dict.fromkeys(cleanup_debt))
+        if cleanup_debt:
+            self._write_evidence(
+                self._new_evidence(
+                    state=MaintenanceEvidenceState.STAGING,
+                    plan_digest=plan.digest,
+                    source_identity=plan.source_identity,
+                    destination_identity=plan.destination_identity,
+                    completed_steps=evidence.completed_steps,
+                    candidate_receipt=evidence.candidate_receipt,
+                    **self._candidate_progress(evidence),
+                    activation_receipt=evidence.activation_receipt,
+                    authority_receipts=evidence.authority_receipts,
+                    cleanup_debt=tuple(cleanup_debt),
+                    completed_output_digests=evidence.completed_output_digests,
+                )
+            )
+            return AbortReceipt(
+                run_id=self.run_id,
+                deleted_entries=len(candidates),
+                state=MaintenanceEvidenceState.STAGING,
+            )
+        if candidates:
+            receipt = self._candidate_receipt(plan, candidates)
+            discard = getattr(self._destination_authority, "discard_verified_candidate", None)
+            if not callable(discard):
+                raise CacheBlobMigrationEvidenceMismatchError(
+                    "destination authority cannot retire an unactivated candidate",
+                    context={"operation": "migration.abort", "run_id": self.run_id},
+                )
+            discard(receipt=receipt, entries=candidates)
         abort_digest = hashlib.sha256(
             f"{self.run_id}:{len(candidates)}".encode("utf-8")
         ).hexdigest()
@@ -3237,7 +3358,7 @@ class OfflineMigrationService:
                 **self._candidate_progress(evidence),
                 activation_receipt=evidence.activation_receipt,
                 authority_receipts=evidence.authority_receipts,
-                cleanup_debt=evidence.cleanup_debt,
+                cleanup_debt=(),
                 completed_output_digests={
                     **evidence.completed_output_digests,
                     "abort": abort_digest,

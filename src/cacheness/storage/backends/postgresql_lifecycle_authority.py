@@ -843,6 +843,63 @@ class PostgresqlLifecycleAuthority:
 
         return self._read_only("candidate_entries_for_run", read)
 
+    def discard_verified_candidate(
+        self,
+        *,
+        receipt: VerifiedCandidateReceipt,
+        entries: tuple[AuthorityInventoryEntry, ...],
+    ) -> None:
+        """Clear one exact unactivated candidate after external retirement succeeds."""
+        if not isinstance(receipt, VerifiedCandidateReceipt) or not isinstance(entries, tuple):
+            raise TypeError("migration candidate receipt and entries must be immutable values")
+
+        def discard(cursor: Any) -> None:
+            identity = self._inventory_identity(cursor)
+            self._validate_verified_candidate(identity, receipt, entries)
+            state_row = self._publication_state_row(cursor, lock=True)
+            if (
+                AuthorityPublicationState(state_row[6]) is not AuthorityPublicationState.CANDIDATE
+                or state_row[1] != receipt.run_id
+                or state_row[2] != receipt.plan_digest
+                or state_row[3] != receipt.candidate_digest
+            ):
+                raise CacheBlobLifecycleConflictError(
+                    "Only the exact unactivated migration candidate may be discarded"
+                )
+            cursor.execute(
+                sql.SQL(
+                    "SELECT key, generation, locator, manifest, manifest_digest "
+                    "FROM {} WHERE run_id = %s AND selection = 'candidate' ORDER BY key"
+                ).format(self._table("migration_store_entries")),
+                (receipt.run_id,),
+            )
+            if self._candidate_entries_from_rows(cursor.fetchall()) != entries:
+                raise CacheBlobLifecycleConflictError(
+                    "Migration candidate entries changed before discard"
+                )
+            cursor.execute(
+                sql.SQL(
+                    "DELETE FROM {} WHERE run_id = %s AND selection = 'candidate'"
+                ).format(self._table("migration_store_entries")),
+                (receipt.run_id,),
+            )
+            cursor.execute(
+                sql.SQL(
+                    "UPDATE {} SET migration_run_id = NULL, migration_plan_digest = NULL, "
+                    "migration_candidate_digest = NULL, migration_source_revision = NULL, "
+                    "migration_activated_revision = NULL, migration_state = 'idle', "
+                    "migration_active_selection = 'source', migration_rollback_eligible = FALSE "
+                    "WHERE singleton = TRUE AND migration_run_id = %s AND migration_state = 'candidate'"
+                ).format(self._table("authority_meta")),
+                (receipt.run_id,),
+            )
+            if cursor.rowcount != 1:
+                raise CacheBlobLifecycleConflictError(
+                    "Migration candidate discard lost the authority selection"
+                )
+
+        self._transaction("discard_verified_candidate", discard)
+
     def activate_verified_candidate(
         self,
         *,
