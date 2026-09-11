@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 07
 current_phase_name: Explicit Migration and Rebuild Cutover
 status: executing
-stopped_at: Completed 07-12-PLAN.md
-last_updated: "2026-09-11T02:31:18.981Z"
+stopped_at: Completed 07-13-PLAN.md
+last_updated: "2026-09-11T05:32:09.600Z"
 last_activity: 2026-09-10
 last_activity_desc: Phase 07 execution started
-state_head: b693719b2f7a72901ebc6e968d9663710c853b09
+state_head: 676bb1f8fe30ddeeaba23e925fa1acb542d68a07
 progress:
   total_phases: 8
   completed_phases: 5
   total_plans: 100
-  completed_plans: 92
+  completed_plans: 93
 milestone_name: milestone
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-09-06)
 ## Current Position
 
 Phase: 07 (Explicit Migration and Rebuild Cutover) — EXECUTING
-Plan: 2 of 19
+Plan: 3 of 19
 Status: Ready to execute
 Last activity: 2026-09-10 — Phase 07 execution started
 
@@ -175,6 +175,7 @@ Phase 03 rows in this historical table include superseded attempts and do not de
 | Phase 07 P10 | 12m | 2 tasks | 7 files |
 | Phase 07 P11 | 27m | 2 tasks | 4 files |
 | Phase 07 P12 | 23min | 2 tasks | 8 files |
+| Phase 07-explicit-migration-and-rebuild-cutover P13 | 2h 57m | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -385,6 +386,8 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - [Phase 07]: Phase 7 final verification uses a fixed literal inventory; live PostgreSQL and AWS S3 remain NOT RUN / NOT QUALIFIED Phase 8 work.
 - [Phase 07]: The observed clear/delete concurrency conflict remains pre-existing evidence; no lifecycle coordination or storage race patch was added.
 - [Phase 07]: Migration resume and abort recover only exact authority-attributed candidate batches; pre-checkpoint immutable payloads remain invisible, unadopted, and outside guaranteed exact cleanup.
+- [Phase 07]: A pre-identity idle observation is only an early fast check; persisted PostgreSQL state must authorize worker readiness after identity load.
+- [Phase 07]: BlobStore initialization and direct PostgreSQL preflight reuse require_ordinary_worker_access instead of adding local coordination or a second authority.
 
 ### Pending Todos
 
@@ -415,6 +418,6 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 
 ## Session Continuity
 
-Last session: 2026-09-11T02:31:18.854Z
-Stopped at: Completed 07-12-PLAN.md
+Last session: 2026-09-11T05:32:09.472Z
+Stopped at: Completed 07-13-PLAN.md
 Resume file: None
