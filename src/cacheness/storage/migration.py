@@ -31,6 +31,7 @@ from cacheness.error_handling import (
 )
 
 from .catalog import STORE_FORMAT_VERSION
+from .integrity import sha256_and_size
 from .manifest import (
     CURRENT_MANIFEST_SCHEMA_VERSION,
     CURRENT_STORE_EPOCH,
@@ -1817,13 +1818,35 @@ class OfflineMigrationService:
 
     def _configured_destination_contract(
         self, manifest: BlobManifest
-    ) -> tuple[object, StoreVersionDimensions]:
+    ) -> tuple[object, StoreVersionDimensions, tuple[str, int]]:
         """Return the destination handler contract without inspecting payload bytes."""
         handler = self.destination.handlers.get_handler_by_type(manifest.handler_type)
         payload_version = getattr(handler, "payload_format_version", None)
-        if type(payload_version) is not int or payload_version < 1:
+        payload_format = getattr(handler, "payload_format", None)
+        if (
+            type(payload_version) is not int
+            or payload_version < 1
+            or not isinstance(payload_format, str)
+            or not payload_format
+        ):
             raise ValueError("destination handler declares an invalid payload contract")
-        return handler, StoreVersionDimensions(payload_format_version=payload_version)
+        supports_source = getattr(handler, "supports_payload_contract", None)
+        if (
+            payload_version == manifest.payload_format_version
+            and callable(supports_source)
+            and supports_source(manifest.payload_format, manifest.payload_format_version)
+        ):
+            target_identity = (
+                manifest.payload_format,
+                manifest.payload_format_version,
+            )
+        else:
+            target_identity = (payload_format, payload_version)
+        return (
+            handler,
+            StoreVersionDimensions(payload_format_version=target_identity[1]),
+            target_identity,
+        )
 
     def _matching_compatibility_edges(
         self,
@@ -1941,7 +1964,7 @@ class OfflineMigrationService:
                     if edge.source == manifest.versions
                 )
                 try:
-                    destination_handler, destination_versions = (
+                    _destination_handler, destination_versions, target_identity = (
                         self._configured_destination_contract(manifest)
                     )
                     matching_edges = self._matching_compatibility_edges(
@@ -1954,7 +1977,6 @@ class OfflineMigrationService:
                     )
                 except (ValueError, CacheManifestUnsupportedVersionError):
                     matching_edges = ()
-                    destination_handler = None
                 if len(matching_edges) != 1:
                     disposition = MigrationDisposition.REBUILDABLE
                     reason = (
@@ -1963,9 +1985,8 @@ class OfflineMigrationService:
                         else MigrationReason.SOURCE_MISMATCH
                     )
                 elif (
-                    manifest.payload_format == destination_handler.payload_format
-                    and manifest.payload_format_version
-                    == destination_handler.payload_format_version
+                    (manifest.payload_format, manifest.payload_format_version)
+                    == target_identity
                 ):
                     disposition = MigrationDisposition.MIGRATABLE
                     reason = MigrationReason.COMPATIBLE_EDGE
@@ -1975,8 +1996,8 @@ class OfflineMigrationService:
                             manifest.handler_type,
                             manifest.payload_format,
                             manifest.payload_format_version,
-                            destination_handler.payload_format,
-                            destination_handler.payload_format_version,
+                            target_identity[0],
+                            target_identity[1],
                         )
                     except (ValueError, CacheManifestUnsupportedVersionError):
                         disposition = MigrationDisposition.REBUILDABLE
@@ -2864,18 +2885,31 @@ class OfflineMigrationService:
                 continue
             manifest = self._authenticated_manifest(candidate.manifest, role="candidate")
             source = assessment.entry
+            source_manifest = self._authenticated_manifest(source.manifest, role="source")
+            _destination_handler, destination_versions, target_identity = (
+                self._configured_destination_contract(source_manifest)
+            )
             if (
                 candidate.generation != source.generation
-                or candidate.payload_digest != source.payload_digest
-                or candidate.byte_size != source.byte_size
                 or manifest.key != candidate.key
                 or manifest.generation != candidate.generation
                 or manifest.locator != candidate.locator
                 or manifest.digest != candidate.payload_digest
                 or manifest.byte_size != candidate.byte_size
+                or manifest.handler_type != source_manifest.handler_type
+                or (manifest.payload_format, manifest.payload_format_version)
+                != target_identity
+                or manifest.versions != destination_versions
+                or manifest.catalog_values != source_manifest.catalog_values
+                or manifest.catalog_presence != source_manifest.catalog_presence
+                or manifest.catalog_schema_id != source_manifest.catalog_schema_id
+                or manifest.catalog_schema_revision
+                != source_manifest.catalog_schema_revision
+                or manifest.catalog_schema_fingerprint
+                != source_manifest.catalog_schema_fingerprint
             ):
                 raise CacheBlobMigrationEvidenceMismatchError(
-                    "authority candidate descriptor does not bind the planned source entry",
+                    "authority candidate descriptor does not bind the planned destination contract",
                     context={"operation": "migration.resume", "run_id": self.run_id},
                 )
             ordered.append(candidate)
@@ -3007,57 +3041,147 @@ class OfflineMigrationService:
                 if snapshot.key in {entry.key for entry in candidates}:
                     continue
                 manifest = self._authenticated_manifest(snapshot.manifest, role="source")
+                _destination_handler, destination_versions, target_identity = (
+                    self._configured_destination_contract(manifest)
+                )
+                matching_edges = self._matching_compatibility_edges(
+                    manifest, destination_versions
+                )
+                if len(matching_edges) != 1:
+                    raise CacheManifestUnsupportedVersionError(
+                        "Migration source and destination contracts do not match one exact edge"
+                    )
                 source_io = self.source._materialize_authority_store()
+                destination_io = self.destination._materialize_authority_store()
+                target_format, target_version = target_identity
+                source_identity = (
+                    manifest.payload_format,
+                    manifest.payload_format_version,
+                )
+                target_identity = (target_format, target_version)
+                candidate_id = self._candidate_blob_id(manifest)
+                self._revalidate_identities(plan)
                 with source_io.open_snapshot(
                     manifest.locator, dict(manifest.handler_metadata)
                 ) as source_snapshot:
-                    payload = source_snapshot.path.read_bytes()
-                if (
-                    hashlib.sha256(payload).hexdigest() != manifest.digest
-                    or len(payload) != manifest.byte_size
-                ):
-                    raise ValueError("source payload fails authenticated integrity verification")
-                candidate_id = self._candidate_blob_id(manifest)
-                candidate_locator = self._candidate_locator(candidate_id)
-                self._revalidate_identities(plan)
-                destination_io = self.destination._materialize_authority_store()
-                remote_candidate_writer = getattr(destination_io, "write_migration_candidate", None)
-                if callable(remote_candidate_writer):
-                    remote_receipt = remote_candidate_writer(
-                        run_id=self.run_id,
-                        plan_digest=plan.digest,
-                        source_revision=plan.source_identity.revision,
-                        locator=candidate_locator,
-                        payload=payload,
-                        payload_digest=manifest.digest,
-                        byte_size=manifest.byte_size,
-                    )
-                    if (
-                        remote_receipt.run_id != self.run_id
-                        or remote_receipt.plan_digest != plan.digest
-                        or remote_receipt.source_revision != plan.source_identity.revision
-                        or remote_receipt.locator != candidate_locator
-                        or remote_receipt.payload_digest != manifest.digest
-                        or remote_receipt.byte_size != manifest.byte_size
-                    ):
-                        raise CacheBlobMigrationEvidenceMismatchError(
-                            "S3 migration candidate receipt does not bind this exact plan",
-                            context={"operation": "migration.stage", "run_id": self.run_id},
+                    source_digest, source_size = sha256_and_size(source_snapshot.path)
+                    if source_digest != manifest.digest or source_size != manifest.byte_size:
+                        raise ValueError(
+                            "source payload fails authenticated integrity verification"
                         )
-                    written_locator = remote_receipt.locator
-                else:
-                    written_locator = self.destination.payload_backend.write_blob(candidate_id, payload)
-                expected_written_locator = candidate_locator
-                if self.destination.topology.qualified_profile.pair == ("memory", "memory"):
-                    expected_written_locator = f"memory://{candidate_locator}"
-                if written_locator != expected_written_locator:
-                    raise CacheBlobMigrationEvidenceMismatchError(
-                        "candidate backend returned an unexpected locator",
-                        context={"operation": "migration.stage", "run_id": self.run_id},
-                    )
-                candidate_manifest = sign_current_manifest(
-                    replace(manifest, locator=candidate_locator), self._evidence_key
-                )
+                    if source_identity == target_identity:
+                        payload = source_snapshot.path.read_bytes()
+                        candidate_locator = self._candidate_locator(candidate_id)
+                        remote_candidate_writer = getattr(
+                            destination_io, "write_migration_candidate", None
+                        )
+                        if callable(remote_candidate_writer):
+                            remote_receipt = remote_candidate_writer(
+                                run_id=self.run_id,
+                                plan_digest=plan.digest,
+                                source_revision=plan.source_identity.revision,
+                                locator=candidate_locator,
+                                payload=payload,
+                                payload_digest=manifest.digest,
+                                byte_size=manifest.byte_size,
+                            )
+                            if (
+                                remote_receipt.run_id != self.run_id
+                                or remote_receipt.plan_digest != plan.digest
+                                or remote_receipt.source_revision
+                                != plan.source_identity.revision
+                                or remote_receipt.locator != candidate_locator
+                                or remote_receipt.payload_digest != manifest.digest
+                                or remote_receipt.byte_size != manifest.byte_size
+                            ):
+                                raise CacheBlobMigrationEvidenceMismatchError(
+                                    "S3 migration candidate receipt does not bind this exact plan",
+                                    context={
+                                        "operation": "migration.stage",
+                                        "run_id": self.run_id,
+                                    },
+                                )
+                            written_locator = remote_receipt.locator
+                        else:
+                            written_locator = self.destination.payload_backend.write_blob(
+                                candidate_id, payload
+                            )
+                        expected_written_locator = candidate_locator
+                        if self.destination.topology.qualified_profile.pair == (
+                            "memory",
+                            "memory",
+                        ):
+                            expected_written_locator = f"memory://{candidate_locator}"
+                        if written_locator != expected_written_locator:
+                            raise CacheBlobMigrationEvidenceMismatchError(
+                                "candidate backend returned an unexpected locator",
+                                context={"operation": "migration.stage", "run_id": self.run_id},
+                            )
+                        candidate_manifest = replace(manifest, locator=candidate_locator)
+                    else:
+                        handler, transformation = (
+                            self.source.handlers.resolve_payload_transformation(
+                                manifest.handler_type,
+                                manifest.payload_format,
+                                manifest.payload_format_version,
+                                target_format,
+                                target_version,
+                            )
+                        )
+                        result = handler.transform_payload(
+                            source_snapshot,
+                            transformation,
+                            destination_io=destination_io,
+                            key=candidate_id,
+                            config=self.destination.config,
+                        )
+                        if not isinstance(result, Mapping):
+                            raise ValueError("handler transform must return a guarded result mapping")
+                        actual_path = result.get("actual_path")
+                        file_size = result.get("file_size")
+                        payload_format = result.get("payload_format")
+                        payload_format_version = result.get("payload_format_version")
+                        handler_metadata = result.get("metadata")
+                        if (
+                            not isinstance(actual_path, (str, Path))
+                            or type(file_size) is not int
+                            or file_size < 0
+                            or not isinstance(payload_format, str)
+                            or not payload_format
+                            or type(payload_format_version) is not int
+                            or payload_format_version < 1
+                            or not isinstance(handler_metadata, Mapping)
+                        ):
+                            raise ValueError("handler transform returned an incomplete guarded result")
+                        if (payload_format, payload_format_version) != target_identity:
+                            raise CacheManifestUnsupportedVersionError(
+                                "handler transform result does not match its directed target"
+                            )
+                        with destination_io.open_snapshot(
+                            Path(actual_path), dict(handler_metadata)
+                        ) as target_snapshot:
+                            payload_digest, payload_size = sha256_and_size(target_snapshot.path)
+                        if payload_size != file_size:
+                            raise ValueError(
+                                "handler transform result size disagrees with its guarded payload"
+                            )
+                        candidate_locator = str(actual_path)
+                        candidate_manifest = replace(
+                            manifest,
+                            versions=replace(
+                                manifest.versions,
+                                payload_format_version=payload_format_version,
+                            ),
+                            locator=candidate_locator,
+                            payload_format=payload_format,
+                            digest=payload_digest,
+                            byte_size=payload_size,
+                            handler_metadata={
+                                **dict(handler_metadata),
+                                "storage_format": payload_format,
+                            },
+                        )
+                candidate_manifest = sign_current_manifest(candidate_manifest, self._evidence_key)
                 candidate_raw = candidate_manifest.canonical_bytes()
                 self._authenticated_manifest(candidate_raw, role="candidate")
                 candidate = AuthorityInventoryEntry(
@@ -3065,8 +3189,8 @@ class OfflineMigrationService:
                     generation=snapshot.generation,
                     locator=candidate_locator,
                     manifest=candidate_raw,
-                    payload_digest=manifest.digest,
-                    byte_size=manifest.byte_size,
+                    payload_digest=candidate_manifest.digest,
+                    byte_size=candidate_manifest.byte_size,
                 )
                 candidates.append(candidate)
                 receipt = self._candidate_receipt(plan, tuple(candidates))

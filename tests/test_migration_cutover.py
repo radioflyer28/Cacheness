@@ -23,7 +23,13 @@ from cacheness.storage.migration_authority import AuthorityPublicationState
 from cacheness.storage.migration_evidence import MaintenanceEvidenceState
 from cacheness.storage.projections import ProjectionController, ProjectionStatus
 from cacheness.storage.sqlite_lifecycle_authority import SQLITE_USER_VERSION
-from cacheness.storage.manifest import CURRENT_SQLITE_USER_VERSION
+from cacheness.storage.manifest import (
+    BlobManifest,
+    CURRENT_SQLITE_USER_VERSION,
+    StoreVersionDimensions,
+    verify_current_manifest,
+)
+from cacheness.interfaces import PayloadTransformationEdge
 
 
 class _SharedMemoryKeyProvider:
@@ -31,6 +37,82 @@ class _SharedMemoryKeyProvider:
 
     def get_key(self) -> bytes:
         return b"m" * 32
+
+
+class _MigrationMcapHandler:
+    """Path-based custom handler with one explicitly directed native upgrade."""
+
+    def __init__(self) -> None:
+        self.transform_calls = 0
+        self.published_paths: list[Path] = []
+
+    @property
+    def data_type(self) -> str:
+        return "migration-mcap"
+
+    @property
+    def payload_format(self) -> str:
+        return "mcap-v2"
+
+    @property
+    def payload_format_version(self) -> int:
+        return 2
+
+    def supports_payload_contract(
+        self, payload_format: str, payload_format_version: int
+    ) -> bool:
+        return (payload_format, payload_format_version) in {
+            ("mcap-v1", 1),
+            ("mcap-v2", 2),
+        }
+
+    def payload_transformation_edges(self) -> tuple[PayloadTransformationEdge, ...]:
+        return (PayloadTransformationEdge("mcap-v1", 1, "mcap-v2", 2),)
+
+    def can_handle(self, data, config=None) -> bool:
+        del config
+        return isinstance(data, dict) and "mcap_version" in data
+
+    def put(self, data, file_path: Path, config):
+        del config
+        version = data["mcap_version"]
+        payload = f"mcap-v{version}:{data['value']}".encode("utf-8")
+        actual_path = file_path.with_suffix(f".mcap{version}")
+        actual_path.write_bytes(payload)
+        return {
+            "actual_path": str(actual_path),
+            "file_size": len(payload),
+            "payload_format": f"mcap-v{version}",
+            "payload_format_version": version,
+            "metadata": {"writer_version": version},
+        }
+
+    def get(self, file_path: Path, metadata):
+        del metadata
+        version_and_value = file_path.read_text(encoding="utf-8").split(":", 1)
+        return {"mcap_version": int(version_and_value[0][-1]), "value": version_and_value[1]}
+
+    def get_file_extension(self, config) -> str:
+        del config
+        return ".mcap2"
+
+    def transform_payload(self, snapshot, edge, *, destination_io, key: str, config):
+        assert edge == PayloadTransformationEdge("mcap-v1", 1, "mcap-v2", 2)
+        self.transform_calls += 1
+        version_and_value = snapshot.path.read_text(encoding="utf-8").split(":", 1)
+        assert version_and_value[0] == "mcap-v1"
+        result = destination_io.put(
+            self,
+            {"mcap_version": 2, "value": version_and_value[1]},
+            key,
+            config,
+        )
+        result["metadata"] = {
+            **result["metadata"],
+            "runtime_transform": {"source": "mcap-v1", "target": "mcap-v2"},
+        }
+        self.published_paths.append(Path(result["actual_path"]))
+        return result
 
 
 def _memory_store(root: Path, key_provider: _SharedMemoryKeyProvider) -> BlobStore:
@@ -59,6 +141,34 @@ def _sqlite_store(root: Path, key_provider: _SharedMemoryKeyProvider) -> BlobSto
     )
     store.initialize()
     return store
+
+
+def _transforming_service(
+    source: BlobStore,
+    destination: BlobStore,
+    work_directory: Path,
+    *,
+    run_id: str,
+) -> tuple[OfflineMigrationService, _MigrationMcapHandler]:
+    """Configure one store-local custom format target for migration coverage."""
+    source_handler = _MigrationMcapHandler()
+    source.handlers.register_handler(source_handler, priority=0)
+    destination.handlers.register_handler(_MigrationMcapHandler(), priority=0)
+    service = OfflineMigrationService(
+        source=source,
+        destination=destination,
+        work_directory=work_directory,
+        run_id=run_id,
+        stopped_workers_acknowledged=True,
+        compatibility_edges=(
+            MigrationCompatibilityEdge(
+                source=StoreVersionDimensions(payload_format_version=1),
+                destination=StoreVersionDimensions(payload_format_version=2),
+                name="mcap-v1-to-v2",
+            ),
+        ),
+    )
+    return service, source_handler
 
 
 def _service(
@@ -800,6 +910,126 @@ def test_resume_and_abort_staging_use_only_authority_attributed_batches(
         assert completed_abort.state is MaintenanceEvidenceState.ABORTED
         assert destination.lifecycle_authority.publication_state() is AuthorityPublicationState.IDLE
         assert source.get("entry-b") == {"value": "entry-b"}
+    finally:
+        source.close()
+        destination.close()
+
+
+def test_migration_executes_one_handler_transform_and_publishes_destination_manifest_identity(
+    tmp_path: Path,
+) -> None:
+    """A changed native contract uses one handler transform before candidate signing."""
+    key_provider = _SharedMemoryKeyProvider()
+    source = _sqlite_store(tmp_path / "source", key_provider)
+    destination = _sqlite_store(tmp_path / "destination", key_provider)
+    try:
+        service, handler = _transforming_service(
+            source,
+            destination,
+            tmp_path / "maintenance",
+            run_id="transform-run",
+        )
+        source.put_entry({"mcap_version": 1, "value": "payload"}, key="entry")
+
+        plan = service.plan(service.inspect())
+        assert plan.assessments[0].disposition is MigrationDisposition.MIGRATABLE
+        assert plan.assessments[0].reason.value == "directed_edge"
+        service.stage(plan)
+
+        assert handler.transform_calls == 1
+        candidates = destination.lifecycle_authority.candidate_entries_for_run(
+            run_id=service.run_id
+        )
+        assert len(candidates) == 1
+        candidate_manifest = BlobManifest.from_canonical_bytes(candidates[0].manifest)
+        verify_current_manifest(candidate_manifest, key_provider.get_key())
+        assert candidate_manifest.payload_format == "mcap-v2"
+        assert candidate_manifest.payload_format_version == 2
+        assert candidate_manifest.versions.payload_format_version == 2
+        assert candidate_manifest.handler_metadata["runtime_transform"] == {
+            "source": "mcap-v1",
+            "target": "mcap-v2",
+        }
+        source_manifest = BlobManifest.from_canonical_bytes(
+            source.lifecycle_authority.read_entry("entry").manifest
+        )
+        assert candidate_manifest.digest != source_manifest.digest
+
+        service.verify(plan)
+        service.activate(plan)
+        destination.lifecycle_authority.finalize_verified_candidate(run_id=service.run_id)
+        assert destination.get("entry") == {"mcap_version": 2, "value": "payload"}
+    finally:
+        source.close()
+        destination.close()
+
+
+def test_transformed_candidate_checkpointed_metadata_recovers_within_limits_and_uncheckpointed_orphan_remains_invisible(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only checkpointed transform results resume or abort; an earlier orphan stays ignored."""
+    key_provider = _SharedMemoryKeyProvider()
+    source = _sqlite_store(tmp_path / "source", key_provider)
+    destination = _sqlite_store(tmp_path / "destination", key_provider)
+    try:
+        service, handler = _transforming_service(
+            source,
+            destination,
+            tmp_path / "maintenance",
+            run_id="transform-recovery-run",
+        )
+        source.put_entry({"mcap_version": 1, "value": "payload"}, key="entry")
+        plan = service.plan(service.inspect())
+        service.stage(plan)
+        assert handler.transform_calls == 1
+
+        resumed = service.resume(
+            plan, run_id=service.run_id, evidence_path=service.evidence_path
+        )
+        assert resumed.state is MaintenanceEvidenceState.VERIFIED
+        assert handler.transform_calls == 1
+        assert service.abort(plan).state is MaintenanceEvidenceState.ABORTED
+
+        orphan_source = _sqlite_store(tmp_path / "orphan-source", key_provider)
+        orphan_destination = _sqlite_store(tmp_path / "orphan-destination", key_provider)
+        try:
+            orphan_service, orphan_handler = _transforming_service(
+                orphan_source,
+                orphan_destination,
+                tmp_path / "orphan-maintenance",
+                run_id="transform-orphan-run",
+            )
+            orphan_source.put_entry({"mcap_version": 1, "value": "orphan"}, key="entry")
+            orphan_plan = orphan_service.plan(orphan_service.inspect())
+            authority = orphan_destination.lifecycle_authority
+            original_record = authority.record_verified_candidate
+
+            def fail_before_checkpoint(*, receipt, entries):
+                raise RuntimeError("simulated transformed post-publication checkpoint fault")
+
+            monkeypatch.setattr(authority, "record_verified_candidate", fail_before_checkpoint)
+            with pytest.raises(RuntimeError, match="post-publication"):
+                orphan_service.stage(orphan_plan)
+            orphan_paths = tuple(orphan_handler.published_paths)
+            assert orphan_paths
+            assert orphan_destination.get("entry") is None
+            assert authority.candidate_entries_for_run(run_id=orphan_service.run_id) == ()
+
+            monkeypatch.setattr(authority, "record_verified_candidate", original_record)
+            orphan_service.resume(
+                orphan_plan,
+                run_id=orphan_service.run_id,
+                evidence_path=orphan_service.evidence_path,
+            )
+            attributed = authority.candidate_entries_for_run(run_id=orphan_service.run_id)
+            assert orphan_handler.transform_calls == 2
+            assert {Path(entry.locator) for entry in attributed}.isdisjoint(orphan_paths)
+            assert orphan_destination.get("entry") is None
+            assert orphan_service.abort(orphan_plan).state is MaintenanceEvidenceState.ABORTED
+        finally:
+            orphan_source.close()
+            orphan_destination.close()
     finally:
         source.close()
         destination.close()
