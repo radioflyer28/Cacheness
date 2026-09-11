@@ -1977,18 +1977,11 @@ class OfflineMigrationService:
             or not payload_format
         ):
             raise ValueError("destination handler declares an invalid payload contract")
-        supports_source = getattr(handler, "supports_payload_contract", None)
-        if (
-            payload_version == manifest.payload_format_version
-            and callable(supports_source)
-            and supports_source(manifest.payload_format, manifest.payload_format_version)
-        ):
-            target_identity = (
-                manifest.payload_format,
-                manifest.payload_format_version,
-            )
-        else:
-            target_identity = (payload_format, payload_version)
+        # Source readability is checked separately while classifying the edge.
+        # It must never substitute a source identity for the destination
+        # handler's declared persisted contract: format and version are
+        # independently significant dimensions.
+        target_identity = (payload_format, payload_version)
         return (
             handler,
             StoreVersionDimensions(payload_format_version=target_identity[1]),
