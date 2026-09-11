@@ -2558,6 +2558,7 @@ class OfflineMigrationService:
         evidence: MaintenanceRunEvidence,
         *,
         require_complete: bool,
+        require_current: bool = True,
         source_assessments: tuple[MigrationEntryAssessment, ...] | None = None,
     ) -> tuple[BlobReceipt, ...]:
         """Authenticate the recorded prefix against exact authority results only."""
@@ -2607,17 +2608,21 @@ class OfflineMigrationService:
                     "rebuild receipt does not corroborate authority ownership",
                     context={"operation": "migration.rebuild_receipts", "run_id": self.run_id},
                 )
-            current = self.destination.get_entry_info(receipt.key)
-            if (
-                current is None
-                or current.generation != receipt.generation
-                or current.locator != receipt.locator
-                or current.expectation != receipt.expectation
-            ):
-                raise CacheBlobMigrationEvidenceMismatchError(
-                    "rebuild receipt no longer matches the exact destination entry",
-                    context={"operation": "migration.rebuild_receipts", "run_id": self.run_id},
-                )
+            if require_current:
+                current = self.destination.get_entry_info(receipt.key)
+                if (
+                    current is None
+                    or current.generation != receipt.generation
+                    or current.locator != receipt.locator
+                    or current.expectation != receipt.expectation
+                ):
+                    raise CacheBlobMigrationEvidenceMismatchError(
+                        "rebuild receipt no longer matches the exact destination entry",
+                        context={
+                            "operation": "migration.rebuild_receipts",
+                            "run_id": self.run_id,
+                        },
+                    )
         return receipts
 
     def _reach_rebuild_fault(self, boundary: str) -> None:
@@ -2708,52 +2713,84 @@ class OfflineMigrationService:
         for receipt in reversed(receipts):
             if receipt.operation_id in retired:
                 continue
+            debt = self._rebuild_cleanup_debt(receipt)
             try:
                 current = self.destination.get_entry_info(receipt.key)
-                if current is None:
-                    retired.append(receipt.operation_id)
-                elif (
-                    current.generation != receipt.generation
-                    or current.locator != receipt.locator
-                    or current.expectation != receipt.expectation
+                if current is not None and (
+                    current.generation == receipt.generation
+                    and current.locator == receipt.locator
+                    and current.expectation == receipt.expectation
                 ):
-                    cleanup_debt.append(self._rebuild_cleanup_debt(receipt))
+                    deleted = self.destination.delete(receipt.key, expected=receipt.expectation)
+                    if not deleted:
+                        self.destination.delete_migration_payload(receipt.locator)
                 else:
-                    self.destination.delete(receipt.key, expected=receipt.expectation)
-                    retired.append(receipt.operation_id)
-            except Exception:
-                cleanup_debt.append(self._rebuild_cleanup_debt(receipt))
+                    # A later owner of the logical key cannot authorize
+                    # current-key deletion. The immutable receipt locator is
+                    # still safe to delete or prove absent.
+                    self.destination.delete_migration_payload(receipt.locator)
+            except FileNotFoundError:
+                retired.append(receipt.operation_id)
+            except (OSError, CacheBlobBackendError):
+                if debt not in cleanup_debt:
+                    cleanup_debt.append(debt)
+            else:
+                retired.append(receipt.operation_id)
+                if debt in cleanup_debt:
+                    cleanup_debt.remove(debt)
             cleanup_debt = list(dict.fromkeys(cleanup_debt))
             retired = list(dict.fromkeys(retired))
-            evidence = self._write_evidence(
-                self._new_evidence(
-                    state=evidence.state,
-                    plan_digest=plan.digest,
-                    source_identity=plan.source_identity,
-                    destination_identity=plan.destination_identity,
-                    completed_steps=evidence.completed_steps,
-                    authority_receipts=evidence.authority_receipts,
-                    cleanup_debt=tuple(cleanup_debt),
-                    **self._rebuild_progress(
-                        evidence,
-                        retired_rebuild_operation_ids=tuple(retired),
-                    ),
-                    completed_output_digests=evidence.completed_output_digests,
-                )
+            evidence = self._checkpoint_rebuild_cleanup_progress(
+                plan,
+                evidence,
+                cleanup_debt=tuple(cleanup_debt),
+                retired_rebuild_operation_ids=tuple(retired),
             )
-        covered = set(retired)
-        covered.update(
-            debt.split(":", 2)[1]
-            for debt in cleanup_debt
-            if debt.startswith("rebuild:")
+        if cleanup_debt or {receipt.operation_id for receipt in receipts} != set(retired):
+            return
+        self._write_terminal_rebuild_abort(plan, evidence, receipts, tuple(retired))
+
+    def _checkpoint_rebuild_cleanup_progress(
+        self,
+        plan: MigrationPlan,
+        evidence: MaintenanceRunEvidence,
+        *,
+        cleanup_debt: tuple[str, ...],
+        retired_rebuild_operation_ids: tuple[str, ...],
+    ) -> MaintenanceRunEvidence:
+        """Persist one bounded cleanup outcome without creating lifecycle truth."""
+        return self._write_evidence(
+            self._new_evidence(
+                state=evidence.state,
+                plan_digest=plan.digest,
+                source_identity=plan.source_identity,
+                destination_identity=plan.destination_identity,
+                completed_steps=evidence.completed_steps,
+                authority_receipts=evidence.authority_receipts,
+                cleanup_debt=cleanup_debt,
+                **self._rebuild_progress(
+                    evidence,
+                    retired_rebuild_operation_ids=retired_rebuild_operation_ids,
+                ),
+                completed_output_digests=evidence.completed_output_digests,
+            )
         )
-        if any(receipt.operation_id not in covered for receipt in receipts):
+
+    def _write_terminal_rebuild_abort(
+        self,
+        plan: MigrationPlan,
+        evidence: MaintenanceRunEvidence,
+        receipts: tuple[BlobReceipt, ...],
+        retired_rebuild_operation_ids: tuple[str, ...],
+    ) -> MaintenanceRunEvidence:
+        """Write terminal evidence only after every receipt is settled."""
+        if {receipt.operation_id for receipt in receipts} != set(retired_rebuild_operation_ids):
             raise CacheBlobMigrationEvidenceMismatchError(
-                "rebuild cleanup lacks an attributed terminal outcome",
+                "rebuild cleanup cannot terminally abort before every receipt retires",
                 context={"operation": "migration.abort_rebuild", "run_id": self.run_id},
             )
         output_digest = self._rebuild_output_digest(receipts)
-        self._write_evidence(
+        return self._write_evidence(
             self._new_evidence(
                 state=MaintenanceEvidenceState.ABORTED,
                 plan_digest=plan.digest,
@@ -2761,10 +2798,10 @@ class OfflineMigrationService:
                 destination_identity=plan.destination_identity,
                 completed_steps=(*evidence.completed_steps, "abort_rebuild"),
                 authority_receipts=(*evidence.authority_receipts, output_digest),
-                cleanup_debt=tuple(cleanup_debt),
+                cleanup_debt=(),
                 **self._rebuild_progress(
                     evidence,
-                    retired_rebuild_operation_ids=tuple(retired),
+                    retired_rebuild_operation_ids=retired_rebuild_operation_ids,
                 ),
                 completed_output_digests={
                     **evidence.completed_output_digests,
@@ -2772,6 +2809,80 @@ class OfflineMigrationService:
                 },
             )
         )
+
+    def _settle_rebuild_cleanup_debt(
+        self,
+        plan: MigrationPlan,
+        evidence: MaintenanceRunEvidence,
+    ) -> MigrationStepResult:
+        """Retry only authenticated receipt-bound external cleanup effects."""
+        receipts = self._validate_rebuild_receipts(
+            plan,
+            evidence,
+            require_complete=False,
+            require_current=False,
+        )
+        receipt_by_debt = {
+            self._rebuild_cleanup_debt(receipt): receipt for receipt in receipts
+        }
+        cleanup_debt = list(evidence.cleanup_debt)
+        if (
+            not cleanup_debt
+            or len(set(cleanup_debt)) != len(cleanup_debt)
+            or any(debt not in receipt_by_debt for debt in cleanup_debt)
+        ):
+            raise CacheBlobMigrationEvidenceMismatchError(
+                "rebuild cleanup debt is not an exact authenticated receipt",
+                context={"operation": "migration.resume", "run_id": self.run_id},
+            )
+        retired = list(evidence.retired_rebuild_operation_ids)
+        operational_error: OSError | CacheBlobBackendError | None = None
+        for debt in tuple(cleanup_debt):
+            receipt = receipt_by_debt[debt]
+            if receipt.operation_id in retired:
+                raise CacheBlobMigrationEvidenceMismatchError(
+                    "rebuild cleanup debt duplicates an already retired receipt",
+                    context={"operation": "migration.resume", "run_id": self.run_id},
+                )
+            try:
+                current = self.destination.get_entry_info(receipt.key)
+                if current is None or (
+                    current.generation != receipt.generation
+                    or current.locator != receipt.locator
+                    or current.expectation != receipt.expectation
+                ):
+                    self.destination.delete_migration_payload(receipt.locator)
+                else:
+                    deleted = self.destination.delete(receipt.key, expected=receipt.expectation)
+                    if not deleted:
+                        self.destination.delete_migration_payload(receipt.locator)
+            except FileNotFoundError:
+                retired.append(receipt.operation_id)
+                cleanup_debt.remove(debt)
+            except (OSError, CacheBlobBackendError) as exc:
+                operational_error = operational_error or exc
+            else:
+                retired.append(receipt.operation_id)
+                cleanup_debt.remove(debt)
+            retired = list(dict.fromkeys(retired))
+            evidence = self._checkpoint_rebuild_cleanup_progress(
+                plan,
+                evidence,
+                cleanup_debt=tuple(cleanup_debt),
+                retired_rebuild_operation_ids=tuple(retired),
+            )
+        if cleanup_debt:
+            assert operational_error is not None
+            raise operational_error
+        if {receipt.operation_id for receipt in receipts} != set(retired):
+            raise CacheBlobMigrationEvidenceMismatchError(
+                "rebuild cleanup evidence lacks an exact settled receipt",
+                context={"operation": "migration.resume", "run_id": self.run_id},
+            )
+        self._write_terminal_rebuild_abort(
+            plan, evidence, receipts, tuple(retired)
+        )
+        return MigrationStepResult(MaintenanceEvidenceState.ABORTED, True, self.evidence_path)
 
     def stage_rebuild(self, plan: MigrationPlan) -> MigrationStepResult:
         """Rebuild every included value through verified source and destination APIs.
@@ -4222,6 +4333,8 @@ class OfflineMigrationService:
             )
         if plan.plan_kind is MigrationPlanKind.REBUILD:
             self._validate_rebuild_plan(plan)
+            if evidence.cleanup_debt:
+                return self._settle_rebuild_cleanup_debt(plan, evidence)
             if evidence.state is MaintenanceEvidenceState.REBUILDING:
                 self._validate_rebuild_receipts(plan, evidence, require_complete=False)
                 return self.stage_rebuild(plan)

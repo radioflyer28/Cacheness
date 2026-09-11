@@ -716,6 +716,13 @@ class MaintenanceRunEvidence:
             _bounded_text(operation_id, "retired rebuild operation identifier")
             if operation_id not in receipt_operation_ids:
                 raise ValueError("retired rebuild operation lacks an exact receipt")
+        if self.state is MaintenanceEvidenceState.ABORTED and receipt_operation_ids:
+            if self.cleanup_debt:
+                raise ValueError("ABORTED rebuild evidence cannot retain cleanup debt")
+            if set(self.retired_rebuild_operation_ids) != receipt_operation_ids:
+                raise ValueError(
+                    "ABORTED rebuild evidence requires every exact receipt retirement"
+                )
         if not isinstance(self.completed_output_digests, Mapping):
             raise ValueError("completed_output_digests must be a mapping")
         if set(self.completed_output_digests) - set(self.completed_steps):

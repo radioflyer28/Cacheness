@@ -89,7 +89,9 @@ class InMemoryLifecycleAuthority:
             raise TypeError("lifecycle_limits must be a LifecycleLimits instance")
         self._entries: dict[str, EntrySnapshot] = {}
         self._lineages: dict[str, int] = {}
-        self._mutations: dict[str, tuple[MutationSpec, VerificationProof | None, str]] = {}
+        self._mutations: dict[
+            str, tuple[MutationSpec, VerificationProof | None, str, EntrySnapshot | None]
+        ] = {}
         self._mutation_order: dict[str, int] = {}
         self._mutation_high_water = 0
         self._debts: dict[int, CleanupDebt] = {}
@@ -180,7 +182,7 @@ class InMemoryLifecycleAuthority:
                 raise CacheBlobLifecycleConflictError("Operation identifier is not reusable")
             if self._expectation(spec.key) != spec.expected:
                 raise CacheBlobLifecycleConflictError("Mutation expectation no longer matches authority")
-            self._mutations[spec.operation_id] = (spec, None, "prepared")
+            self._mutations[spec.operation_id] = (spec, None, "prepared", None)
             self._mutation_high_water += 1
             self._mutation_order[spec.operation_id] = self._mutation_high_water
             return PreparedMutation(spec.operation_id, spec)
@@ -195,7 +197,7 @@ class InMemoryLifecycleAuthority:
             mutation = self._mutations.get(operation_id)
             if mutation is None:
                 return None
-            spec, proof, state = mutation
+            spec, proof, state, _promoted_entry = mutation
             prepared = PreparedMutation(operation_id, spec)
             if state == "prepared":
                 return MutationReplay(prepared, state, proof)
@@ -218,7 +220,12 @@ class InMemoryLifecycleAuthority:
                 raise CacheBlobLifecycleConflictError("Prepared mutation cannot accept verification")
             if mutation[2] == "promoted":
                 return
-            self._mutations[prepared.operation_id] = (mutation[0], proof, "prepared")
+            self._mutations[prepared.operation_id] = (
+                mutation[0],
+                proof,
+                "prepared",
+                mutation[3],
+            )
 
         self._transition(record)
 
@@ -229,7 +236,7 @@ class InMemoryLifecycleAuthority:
         mutation = self._mutations.get(operation_id)
         if mutation is None:
             raise CacheBlobLifecycleConflictError("Mutation does not exist")
-        entry = self._entries.get(mutation[0].key)
+        entry = mutation[3]
         if entry is None:
             raise CacheBlobLifecycleConflictError("Promoted mutation has no committed entry")
         debts = tuple(debt for debt in self._debts.values() if debt.operation_id == operation_id)
@@ -240,7 +247,7 @@ class InMemoryLifecycleAuthority:
             mutation = self._mutations.get(prepared.operation_id)
             if mutation is None or mutation[0] != prepared.spec:
                 raise CacheBlobLifecycleConflictError("Mutation does not exist")
-            spec, proof, state = mutation
+            spec, proof, state, _promoted_entry = mutation
             if state == "promoted":
                 return self._promoted_result(prepared.operation_id)
             if proof is None:
@@ -273,7 +280,12 @@ class InMemoryLifecycleAuthority:
                 ),
             )
             self._entries[spec.key] = entry
-            self._mutations[prepared.operation_id] = (spec, proof, "promoted")
+            self._mutations[prepared.operation_id] = (
+                spec,
+                proof,
+                "promoted",
+                self._copy(entry),
+            )
             if previous is not None and previous.locator != spec.candidate_locator:
                 self._add_debt(
                     CleanupDebt(
@@ -311,6 +323,7 @@ class InMemoryLifecycleAuthority:
                     mutation[0],
                     mutation[1],
                     "aborted",
+                    mutation[3],
                 )
                 return
             del self._mutations[prepared.operation_id]
@@ -811,7 +824,9 @@ class InMemoryLifecycleAuthority:
         with self._lock:
             return tuple(
                 PreparedMutation(operation_id, spec)
-                for operation_id, (spec, _proof, state) in sorted(self._mutations.items())
+                for operation_id, (spec, _proof, state, _promoted_entry) in sorted(
+                    self._mutations.items()
+                )
                 if state == "prepared"
             )
 
@@ -987,7 +1002,7 @@ class InMemoryLifecycleAuthority:
             debt_stop = debts[-1][0] if debts else snapshot.debt_high_water
             works: list[ReconciliationWork] = []
             for row_id, operation_id in mutations:
-                spec, _proof, state = self._mutations[operation_id]
+                spec, _proof, state, _promoted_entry = self._mutations[operation_id]
                 if state == "prepared":
                     works.append(
                         ReconciliationWork(
