@@ -13,6 +13,7 @@ from cacheness.error_handling import (
     CacheBlobPayloadTamperedError,
 )
 from cacheness.storage import BackendRef, BlobStore, StoreTopology
+from cacheness.storage.catalog import CatalogField, CatalogQuery, CatalogSchema
 from cacheness.storage.migration import (
     MigrationCompatibilityEdge,
     MigrationPlanKind,
@@ -21,6 +22,7 @@ from cacheness.storage.migration import (
     RebuildExclusion,
 )
 from cacheness.storage.migration_evidence import MaintenanceEvidenceState
+from cacheness.storage.projections import ProjectionController
 
 
 class _SharedMemoryKeyProvider:
@@ -95,6 +97,7 @@ def _store(
     root: Path,
     provider: _SharedMemoryKeyProvider,
     handler: _McapHandler | None = None,
+    projections: tuple[object, ...] = (),
 ) -> BlobStore:
     """Create an initialized same-process store for rebuild-plan contracts."""
 
@@ -102,6 +105,7 @@ def _store(
         StoreTopology(
             payload=BackendRef(name="memory"),
             authority=BackendRef(name="memory"),
+            projections=projections,
         ),
         cache_dir=root,
         manifest_key_provider=provider,
@@ -129,6 +133,60 @@ def _service(
         stopped_workers_acknowledged=True,
         compatibility_edges=(MigrationCompatibilityEdge.current_to_current_for_test(),),
     )
+
+
+class _SimulatedProcessLoss(BaseException):
+    """Model a process boundary that skips in-process failure cleanup."""
+
+
+class _ProjectionCandidate:
+    """Separate derived sink used only by explicit offline projection rebuild."""
+
+    def __init__(self, owner: "_CountingProjectionSink") -> None:
+        self._owner = owner
+
+    def apply_projection_batch(self, _batch: object) -> None:
+        self._owner.attempts += 1
+
+    def save_projection_checkpoint(self, _checkpoint: object) -> None:
+        return None
+
+    def load_projection_checkpoint(self) -> None:
+        return None
+
+
+class _CountingProjectionSink:
+    """Record derived work separately from canonical rebuild publication."""
+
+    projection_name = "rebuild-derived"
+    projection_query = CatalogQuery()
+    projection_schema = CatalogSchema(
+        (CatalogField("kind", "string"),), schema_id="rebuild-derived"
+    )
+    topology_capabilities = {"projection_rebuild": True, "offline_rebuild": True}
+
+    def __init__(self) -> None:
+        self.attempts = 0
+
+    def apply_projection_batch(self, _batch: object) -> None:
+        self.attempts += 1
+
+    def save_projection_checkpoint(self, _checkpoint: object) -> None:
+        return None
+
+    def load_projection_checkpoint(self) -> None:
+        return None
+
+    def begin_isolated_rebuild(self) -> _ProjectionCandidate:
+        return _ProjectionCandidate(self)
+
+    def publish_isolated_rebuild(
+        self, _candidate: _ProjectionCandidate, _checkpoint: object
+    ) -> None:
+        return None
+
+    def discard_isolated_rebuild(self, _candidate: _ProjectionCandidate) -> None:
+        return None
 
 
 def test_rebuild_plan_defaults_to_every_entry_and_cannot_use_migration_stage(
@@ -335,6 +393,92 @@ def test_rebuild_discards_only_its_run_owned_destination_entries_after_batch_fai
         assert source.get("first") == _McapValue("first")
         assert source.get("second") == _McapValue("second")
         assert service.read_evidence().state is MaintenanceEvidenceState.ABORTED
+    finally:
+        source.close()
+        destination.close()
+
+
+def test_rebuild_response_loss_rederives_operation_id_and_replays_authority_receipt(
+    tmp_path: Path,
+) -> None:
+    """Rebuild progress is durably bound to one canonical lifecycle receipt."""
+
+    provider = _SharedMemoryKeyProvider()
+    source = _store(tmp_path / "source", provider)
+    destination = _store(tmp_path / "destination", provider)
+    try:
+        source.put_entry({"value": "recover"}, key="entry")
+        service = _service(source, destination, tmp_path / "maintenance")
+        plan = service.create_rebuild_plan(service.inspect())
+        service.confirm_rebuild(plan, confirmation=service.rebuild_confirmation(plan))
+
+        def lose_process(boundary: str) -> None:
+            if boundary == "rebuild.destination_committed_before_receipt_checkpoint":
+                raise _SimulatedProcessLoss("response lost after canonical rebuild commit")
+
+        service._rebuild_fault_hook = lose_process
+        with pytest.raises(_SimulatedProcessLoss, match="response lost"):
+            service.stage_rebuild(plan)
+
+        operation_id = service._rebuild_operation_id(plan, plan.included_entries[0], 0)
+        committed = destination.lifecycle_authority.read_mutation(operation_id)
+        assert committed is not None and committed.state == "promoted"
+        assert service.read_evidence().rebuild_receipt_batches == ()
+
+        restarted = _service(source, destination, tmp_path / "maintenance")
+        staged = restarted.resume(
+            plan, run_id=restarted.run_id, evidence_path=restarted.evidence_path
+        )
+        assert staged.state is MaintenanceEvidenceState.REBUILD_STAGED
+        receipt = restarted.read_evidence().rebuild_receipt_batches[0].receipts[0]
+        assert receipt.key == "entry"
+        assert receipt.operation_id == operation_id
+        assert committed.promotion is not None
+        assert receipt.generation == committed.promotion.entry.generation
+        assert receipt.projections == {}
+    finally:
+        source.close()
+        destination.close()
+
+
+def test_projection_equipped_rebuild_replays_canonical_receipt_without_preacceptance_or_duplicate_derived_work(
+    tmp_path: Path,
+) -> None:
+    """Canonical rebuild staging never runs a derived projection before acceptance."""
+
+    provider = _SharedMemoryKeyProvider()
+    source = _store(tmp_path / "source", provider)
+    projection = _CountingProjectionSink()
+    destination = _store(
+        tmp_path / "destination", provider, projections=(projection,)
+    )
+    try:
+        source.put_entry({"value": "canonical-only"}, key="entry")
+        service = _service(source, destination, tmp_path / "maintenance")
+        plan = service.create_rebuild_plan(service.inspect())
+        service.confirm_rebuild(plan, confirmation=service.rebuild_confirmation(plan))
+
+        service.stage_rebuild(plan)
+        evidence = service.read_evidence()
+        receipt = evidence.rebuild_receipt_batches[0].receipts[0]
+        assert receipt.projections == {}
+        assert projection.attempts == 0
+
+        service.verify_rebuild(plan)
+        service.accept_rebuild(plan)
+        assert projection.attempts == 0
+
+        result = service.rebuild_projection(
+            plan,
+            ProjectionController(
+                destination,
+                projection,
+                query=projection.projection_query,
+                schema=projection.projection_schema,
+            ),
+        )
+        assert result.exhausted is True
+        assert projection.attempts == 1
     finally:
         source.close()
         destination.close()

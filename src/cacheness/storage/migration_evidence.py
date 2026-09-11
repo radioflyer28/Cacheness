@@ -25,11 +25,13 @@ from cacheness.error_handling import (
 )
 
 from .integrity import ManifestSigningKeyProvider
+from .lifecycle_authority import EntryExpectation
 from .migration_authority import (
     ActivationReceipt,
     AuthorityIdentitySnapshot,
     VerifiedCandidateReceipt,
 )
+from .read_contract import BlobReceipt
 
 
 _EVIDENCE_VERSION = 2
@@ -193,16 +195,32 @@ _LEGAL_TRANSITIONS: Mapping[MaintenanceEvidenceState, frozenset[MaintenanceEvide
         }
     ),
     MaintenanceEvidenceState.REBUILDING: frozenset(
-        {MaintenanceEvidenceState.REBUILD_STAGED, MaintenanceEvidenceState.ABORTED}
+        {
+            MaintenanceEvidenceState.REBUILDING,
+            MaintenanceEvidenceState.REBUILD_STAGED,
+            MaintenanceEvidenceState.ABORTED,
+        }
     ),
     MaintenanceEvidenceState.REBUILD_STAGED: frozenset(
-        {MaintenanceEvidenceState.REBUILD_VERIFYING, MaintenanceEvidenceState.ABORTED}
+        {
+            MaintenanceEvidenceState.REBUILD_STAGED,
+            MaintenanceEvidenceState.REBUILD_VERIFYING,
+            MaintenanceEvidenceState.ABORTED,
+        }
     ),
     MaintenanceEvidenceState.REBUILD_VERIFYING: frozenset(
-        {MaintenanceEvidenceState.REBUILD_VERIFIED, MaintenanceEvidenceState.ABORTED}
+        {
+            MaintenanceEvidenceState.REBUILD_VERIFYING,
+            MaintenanceEvidenceState.REBUILD_VERIFIED,
+            MaintenanceEvidenceState.ABORTED,
+        }
     ),
     MaintenanceEvidenceState.REBUILD_VERIFIED: frozenset(
-        {MaintenanceEvidenceState.REBUILD_ACCEPTED, MaintenanceEvidenceState.ABORTED}
+        {
+            MaintenanceEvidenceState.REBUILD_VERIFIED,
+            MaintenanceEvidenceState.REBUILD_ACCEPTED,
+            MaintenanceEvidenceState.ABORTED,
+        }
     ),
     MaintenanceEvidenceState.REBUILD_ACCEPTED: frozenset(),
     MaintenanceEvidenceState.ACTIVATED: frozenset(
@@ -305,6 +323,69 @@ def _receipt_from_record(record: object) -> VerifiedCandidateReceipt:
     )
 
 
+def _expectation_record(expectation: EntryExpectation) -> dict[str, object]:
+    """Encode one exact authority comparison token without a manifest copy."""
+    return {
+        "generation": expectation.generation,
+        "lineage": expectation.lineage,
+        "manifest_digest": expectation.manifest_digest,
+        "revision": expectation.revision,
+    }
+
+
+def _expectation_from_record(record: object) -> EntryExpectation:
+    """Decode one exact authority comparison token."""
+    if not isinstance(record, Mapping) or set(record) != {
+        "generation",
+        "lineage",
+        "manifest_digest",
+        "revision",
+    }:
+        raise ValueError("rebuild receipt expectation is invalid")
+    return EntryExpectation(
+        lineage=record["lineage"],
+        revision=record["revision"],
+        generation=record["generation"],
+        manifest_digest=record["manifest_digest"],
+    )
+
+
+def _blob_receipt_record(receipt: BlobReceipt) -> dict[str, object]:
+    """Encode only exact canonical ownership, never payload or key material."""
+    if dict(receipt.projections):
+        raise ValueError("rebuild receipts must remain projection-free")
+    return {
+        "catalog_revision": receipt.catalog_revision,
+        "expectation": _expectation_record(receipt.expectation),
+        "generation": receipt.generation,
+        "key": receipt.key,
+        "locator": receipt.locator,
+        "operation_id": receipt.operation_id,
+    }
+
+
+def _blob_receipt_from_record(record: object) -> BlobReceipt:
+    """Decode exact ownership with an intentionally empty derived-outcome map."""
+    if not isinstance(record, Mapping) or set(record) != {
+        "catalog_revision",
+        "expectation",
+        "generation",
+        "key",
+        "locator",
+        "operation_id",
+    }:
+        raise ValueError("rebuild receipt is invalid")
+    return BlobReceipt(
+        operation_id=record["operation_id"],
+        key=record["key"],
+        generation=record["generation"],
+        locator=record["locator"],
+        expectation=_expectation_from_record(record["expectation"]),
+        catalog_revision=record["catalog_revision"],
+        projections={},
+    )
+
+
 @dataclass(frozen=True)
 class StoppedWorkerAcknowledgement:
     """An operator assertion, not global-quiescence proof or an authority lease."""
@@ -353,6 +434,139 @@ class StoppedWorkerAcknowledgement:
 
 
 @dataclass(frozen=True)
+class RebuildReceiptBatch:
+    """One bounded, authenticated prefix of exact canonical rebuild receipts.
+
+    The batch is corroborative maintenance evidence only.  The destination
+    lifecycle authority remains the sole source of visibility and operation
+    replay; this record lets an interrupted offline run prove which exact
+    authority results it may verify or retire.
+    """
+
+    batch_ordinal: int
+    first_entry_ordinal: int
+    past_last_entry_ordinal: int
+    receipts: tuple[BlobReceipt, ...]
+    batch_digest: str
+    byte_count: int
+
+    @staticmethod
+    def digest_for(
+        *,
+        batch_ordinal: int,
+        first_entry_ordinal: int,
+        past_last_entry_ordinal: int,
+        receipts: tuple[BlobReceipt, ...],
+        byte_count: int,
+    ) -> str:
+        """Derive a stable public digest from ownership fields alone."""
+        record = {
+            "batch_ordinal": batch_ordinal,
+            "byte_count": byte_count,
+            "first_entry_ordinal": first_entry_ordinal,
+            "past_last_entry_ordinal": past_last_entry_ordinal,
+            "receipts": [_blob_receipt_record(receipt) for receipt in receipts],
+        }
+        return hashlib.sha256(
+            json.dumps(record, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        batch_ordinal: int,
+        first_entry_ordinal: int,
+        receipts: tuple[BlobReceipt, ...],
+        byte_count: int,
+    ) -> "RebuildReceiptBatch":
+        """Construct a single authenticated receipt batch before checkpointing."""
+        past_last_entry_ordinal = first_entry_ordinal + len(receipts)
+        return cls(
+            batch_ordinal=batch_ordinal,
+            first_entry_ordinal=first_entry_ordinal,
+            past_last_entry_ordinal=past_last_entry_ordinal,
+            receipts=receipts,
+            batch_digest=cls.digest_for(
+                batch_ordinal=batch_ordinal,
+                first_entry_ordinal=first_entry_ordinal,
+                past_last_entry_ordinal=past_last_entry_ordinal,
+                receipts=receipts,
+                byte_count=byte_count,
+            ),
+            byte_count=byte_count,
+        )
+
+    def __post_init__(self) -> None:
+        if type(self.batch_ordinal) is not int or self.batch_ordinal < 0:
+            raise ValueError("rebuild batch ordinal must be non-negative")
+        if type(self.first_entry_ordinal) is not int or self.first_entry_ordinal < 0:
+            raise ValueError("rebuild first entry ordinal must be non-negative")
+        if (
+            type(self.past_last_entry_ordinal) is not int
+            or self.past_last_entry_ordinal <= self.first_entry_ordinal
+        ):
+            raise ValueError("rebuild batch entry range is invalid")
+        if (
+            not isinstance(self.receipts, tuple)
+            or not self.receipts
+            or len(self.receipts) > _MAX_CANDIDATE_BATCH_REFERENCES
+            or not all(isinstance(receipt, BlobReceipt) for receipt in self.receipts)
+        ):
+            raise ValueError("rebuild receipt batch is invalid")
+        if self.past_last_entry_ordinal - self.first_entry_ordinal != len(self.receipts):
+            raise ValueError("rebuild receipt range disagrees with receipts")
+        operation_ids = tuple(receipt.operation_id for receipt in self.receipts)
+        if len(operation_ids) != len(set(operation_ids)):
+            raise ValueError("rebuild receipt batch operation identifiers must be unique")
+        if any(dict(receipt.projections) for receipt in self.receipts):
+            raise ValueError("rebuild receipt batches must remain projection-free")
+        if type(self.byte_count) is not int or self.byte_count < 0:
+            raise ValueError("rebuild receipt byte_count must be non-negative")
+        expected_digest = self.digest_for(
+            batch_ordinal=self.batch_ordinal,
+            first_entry_ordinal=self.first_entry_ordinal,
+            past_last_entry_ordinal=self.past_last_entry_ordinal,
+            receipts=self.receipts,
+            byte_count=self.byte_count,
+        )
+        if not hmac.compare_digest(_sha256(self.batch_digest, "rebuild batch digest"), expected_digest):
+            raise ValueError("rebuild receipt batch digest is invalid")
+
+    def to_record(self) -> dict[str, object]:
+        """Return canonical, payload-free evidence fields."""
+        return {
+            "batch_digest": self.batch_digest,
+            "batch_ordinal": self.batch_ordinal,
+            "byte_count": self.byte_count,
+            "first_entry_ordinal": self.first_entry_ordinal,
+            "past_last_entry_ordinal": self.past_last_entry_ordinal,
+            "receipts": [_blob_receipt_record(receipt) for receipt in self.receipts],
+        }
+
+    @classmethod
+    def from_record(cls, record: object) -> "RebuildReceiptBatch":
+        """Decode one bounded receipt batch after outer authentication."""
+        if not isinstance(record, Mapping) or set(record) != {
+            "batch_digest",
+            "batch_ordinal",
+            "byte_count",
+            "first_entry_ordinal",
+            "past_last_entry_ordinal",
+            "receipts",
+        } or not isinstance(record["receipts"], list):
+            raise ValueError("rebuild receipt batch record is invalid")
+        return cls(
+            batch_ordinal=record["batch_ordinal"],
+            first_entry_ordinal=record["first_entry_ordinal"],
+            past_last_entry_ordinal=record["past_last_entry_ordinal"],
+            receipts=tuple(_blob_receipt_from_record(value) for value in record["receipts"]),
+            batch_digest=record["batch_digest"],
+            byte_count=record["byte_count"],
+        )
+
+
+@dataclass(frozen=True)
 class MaintenanceRunEvidence:
     """Versioned signed maintenance state with no serialized key material."""
 
@@ -374,6 +588,8 @@ class MaintenanceRunEvidence:
     activation_receipt: ActivationReceipt | None = None
     authority_receipts: tuple[str, ...] = ()
     cleanup_debt: tuple[str, ...] = ()
+    rebuild_receipt_batches: tuple[RebuildReceiptBatch, ...] = ()
+    retired_rebuild_operation_ids: tuple[str, ...] = ()
     completed_output_digests: Mapping[str, str] = field(default_factory=dict)
     signing_key_fingerprint: str = ""
 
@@ -457,8 +673,49 @@ class MaintenanceRunEvidence:
             or len(self.cleanup_debt) > _MAX_CLEANUP_DEBT_REFERENCES
         ):
             raise ValueError("cleanup_debt must be a bounded tuple")
-        for value in (*self.authority_receipts, *self.cleanup_debt):
+        for value in self.authority_receipts:
             _sha256(value, "maintenance receipt")
+        for value in self.cleanup_debt:
+            if value.startswith("rebuild:"):
+                parts = value.split(":", 4)
+                if len(parts) != 5 or any(not item for item in parts):
+                    raise ValueError("rebuild cleanup debt is invalid")
+                _bounded_text(value, "rebuild cleanup debt")
+            else:
+                _sha256(value, "maintenance receipt")
+        if (
+            not isinstance(self.rebuild_receipt_batches, tuple)
+            or len(self.rebuild_receipt_batches) > _MAX_CANDIDATE_BATCH_REFERENCES
+            or not all(
+                isinstance(batch, RebuildReceiptBatch)
+                for batch in self.rebuild_receipt_batches
+            )
+        ):
+            raise ValueError("rebuild_receipt_batches must be a bounded tuple")
+        expected_entry_ordinal = 0
+        receipt_operation_ids: set[str] = set()
+        for batch_ordinal, batch in enumerate(self.rebuild_receipt_batches):
+            if (
+                batch.batch_ordinal != batch_ordinal
+                or batch.first_entry_ordinal != expected_entry_ordinal
+            ):
+                raise ValueError("rebuild receipt batches must form one ordered prefix")
+            expected_entry_ordinal = batch.past_last_entry_ordinal
+            for receipt in batch.receipts:
+                if receipt.operation_id in receipt_operation_ids:
+                    raise ValueError("rebuild operation identifiers must be unique")
+                receipt_operation_ids.add(receipt.operation_id)
+        if (
+            not isinstance(self.retired_rebuild_operation_ids, tuple)
+            or len(self.retired_rebuild_operation_ids) > _MAX_CANDIDATE_BATCH_REFERENCES
+            or len(set(self.retired_rebuild_operation_ids))
+            != len(self.retired_rebuild_operation_ids)
+        ):
+            raise ValueError("retired rebuild operation identifiers are invalid")
+        for operation_id in self.retired_rebuild_operation_ids:
+            _bounded_text(operation_id, "retired rebuild operation identifier")
+            if operation_id not in receipt_operation_ids:
+                raise ValueError("retired rebuild operation lacks an exact receipt")
         if not isinstance(self.completed_output_digests, Mapping):
             raise ValueError("completed_output_digests must be a mapping")
         if set(self.completed_output_digests) - set(self.completed_steps):
@@ -493,6 +750,10 @@ class MaintenanceRunEvidence:
             "destination_revision": self.destination_revision,
             "evidence_version": self.evidence_version,
             "plan_digest": self.plan_digest,
+            "rebuild_receipt_batches": [
+                batch.to_record() for batch in self.rebuild_receipt_batches
+            ],
+            "retired_rebuild_operation_ids": list(self.retired_rebuild_operation_ids),
             "run_id": self.run_id,
             "signing_key_fingerprint": self.signing_key_fingerprint,
             "source_identity": _identity_record(self.source_identity),
@@ -526,6 +787,8 @@ class MaintenanceRunEvidence:
             "destination_revision",
             "evidence_version",
             "plan_digest",
+            "rebuild_receipt_batches",
+            "retired_rebuild_operation_ids",
             "run_id",
             "signing_key_fingerprint",
             "source_identity",
@@ -542,6 +805,8 @@ class MaintenanceRunEvidence:
             or not isinstance(record["authority_receipts"], list)
             or not isinstance(record["candidate_batch_references"], list)
             or not isinstance(record["cleanup_debt"], list)
+            or not isinstance(record["rebuild_receipt_batches"], list)
+            or not isinstance(record["retired_rebuild_operation_ids"], list)
         ):
             raise ValueError("maintenance evidence completion records are invalid")
         candidate = record["candidate_receipt"]
@@ -582,6 +847,11 @@ class MaintenanceRunEvidence:
             activation_receipt=activation_receipt,
             authority_receipts=tuple(record["authority_receipts"]),
             cleanup_debt=tuple(record["cleanup_debt"]),
+            rebuild_receipt_batches=tuple(
+                RebuildReceiptBatch.from_record(value)
+                for value in record["rebuild_receipt_batches"]
+            ),
+            retired_rebuild_operation_ids=tuple(record["retired_rebuild_operation_ids"]),
             completed_output_digests=output_digests,
             signing_key_fingerprint=record["signing_key_fingerprint"],
         )
