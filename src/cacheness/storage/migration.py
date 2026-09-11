@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from enum import Enum
-import base64
 import hashlib
 import hmac
 import json
@@ -80,6 +79,7 @@ _MAX_PLAN_COLLECTION_ITEMS = 4_096
 _DEFAULT_MAX_ENTRIES_PER_RUN = 256
 _DEFAULT_MAX_BYTES_PER_RUN = 64 * 1024 * 1024
 _DEFAULT_MAX_EVIDENCE_BYTES_PER_RUN = 64 * 1024
+_PLAN_REVALIDATION_LOCATOR = "revalidate-at-execution"
 
 
 class CompatibilityDimension(str, Enum):
@@ -463,6 +463,8 @@ class MigrationEntryAssessment:
     disposition: MigrationDisposition
     reason: MigrationReason
     catalog_values: Mapping[str, object] = field(default_factory=dict)
+    source_catalog_digest: str = ""
+    source_manifest_digest: str = ""
 
     def __post_init__(self) -> None:
         if not isinstance(self.entry, AuthorityInventoryEntry):
@@ -477,6 +479,27 @@ class MigrationEntryAssessment:
         if not isinstance(frozen_values, Mapping):
             raise TypeError("catalog_values must remain a mapping")
         object.__setattr__(self, "catalog_values", frozen_values)
+        if self.entry.locator != _PLAN_REVALIDATION_LOCATOR:
+            catalog_digest, manifest_digest = _canonical_source_binding(
+                frozen_values, self.entry.manifest
+            )
+            if self.source_catalog_digest and not hmac.compare_digest(
+                self.source_catalog_digest, catalog_digest
+            ):
+                raise ValueError("source_catalog_digest does not bind catalog values")
+            if self.source_manifest_digest and not hmac.compare_digest(
+                self.source_manifest_digest, manifest_digest
+            ):
+                raise ValueError("source_manifest_digest does not bind manifest bytes")
+            object.__setattr__(self, "source_catalog_digest", catalog_digest)
+            object.__setattr__(self, "source_manifest_digest", manifest_digest)
+            return
+        if frozen_values:
+            raise ValueError("plan-only assessments cannot contain source catalog values")
+        for field_name in ("source_catalog_digest", "source_manifest_digest"):
+            digest = getattr(self, field_name)
+            if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+                raise ValueError(f"{field_name} must be a SHA-256 hexadecimal value")
 
 
 @dataclass(frozen=True)
@@ -638,7 +661,7 @@ def _rebuild_plan_id(
             {
                 "generation": entry.entry.generation,
                 "key": entry.entry.key,
-                "manifest_digest": hashlib.sha256(entry.entry.manifest).hexdigest(),
+                "manifest_digest": entry.source_manifest_digest,
             }
             for entry in sorted(entries, key=lambda item: item.entry.key)
         ],
@@ -1052,17 +1075,16 @@ class MigrationPlan:
     def _entry_record(self, assessment: MigrationEntryAssessment) -> dict[str, object]:
         entry = assessment.entry
         return {
-            "catalog_values": _thaw_json(assessment.catalog_values),
             "disposition": assessment.disposition.value,
             "entry": {
                 "byte_size": entry.byte_size,
                 "generation": entry.generation,
                 "key": entry.key,
-                "locator": entry.locator,
-                "manifest": base64.b64encode(entry.manifest).decode("ascii"),
                 "payload_digest": entry.payload_digest,
             },
             "reason": assessment.reason.value,
+            "source_catalog_digest": assessment.source_catalog_digest,
+            "source_manifest_digest": assessment.source_manifest_digest,
         }
 
     def _record(self, *, include_digest: bool) -> dict[str, object]:
@@ -1193,37 +1215,64 @@ def _canonical_plan_bytes(record: Mapping[str, object]) -> bytes:
         raise ValueError("migration plan contains non-canonical JSON data") from exc
 
 
+def _canonical_source_binding(
+    catalog_values: Mapping[str, object], manifest: bytes
+) -> tuple[str, str]:
+    """Return confidentiality-safe digests for already-authenticated source state.
+
+    The shareable plan stores these exact bindings instead of catalog values or
+    signed manifest bytes.  Callers must authenticate the manifest before they
+    treat a matching digest as maintenance authorization.
+    """
+    if not isinstance(catalog_values, Mapping):
+        raise TypeError("catalog_values must be a mapping")
+    if not isinstance(manifest, bytes):
+        raise TypeError("manifest must be bytes")
+    frozen_catalog = _freeze_plan_json(catalog_values)
+    if not isinstance(frozen_catalog, Mapping):
+        raise TypeError("catalog_values must remain a mapping")
+    catalog_bytes = _canonical_plan_bytes(
+        {"catalog_values": _thaw_json(frozen_catalog)}
+    )
+    return (
+        hashlib.sha256(catalog_bytes).hexdigest(),
+        hashlib.sha256(manifest).hexdigest(),
+    )
+
+
 def _entries_from_record(record: object) -> tuple[MigrationEntryAssessment, ...]:
     if not isinstance(record, list):
         raise ValueError("entries are invalid")
     entries: list[MigrationEntryAssessment] = []
     for item in record:
         if not isinstance(item, dict) or set(item) != {
-            "catalog_values", "disposition", "entry", "reason"
+            "disposition",
+            "entry",
+            "reason",
+            "source_catalog_digest",
+            "source_manifest_digest",
         }:
             raise ValueError("entry assessment is invalid")
         entry_record = item["entry"]
         if not isinstance(entry_record, dict) or set(entry_record) != {
-            "byte_size", "generation", "key", "locator", "manifest", "payload_digest"
+            "byte_size", "generation", "key", "payload_digest"
         }:
             raise ValueError("entry descriptor is invalid")
-        if not isinstance(item["catalog_values"], dict):
-            raise ValueError("catalog_values is invalid")
         try:
-            manifest = base64.b64decode(entry_record["manifest"], validate=True)
             entries.append(
                 MigrationEntryAssessment(
                     entry=AuthorityInventoryEntry(
                         key=entry_record["key"],
                         generation=entry_record["generation"],
-                        locator=entry_record["locator"],
-                        manifest=manifest,
+                        locator=_PLAN_REVALIDATION_LOCATOR,
+                        manifest=b"plan-revalidation-required",
                         payload_digest=entry_record["payload_digest"],
                         byte_size=entry_record["byte_size"],
                     ),
                     disposition=MigrationDisposition(item["disposition"]),
                     reason=MigrationReason(item["reason"]),
-                    catalog_values=item["catalog_values"],
+                    source_catalog_digest=item["source_catalog_digest"],
+                    source_manifest_digest=item["source_manifest_digest"],
                 )
             )
         except (TypeError, ValueError) as exc:
