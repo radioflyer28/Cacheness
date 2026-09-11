@@ -15,6 +15,8 @@ from cacheness.error_handling import (
 from cacheness.storage.migration import (
     MigrationCompatibilityEdge,
     MigrationDisposition,
+    MigrationRunLimits,
+    MigrationSplitRequired,
     OfflineMigrationService,
 )
 from cacheness.storage.migration_authority import AuthorityPublicationState
@@ -584,6 +586,124 @@ def test_resume_classifies_authority_activation_after_lost_evidence_observation(
         assert resumed.state is MaintenanceEvidenceState.ACTIVATED
         assert service.read_evidence().activation_receipt is not None
         assert authority.publication_state() is AuthorityPublicationState.ACTIVATED_OFFLINE
+    finally:
+        source.close()
+        destination.close()
+
+
+def test_migration_run_enforces_entry_byte_and_evidence_limits_with_split_plan(
+    tmp_path: Path,
+) -> None:
+    """Oversized catalogs split before candidate publication; bounded runs checkpoint batches."""
+    key_provider = _SharedMemoryKeyProvider()
+    source = _memory_store(tmp_path / "source", key_provider)
+    destination = _memory_store(tmp_path / "destination", key_provider)
+    try:
+        for key in ("entry-a", "entry-b", "entry-c"):
+            source.put_entry({"value": key}, key=key)
+        limits = MigrationRunLimits(
+            max_entries_per_run=2,
+            max_bytes_per_run=1_024,
+            max_evidence_bytes_per_run=8_192,
+        )
+        service = OfflineMigrationService(
+            source=source,
+            destination=destination,
+            work_directory=tmp_path / "maintenance",
+            run_id="limited-run",
+            stopped_workers_acknowledged=True,
+            compatibility_edges=(MigrationCompatibilityEdge.current_to_current_for_test(),),
+            run_limits=limits,
+        )
+
+        split = service.plan(service.inspect())
+
+        assert isinstance(split, MigrationSplitRequired)
+        assert split.reason == "split_required"
+        assert [partition.keys for partition in split.partitions] == [
+            ("entry-a", "entry-b"),
+            ("entry-c",),
+        ]
+        assert destination.lifecycle_authority.identity_snapshot().revision == 0
+
+        bounded_source = _memory_store(tmp_path / "bounded-source", key_provider)
+        bounded_destination = _memory_store(tmp_path / "bounded-destination", key_provider)
+        try:
+            bounded_source.put_entry({"value": "one"}, key="entry-a")
+            bounded_source.put_entry({"value": "two"}, key="entry-b")
+            bounded_service = OfflineMigrationService(
+                source=bounded_source,
+                destination=bounded_destination,
+                work_directory=tmp_path / "bounded-maintenance",
+                run_id="bounded-run",
+                stopped_workers_acknowledged=True,
+                compatibility_edges=(
+                    MigrationCompatibilityEdge.current_to_current_for_test(),
+                ),
+                run_limits=limits,
+            )
+            plan = bounded_service.plan(bounded_service.inspect())
+            assert not isinstance(plan, MigrationSplitRequired)
+
+            staged = bounded_service.stage(plan)
+
+            evidence = bounded_service.read_evidence()
+            assert staged.state is MaintenanceEvidenceState.STAGED
+            assert evidence.candidate_batch_references
+            assert evidence.candidate_entry_count == 2
+            assert evidence.candidate_byte_count == plan.totals.total_bytes
+            assert bounded_destination.get("entry-a") is None
+        finally:
+            bounded_source.close()
+            bounded_destination.close()
+    finally:
+        source.close()
+        destination.close()
+
+
+def test_uncheckpointed_candidate_orphan_remains_invisible_unadopted_and_outside_exact_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A publication fault before its authority checkpoint leaves only an ignored orphan."""
+    key_provider = _SharedMemoryKeyProvider()
+    source = _memory_store(tmp_path / "source", key_provider)
+    destination = _memory_store(tmp_path / "destination", key_provider)
+    try:
+        source.put_entry({"value": "orphan boundary"}, key="entry")
+        service = _service(source, destination, tmp_path / "maintenance", run_id="orphan-run")
+        plan = service.plan(service.inspect())
+        authority = destination.lifecycle_authority
+        original_record = authority.record_verified_candidate
+        written_locators: list[str] = []
+        original_write = destination.payload_backend.write_blob
+
+        def capture_write(blob_id: str, payload: bytes) -> str:
+            locator = original_write(blob_id, payload)
+            written_locators.append(locator)
+            return locator
+
+        def fail_before_checkpoint(*, receipt, entries):
+            raise RuntimeError("simulated post-publication checkpoint fault")
+
+        monkeypatch.setattr(destination.payload_backend, "write_blob", capture_write)
+        monkeypatch.setattr(authority, "record_verified_candidate", fail_before_checkpoint)
+        with pytest.raises(RuntimeError, match="post-publication"):
+            service.stage(plan)
+
+        assert written_locators
+        assert authority.publication_state() is AuthorityPublicationState.IDLE
+        assert destination.get("entry") is None
+        assert source.get("entry") == {"value": "orphan boundary"}
+
+        monkeypatch.setattr(authority, "record_verified_candidate", original_record)
+        resumed = service.resume(plan, run_id=service.run_id, evidence_path=service.evidence_path)
+
+        attributed = authority.candidate_entries_for_run(run_id=service.run_id)
+        assert resumed.state is MaintenanceEvidenceState.STAGED
+        assert {entry.locator for entry in attributed}.isdisjoint(written_locators)
+        assert destination.get("entry") is None
+        assert source.get("entry") == {"value": "orphan boundary"}
     finally:
         source.close()
         destination.close()
