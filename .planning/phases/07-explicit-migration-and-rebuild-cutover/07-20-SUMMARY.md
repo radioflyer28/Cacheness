@@ -12,9 +12,9 @@ provides:
   - "Truthful per-call abort deletion accounting with fail-closed ownership checks"
 affects: [phase-7-migration-cutover, phase-7-rebuild-recovery, phase-8-qualification]
 actuals:
-  tokens: 5412
+  tokens: 5501
   tasks: 2
-  commits: 5
+  commits: 7
 tech-stack:
   added: []
   patterns:
@@ -91,7 +91,7 @@ status: complete
 ## Task Commits
 
 1. **Task 1: Prove a same-version format change reaches one exact transform** - `0e69875` (`test`), `681f363` (`fix`)
-2. **Task 2: Checkpoint typed S3 abort debt and report only completed deletions** - `873dea5` (`test`), `48318aa` (`test`), `17a3f16` (`fix`)
+2. **Task 2: Checkpoint typed S3 abort debt and report only completed deletions** - `873dea5` (`test`), `48318aa` (`test`), `17a3f16` (`fix`), `5422e03` (`test`), `5da1228` (`fix`)
 
 ## Files Created/Modified
 
@@ -118,9 +118,18 @@ status: complete
 - **Verification:** `uv run --isolated --all-extras --group dev --frozen pytest -q tests/test_migration_cutover.py tests/test_migration_remote_contract.py -x -o log_cli=false -o addopts=` (25 passed)
 - **Committed in:** `873dea5`, `48318aa`
 
+**2. [Rule 1 - Receipt accounting] Terminal abort replay reported historical candidates as current cleanup effects**
+
+- **Found during:** Task 2 close-out verification
+- **Issue:** An already-`ABORTED` replay returned the original candidate count even though the current call deleted nothing and did not prove absence.
+- **Fix:** Added a replayed-abort regression and return zero completed entries for the terminal idempotent path.
+- **Files modified:** `src/cacheness/storage/migration.py`, `tests/test_migration_cutover.py`
+- **Verification:** Seven exact Plan 20 selectors pass, including `test_partial_abort_receipt_counts_only_deleted_or_proven_absent_candidates`.
+- **Committed in:** `5422e03`, `5da1228`
+
 ---
 
-**Total deviations:** 1 auto-fixed (Rule 1 test contract).
+**Total deviations:** 2 auto-fixed (Rule 1 test-contract and receipt-accounting fixes).
 **Impact on plan:** The correction keeps test fixtures aligned with the explicit destination-contract rule and introduces no production authority, backend, or coordination behavior.
 
 ## Issues Encountered
@@ -138,7 +147,7 @@ Plan 21 can add the existing receipt-bound rebuild-debt settlement path. Plan 22
 ## Self-Check: PASSED
 
 - Confirmed all three modified production/test artifacts and this summary exist.
-- Confirmed task commits `0e69875`, `681f363`, `873dea5`, `48318aa`, and `17a3f16` exist in repository history.
+- Confirmed task commits `0e69875`, `681f363`, `873dea5`, `48318aa`, `17a3f16`, `5422e03`, and `5da1228` exist in repository history.
 - Passed the seven exact Plan 20 selectors, the full local cutover/remote migration suite (25 passed), and scoped Ruff checks.
 
 ---
