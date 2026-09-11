@@ -22,6 +22,7 @@ from .lifecycle_authority import (
     CleanupDebt,
     EntryExpectation,
     EntrySnapshot,
+    MutationReplay,
     MutationSpec,
     PageToken,
     PreparedMutation,
@@ -185,6 +186,30 @@ class InMemoryLifecycleAuthority:
             return PreparedMutation(spec.operation_id, spec)
 
         return self._transition(prepare)
+
+    def read_mutation(self, operation_id: str) -> MutationReplay | None:
+        """Read one exact operation record without changing authority state."""
+        MutationSpec.validate_operation_id(operation_id)
+        self._require_open()
+        with self._lock:
+            mutation = self._mutations.get(operation_id)
+            if mutation is None:
+                return None
+            spec, proof, state = mutation
+            prepared = PreparedMutation(operation_id, spec)
+            if state == "prepared":
+                return MutationReplay(prepared, state, proof)
+            if state == "promoted":
+                return MutationReplay(
+                    prepared,
+                    state,
+                    proof,
+                    self._promoted_result(operation_id),
+                )
+            raise CacheBlobLifecycleConflictError(
+                "Operation record is not replayable",
+                context={"operation_id": operation_id, "state": state},
+            )
 
     def record_verification(self, prepared: PreparedMutation, proof: VerificationProof) -> None:
         def record() -> None:

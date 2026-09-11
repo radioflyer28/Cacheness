@@ -97,6 +97,11 @@ class MutationSpec:
             raise ValueError("manifest must be bounded bytes")
 
     @classmethod
+    def validate_operation_id(cls, operation_id: str) -> str:
+        """Validate one bounded operation identity before authority lookup."""
+        return _bounded_text(operation_id, "operation_id")
+
+    @classmethod
     def create(
         cls,
         *,
@@ -188,6 +193,57 @@ class PromotionResult:
 
     entry: EntrySnapshot
     cleanup_debt: tuple[CleanupDebt, ...] = ()
+
+
+@dataclass(frozen=True)
+class MutationReplay:
+    """One exact operation record reconstructed by the canonical authority.
+
+    This is intentionally a bounded read model, not another lifecycle state
+    machine.  The authority remains the only source that can attest to a
+    prepared intent, optional verification, or a promoted canonical result.
+    """
+
+    prepared: PreparedMutation
+    state: str
+    verification: VerificationProof | None = None
+    promotion: PromotionResult | None = None
+
+    def __post_init__(self) -> None:
+        if self.prepared.operation_id != self.prepared.spec.operation_id:
+            raise ValueError("prepared operation identity must corroborate its spec")
+        if self.state not in {"prepared", "promoted"}:
+            raise ValueError("mutation replay state is unsupported")
+        if self.verification is not None:
+            if (
+                self.prepared.spec.manifest
+                and self.verification.manifest
+                and self.prepared.spec.manifest != self.verification.manifest
+            ):
+                raise ValueError("verification descriptor differs from prepared descriptor")
+        if self.state == "prepared":
+            if self.promotion is not None:
+                raise ValueError("prepared replay cannot carry a promotion result")
+            return
+        if self.promotion is None:
+            raise ValueError("promoted replay requires a promotion result")
+        entry = self.promotion.entry
+        spec = self.prepared.spec
+        if (
+            entry.key != spec.key
+            or entry.generation != spec.generation
+            or entry.locator != spec.candidate_locator
+        ):
+            raise ValueError("promotion result does not corroborate the prepared spec")
+        descriptor = (
+            self.verification.manifest
+            if self.verification is not None and self.verification.manifest
+            else spec.manifest
+        )
+        if descriptor and entry.manifest != descriptor:
+            raise ValueError("promotion result descriptor is incompatible with the replay")
+        if any(debt.operation_id != self.prepared.operation_id for debt in self.promotion.cleanup_debt):
+            raise ValueError("promotion cleanup debt does not belong to the replayed operation")
 
 
 @dataclass(frozen=True)
@@ -296,6 +352,8 @@ class LifecycleAuthority(Protocol):
     def snapshot_state(self) -> AuthorityStateSnapshot: ...
 
     def prepare_mutation(self, spec: MutationSpec) -> PreparedMutation: ...
+
+    def read_mutation(self, operation_id: str) -> MutationReplay | None: ...
 
     def record_verification(
         self, prepared: PreparedMutation, proof: VerificationProof

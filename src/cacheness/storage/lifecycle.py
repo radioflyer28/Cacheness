@@ -33,6 +33,7 @@ from .lifecycle_authority import (
     EntryExpectation,
     EntrySnapshot,
     LifecycleAuthority,
+    MutationReplay,
     MutationSpec,
     PageToken,
     PreparedMutation,
@@ -201,6 +202,157 @@ class AuthorityLifecycleEngine:
                 )
             )
 
+    def _manifest_for_replay(
+        self,
+        replay: MutationReplay,
+        *,
+        key: str,
+        metadata: dict[str, Any] | None,
+        catalog_schema_id: str,
+        catalog_schema_revision: int,
+        catalog_schema_fingerprint: str,
+        catalog_values: dict[str, Any],
+    ) -> BlobManifest:
+        """Authenticate and corroborate one exact authority-owned replay spec."""
+        spec = replay.prepared.spec
+        if spec.key != key:
+            raise CacheBlobLifecycleConflictError(
+                "Replay operation key differs from its prepared authority record"
+            )
+        manifest = self.store._authenticated_authority_manifest(spec.manifest)
+        if (
+            manifest.key != spec.key
+            or manifest.generation != spec.generation
+            or manifest.locator != spec.candidate_locator
+            or manifest.catalog_schema_id != catalog_schema_id
+            or manifest.catalog_schema_revision != catalog_schema_revision
+            or manifest.catalog_schema_fingerprint != catalog_schema_fingerprint
+            or dict(manifest.catalog_values) != catalog_values
+            or dict(manifest.user_metadata) != dict(metadata or {})
+        ):
+            raise CacheBlobLifecycleConflictError(
+                "Replay request differs from its prepared authority descriptor"
+            )
+        return manifest
+
+    def _result_for_promoted_replay(
+        self, replay: MutationReplay
+    ) -> LifecyclePutResult:
+        """Return one persisted canonical result without re-running publication."""
+        if replay.promotion is None:
+            raise CacheBlobLifecycleConflictError("Promoted replay lacks a canonical result")
+        self._entry_manifest(replay.promotion.entry)
+        self._settle_debts(replay.promotion.cleanup_debt)
+        return LifecyclePutResult(
+            operation_id=replay.prepared.operation_id,
+            key=replay.promotion.entry.key,
+            expected=replay.prepared.spec.expected,
+            promoted=replay.promotion.entry,
+            previous=None,
+            cleanup_debt=replay.promotion.cleanup_debt,
+        )
+
+    def _observe_replay_candidate(
+        self, manifest: BlobManifest
+    ) -> tuple[str, int] | None:
+        """Observe only the exact authority-indexed candidate locator."""
+        guarded_io = self.store._materialize_authority_store()
+        try:
+            with guarded_io.open_snapshot(
+                manifest.locator, self.store._handler_metadata(manifest)
+            ) as snapshot:
+                return sha256_and_size(snapshot.path)
+        except FileNotFoundError:
+            return None
+
+    def _finish_prepared_replay(
+        self,
+        replay: MutationReplay,
+        data: Any,
+        manifest: BlobManifest,
+    ) -> LifecyclePutResult:
+        """Complete an exact prepared intent using only its persisted identity."""
+        prepared = replay.prepared
+        spec = prepared.spec
+        expected_digest = manifest.digest
+        expected_size = manifest.byte_size
+        if replay.verification is not None:
+            if (
+                replay.verification.digest != expected_digest
+                or replay.verification.byte_size != expected_size
+            ):
+                raise CacheBlobLifecycleConflictError(
+                    "Replay verification does not corroborate its prepared descriptor"
+                )
+
+        observed = self._observe_replay_candidate(manifest)
+        candidate_persisted = False
+        if observed is None:
+            handler = self.store.handlers.get_handler(data)
+            guarded_io = self.store._materialize_authority_store()
+            with guarded_io.stage(handler, data, self.store.config) as staged:
+                if staged.suffix != "".join(Path(spec.candidate_locator).suffixes):
+                    raise CacheBlobLifecycleConflictError(
+                        "Replay handler suffix differs from the prepared candidate locator"
+                    )
+                with staged.open() as (source, byte_size):
+                    digest_builder = hashlib.sha256()
+                    while chunk := source.read(64 * 1024):
+                        digest_builder.update(chunk)
+                    staged_digest = digest_builder.hexdigest()
+                if staged_digest != expected_digest or byte_size != expected_size:
+                    raise CacheBlobLifecycleConflictError(
+                        "Replay payload differs from its prepared authority descriptor"
+                    )
+                self._reach("put.before_candidate_publish", key=spec.key)
+                try:
+                    guarded_io.publish_generation(staged, Path(spec.candidate_locator))
+                    candidate_persisted = True
+                except FileExistsError:
+                    # An immutable create collision is not authority. Observe
+                    # only the exact prepared locator and require its proof.
+                    pass
+            observed = self._observe_replay_candidate(manifest)
+            if observed is None:
+                raise CacheBlobLifecycleConflictError(
+                    "Prepared replay candidate remained absent after publication"
+                )
+        if observed != (expected_digest, expected_size):
+            raise CacheBlobLifecycleConflictError(
+                "Prepared replay candidate disagrees with its authority descriptor"
+            )
+
+        try:
+            self._reach("put.candidate_verified", key=spec.key)
+            self.authority.record_verification(
+                prepared,
+                VerificationProof(
+                    digest=expected_digest,
+                    byte_size=expected_size,
+                    manifest=spec.manifest,
+                ),
+            )
+            self._reach("put.before_promotion", key=spec.key)
+            promoted = self.authority.promote_mutation(prepared)
+        except BaseException as error:
+            if candidate_persisted:
+                try:
+                    self._abort(prepared, candidate_persisted=True)
+                except Exception as cleanup_error:
+                    raise cleanup_error from error
+            raise
+        self._reach("put.promoted", key=spec.key)
+        self._settle_debts(promoted.cleanup_debt)
+        self._reach("put.cleanup_retired", key=spec.key)
+        return LifecyclePutResult(
+            operation_id=prepared.operation_id,
+            key=spec.key,
+            expected=spec.expected,
+            promoted=promoted.entry,
+            previous=None,
+            cleanup_debt=tuple(promoted.cleanup_debt),
+        )
+
     def put(
         self,
         data: Any,
@@ -211,15 +363,33 @@ class AuthorityLifecycleEngine:
         catalog_schema_revision: int,
         catalog_schema_fingerprint: str,
         catalog_values: dict[str, Any],
+        operation_id: str | None = None,
     ) -> LifecyclePutResult:
         """Prepare, publish, verify, promote, then reclaim exact old debt."""
-        handler = self.store.handlers.get_handler(data)
         # A Windows authority root is a deployment-provisioned security
         # boundary. The same explicit startup path validates it before
         # read_entry can bootstrap SQLite or guarded handler I/O can create
         # the managed payload root. Existing catalogs validate only; they are
         # never implicitly migrated.
         self.store.initialize()
+        if operation_id is not None:
+            MutationSpec.validate_operation_id(operation_id)
+            replay = self.authority.read_mutation(operation_id)
+            if replay is not None:
+                manifest = self._manifest_for_replay(
+                    replay,
+                    key=key,
+                    metadata=metadata,
+                    catalog_schema_id=catalog_schema_id,
+                    catalog_schema_revision=catalog_schema_revision,
+                    catalog_schema_fingerprint=catalog_schema_fingerprint,
+                    catalog_values=catalog_values,
+                )
+                if replay.state == "promoted":
+                    return self._result_for_promoted_replay(replay)
+                return self._finish_prepared_replay(replay, data, manifest)
+
+        handler = self.store.handlers.get_handler(data)
         previous = self.authority.read_entry(key)
         if previous is not None:
             self._entry_manifest(previous, allow_tombstone=True)
@@ -313,7 +483,7 @@ class AuthorityLifecycleEngine:
             )
             prepared = self.authority.prepare_mutation(
                 MutationSpec.create(
-                    operation_id=uuid4().hex,
+                    operation_id=uuid4().hex if operation_id is None else operation_id,
                     key=key,
                     generation=generation,
                     candidate_locator=locator.as_posix(),

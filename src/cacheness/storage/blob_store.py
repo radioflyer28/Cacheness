@@ -395,6 +395,39 @@ class BlobStore:
         )
         return self._run_post_commit_projections(self._receipt_for_result(result))
 
+    def _put_entry_canonical_for_maintenance(
+        self,
+        data: Any,
+        key: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        *,
+        catalog_schema: CatalogSchema | None = None,
+        catalog_values: dict[str, Any] | None = None,
+        operation_id: str,
+    ) -> BlobReceipt:
+        """Commit one replayable maintenance mutation without derived effects.
+
+        Offline rebuild recovery needs the canonical BlobStore lifecycle, but
+        projection work remains an explicit post-acceptance operation.  This
+        narrow internal seam is deliberately separate from ordinary public
+        writes so callers cannot suppress projections as a general policy.
+        """
+        if not isinstance(operation_id, str):
+            raise TypeError("operation_id must be a string")
+        if key is None and not self.content_addressable:
+            raise ValueError("Maintenance canonical puts require an explicit key")
+        self._require_canonical_store()
+        with self._instance_admission.operation():
+            result = self._put_with_result_admitted(
+                data,
+                key=key,
+                metadata=metadata,
+                catalog_schema=catalog_schema,
+                catalog_values=catalog_values,
+                operation_id=operation_id,
+            )
+        return self._receipt_for_result(result)
+
     @_ordinary_admitted
     def put(
         self,
@@ -425,6 +458,7 @@ class BlobStore:
         *,
         catalog_schema: CatalogSchema | None = None,
         catalog_values: Dict[str, Any] | None = None,
+        operation_id: str | None = None,
     ):
         """Store one payload after validation and exactly one public admission."""
         catalog = self._prepare_catalog_write(catalog_schema, catalog_values)
@@ -440,6 +474,7 @@ class BlobStore:
             catalog_schema_revision=catalog[1],
             catalog_schema_fingerprint=catalog[2],
             catalog_values=catalog[3],
+            operation_id=operation_id,
         )
 
     @staticmethod
