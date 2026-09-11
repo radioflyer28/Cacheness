@@ -14,6 +14,7 @@ import pytest
 
 from cacheness.error_handling import CacheBlobRecoverableCleanupError
 from cacheness.storage import BlobReceipt, BlobStore
+from cacheness.storage.catalog import CatalogField, CatalogQuery, CatalogSchema
 from cacheness.storage.composition import BackendRef, StoreTopology
 from cacheness.storage import path_security
 from cacheness.storage.sqlite_lifecycle_authority import AUTHORITY_RELATIVE_PATH
@@ -125,6 +126,29 @@ class _FailingSerializationHandler(_NativeJsonHandler):
         del data, file_path, config
         self.events.append("private_serialization")
         raise RuntimeError("native serialization failed")
+
+
+class _CountingProjectionSink:
+    """Record only derived work attempted after a canonical commit."""
+
+    projection_name = "counting-projection"
+    projection_query = CatalogQuery()
+    projection_schema = CatalogSchema(
+        (CatalogField("kind", "string"),), schema_id="counting-projection"
+    )
+
+    def __init__(self) -> None:
+        self.attempts = 0
+        self.checkpoints: list[object] = []
+
+    def apply_projection_batch(self, _batch: object) -> None:
+        self.attempts += 1
+
+    def save_projection_checkpoint(self, checkpoint: object) -> None:
+        self.checkpoints.append(checkpoint)
+
+    def load_projection_checkpoint(self) -> None:
+        return None
 
 
 _EXCLUSIVE_STREAM_CRASH_EXIT = 91
@@ -360,6 +384,77 @@ def test_put_promotes_immutable_generation_through_lifecycle_authority(
             "put.promoted",
         ]
         assert events == ["private_serialization", "private_serialization", "handler_read"]
+    finally:
+        store.close()
+
+
+def test_blobstore_maintenance_canonical_put_replays_projection_free_receipt_after_response_loss(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A lost maintenance response replays one authority-owned canonical receipt."""
+    projection = _CountingProjectionSink()
+    store = BlobStore(
+        StoreTopology(
+            payload=BackendRef(name="memory"),
+            authority=BackendRef(name="memory"),
+            projections=(projection,),
+        ),
+        cache_dir=tmp_path / "memory-store",
+    )
+    events: list[str] = []
+    store.handlers = _SingleHandlerRegistry(_NativeJsonHandler(events))
+    published = 0
+    guarded_io = store._materialize_authority_store()
+    original_publish = guarded_io.publish_generation
+
+    def count_publish(*args: object, **kwargs: object) -> object:
+        nonlocal published
+        published += 1
+        return original_publish(*args, **kwargs)
+
+    monkeypatch.setattr(guarded_io, "publish_generation", count_publish)
+    operation_id = "rebuild-response-loss"
+
+    def lose_response(boundary: str) -> None:
+        if boundary == "put.promoted":
+            raise _SimulatedProcessLoss("response lost after canonical promotion")
+
+    store.lifecycle.fault_hook = lose_response
+    try:
+        with pytest.raises(_SimulatedProcessLoss, match="response lost"):
+            store._put_entry_canonical_for_maintenance(
+                {"generation": "canonical"},
+                key="rebuild-key",
+                operation_id=operation_id,
+            )
+
+        committed = store.lifecycle_authority.read_entry("rebuild-key")
+        assert committed is not None
+        revision = committed.expectation.revision
+        assert published == 1
+        assert events == ["private_serialization"]
+        assert projection.attempts == 0
+
+        store.lifecycle.fault_hook = None
+        replayed = store._put_entry_canonical_for_maintenance(
+            {"generation": "canonical"},
+            key="rebuild-key",
+            operation_id=operation_id,
+        )
+
+        assert replayed == BlobReceipt(
+            operation_id=operation_id,
+            key=committed.key,
+            generation=committed.generation,
+            locator=committed.locator,
+            expectation=committed.expectation,
+            catalog_revision=revision,
+            projections={},
+        )
+        assert store.lifecycle_authority.read_entry("rebuild-key") == committed
+        assert published == 1
+        assert events == ["private_serialization"]
+        assert projection.attempts == 0
     finally:
         store.close()
 
