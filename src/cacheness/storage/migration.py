@@ -1865,6 +1865,104 @@ class OfflineMigrationService:
             raise ValueError(f"{role} manifest is not canonical")
         return manifest
 
+    def _source_state_drift(self, operation: str, detail: str, *, cause: Exception | None = None):
+        """Fail closed when live authenticated source state no longer matches a plan."""
+        error = CacheBlobMigrationPlanStaleError(
+            f"source_state_drift: {detail}",
+            context={"operation": operation, "reason": "source_state_drift", "run_id": self.run_id},
+        )
+        if cause is not None:
+            raise error from cause
+        raise error
+
+    def _revalidate_plan_source_state(
+        self,
+        plan: MigrationPlan,
+        *,
+        operation: str,
+        require_destination_revision: bool = True,
+    ) -> tuple[MigrationEntryAssessment, ...]:
+        """Authenticate and bind fresh source entries before a candidate mutation.
+
+        A canonical plan intentionally retains only fixed identifiers and source
+        digests.  The authenticated manifest and unknown catalog attributes are
+        therefore read from the source authority at execution, rather than
+        reconstructed from a shareable plan.
+        """
+        source_identity = self._source_authority.identity_snapshot()
+        if source_identity != plan.source_identity:
+            self._source_state_drift(operation, "source authority identity changed")
+        destination_identity = self._destination_authority.identity_snapshot()
+        if (
+            destination_identity.store_id != plan.destination_identity.store_id
+            or destination_identity.authority_kind != plan.destination_identity.authority_kind
+            or destination_identity.capability != plan.destination_identity.capability
+            or destination_identity.schema_version != plan.destination_identity.schema_version
+            or (
+                require_destination_revision
+                and destination_identity.revision != plan.destination_identity.revision
+            )
+        ):
+            raise CacheBlobMigrationPlanStaleError(
+                "migration destination identity changed; reinspection is required",
+                context={"operation": operation, "run_id": self.run_id},
+            )
+
+        expected = {assessment.entry.key: assessment for assessment in plan.assessments}
+        live: dict[str, MigrationEntryAssessment] = {}
+        cursor = None
+        while True:
+            page = self._inventory_page(self._source_authority, cursor)
+            if page.identity != plan.source_identity:
+                self._source_state_drift(operation, "source inventory identity changed")
+            for snapshot in page.entries:
+                planned = expected.get(snapshot.key)
+                if planned is None:
+                    self._source_state_drift(operation, "source inventory membership changed")
+                try:
+                    manifest = self._authenticated_manifest(snapshot.manifest, role="source")
+                except ValueError as exc:
+                    self._source_state_drift(
+                        operation, "source manifest authentication failed", cause=exc
+                    )
+                catalog_values = dict(manifest.catalog_values)
+                catalog_digest, manifest_digest = _canonical_source_binding(
+                    catalog_values, bytes(snapshot.manifest)
+                )
+                if (
+                    snapshot.generation != planned.entry.generation
+                    or manifest.digest != planned.entry.payload_digest
+                    or manifest.byte_size != planned.entry.byte_size
+                    or not hmac.compare_digest(
+                        catalog_digest, planned.source_catalog_digest
+                    )
+                    or not hmac.compare_digest(
+                        manifest_digest, planned.source_manifest_digest
+                    )
+                ):
+                    self._source_state_drift(operation, "plan-bound manifest or catalog changed")
+                live[snapshot.key] = MigrationEntryAssessment(
+                    entry=AuthorityInventoryEntry(
+                        key=snapshot.key,
+                        generation=snapshot.generation,
+                        locator=snapshot.locator,
+                        manifest=bytes(snapshot.manifest),
+                        payload_digest=manifest.digest,
+                        byte_size=manifest.byte_size,
+                    ),
+                    disposition=planned.disposition,
+                    reason=planned.reason,
+                    catalog_values=catalog_values,
+                    source_catalog_digest=catalog_digest,
+                    source_manifest_digest=manifest_digest,
+                )
+            if page.exhausted:
+                break
+            cursor = page.next_cursor
+        if set(live) != set(expected):
+            self._source_state_drift(operation, "source inventory membership changed")
+        return tuple(live[assessment.entry.key] for assessment in plan.assessments)
+
     def _configured_destination_contract(
         self, manifest: BlobManifest
     ) -> tuple[object, StoreVersionDimensions, tuple[str, int]]:
@@ -2435,11 +2533,11 @@ class OfflineMigrationService:
         target_contract_digest = hashlib.sha256(
             _canonical_plan_bytes(
                 {
-                    "catalog_values": _thaw_json(assessment.catalog_values),
                     "destination_authority": plan.destination_identity.authority_kind,
                     "destination_capability": plan.destination_identity.capability,
                     "destination_schema_version": plan.destination_identity.schema_version,
                     "destination_store_id": plan.destination_identity.store_id,
+                    "source_catalog_digest": assessment.source_catalog_digest,
                 }
             )
         ).hexdigest()
@@ -2452,9 +2550,7 @@ class OfflineMigrationService:
                     "key": assessment.entry.key,
                     "plan_digest": plan.digest,
                     "run_id": plan.run_id,
-                    "source_manifest_digest": hashlib.sha256(
-                        assessment.entry.manifest
-                    ).hexdigest(),
+                    "source_manifest_digest": assessment.source_manifest_digest,
                     "source_payload_digest": assessment.entry.payload_digest,
                     "target_contract_digest": target_contract_digest,
                     "version": "cacheness-rebuild-operation-v1",
@@ -2468,18 +2564,30 @@ class OfflineMigrationService:
         evidence: MaintenanceRunEvidence,
         *,
         require_complete: bool,
+        source_assessments: tuple[MigrationEntryAssessment, ...] | None = None,
     ) -> tuple[BlobReceipt, ...]:
         """Authenticate the recorded prefix against exact authority results only."""
+        if source_assessments is None:
+            source_assessments = self._revalidate_plan_source_state(
+                plan,
+                operation="migration.rebuild_receipts",
+                require_destination_revision=False,
+            )
+        included_assessments = tuple(
+            assessment
+            for assessment in source_assessments
+            if assessment.entry.key in {entry.entry.key for entry in plan.included_entries}
+        )
         receipts = self._flatten_rebuild_receipts(evidence)
-        if len(receipts) > len(plan.included_entries) or (
-            require_complete and len(receipts) != len(plan.included_entries)
+        if len(receipts) > len(included_assessments) or (
+            require_complete and len(receipts) != len(included_assessments)
         ):
             raise CacheBlobMigrationEvidenceMismatchError(
                 "rebuild receipt count does not match the bounded plan",
                 context={"operation": "migration.rebuild_receipts", "run_id": self.run_id},
             )
         for entry_ordinal, receipt in enumerate(receipts):
-            assessment = plan.included_entries[entry_ordinal]
+            assessment = included_assessments[entry_ordinal]
             operation_id = self._rebuild_operation_id(plan, assessment, entry_ordinal)
             replay = self._destination_authority.read_mutation(operation_id)
             if (
@@ -2680,11 +2788,21 @@ class OfflineMigrationService:
         lifecycle publisher; this coordinator never writes native payload
         bytes or authority rows directly.
         """
+        source_assessments = self._revalidate_plan_source_state(
+            plan,
+            operation="migration.stage_rebuild",
+            require_destination_revision=False,
+        )
+        included_assessments = tuple(
+            assessment
+            for assessment in source_assessments
+            if assessment.entry.key in {entry.entry.key for entry in plan.included_entries}
+        )
         current = self.read_evidence()
         self._validate_rebuild_plan(
             plan, require_destination_revision=current.state is MaintenanceEvidenceState.PLANNED
         )
-        if self._split_required(plan.included_entries) is not None:
+        if self._split_required(included_assessments) is not None:
             raise CacheBlobMigrationEvidenceMismatchError(
                 "rebuild plan exceeds one bounded run and must be split before staging",
                 context={"operation": "migration.stage_rebuild", "run_id": self.run_id},
@@ -2714,10 +2832,13 @@ class OfflineMigrationService:
             )
 
         receipts = self._validate_rebuild_receipts(
-            plan, evidence, require_complete=False
+            plan,
+            evidence,
+            require_complete=False,
+            source_assessments=source_assessments,
         )
         try:
-            for entry_ordinal, assessment in enumerate(plan.included_entries):
+            for entry_ordinal, assessment in enumerate(included_assessments):
                 if entry_ordinal < len(receipts):
                     continue
                 receipt = self._stage_rebuild_entry(plan, assessment, entry_ordinal)
@@ -2778,6 +2899,16 @@ class OfflineMigrationService:
 
     def verify_rebuild(self, plan: MigrationPlan) -> MigrationStepResult:
         """Verify the exact included destination set before explicit acceptance."""
+        source_assessments = self._revalidate_plan_source_state(
+            plan,
+            operation="migration.verify_rebuild",
+            require_destination_revision=False,
+        )
+        included_assessments = tuple(
+            assessment
+            for assessment in source_assessments
+            if assessment.entry.key in {entry.entry.key for entry in plan.included_entries}
+        )
         self._validate_rebuild_plan(plan)
         current = self.read_evidence()
         if current.state is MaintenanceEvidenceState.REBUILD_STAGED:
@@ -2808,10 +2939,13 @@ class OfflineMigrationService:
             )
 
         receipts = self._validate_rebuild_receipts(
-            plan, evidence, require_complete=True
+            plan,
+            evidence,
+            require_complete=True,
+            source_assessments=source_assessments,
         )
         try:
-            for assessment, receipt in zip(plan.included_entries, receipts, strict=True):
+            for assessment, receipt in zip(included_assessments, receipts, strict=True):
                 with self.destination.open_entry(assessment.entry.key) as destination_entry:
                     if (
                         destination_entry is None
@@ -2845,7 +2979,7 @@ class OfflineMigrationService:
                 {
                     "catalog": [
                         _thaw_json(assessment.catalog_values)
-                        for assessment in plan.included_entries
+                        for assessment in included_assessments
                     ],
                     "receipt_digest": self._rebuild_output_digest(receipts),
                 }
@@ -2876,11 +3010,21 @@ class OfflineMigrationService:
         lifecycle authority.  This evidence checkpoint is corroborative
         offline maintenance state, never a second visibility authority.
         """
+        source_assessments = self._revalidate_plan_source_state(
+            plan,
+            operation="migration.accept_rebuild",
+            require_destination_revision=False,
+        )
         self._validate_rebuild_plan(plan)
         evidence = self._expect_rebuild_evidence(
             MaintenanceEvidenceState.REBUILD_VERIFIED, plan=plan
         )
-        self._validate_rebuild_receipts(plan, evidence, require_complete=True)
+        self._validate_rebuild_receipts(
+            plan,
+            evidence,
+            require_complete=True,
+            source_assessments=source_assessments,
+        )
         accepted_digest = hashlib.sha256(
             f"{plan.plan_id}:{plan.digest}:accepted".encode("utf-8")
         ).hexdigest()
@@ -2903,9 +3047,16 @@ class OfflineMigrationService:
         return MigrationStepResult(MaintenanceEvidenceState.REBUILD_ACCEPTED, True, self.evidence_path)
 
     def _authority_candidate_entries(
-        self, plan: MigrationPlan
+        self,
+        plan: MigrationPlan,
+        *,
+        source_assessments: tuple[MigrationEntryAssessment, ...] | None = None,
     ) -> tuple[AuthorityInventoryEntry, ...]:
         """Load only descriptors that the destination authority has attributed."""
+        if source_assessments is None:
+            source_assessments = self._revalidate_plan_source_state(
+                plan, operation="migration.candidate_evidence"
+            )
         loader = getattr(self._destination_authority, "candidate_entries_for_run", None)
         if not callable(loader):
             raise CacheBlobMigrationEvidenceMismatchError(
@@ -2920,7 +3071,7 @@ class OfflineMigrationService:
                 "destination authority returned malformed candidate descriptors",
                 context={"operation": "migration.resume", "run_id": self.run_id},
             )
-        expected = {assessment.entry.key: assessment.entry for assessment in plan.assessments}
+        expected = {assessment.entry.key: assessment.entry for assessment in source_assessments}
         by_key = {entry.key: entry for entry in observed}
         if len(by_key) != len(observed) or set(by_key) - set(expected):
             raise CacheBlobMigrationEvidenceMismatchError(
@@ -2928,7 +3079,7 @@ class OfflineMigrationService:
                 context={"operation": "migration.resume", "run_id": self.run_id},
             )
         ordered: list[AuthorityInventoryEntry] = []
-        for assessment in plan.assessments:
+        for assessment in source_assessments:
             candidate = by_key.get(assessment.entry.key)
             if candidate is None:
                 continue
@@ -3012,6 +3163,9 @@ class OfflineMigrationService:
 
     def stage(self, plan: MigrationPlan) -> MigrationStepResult:
         """Copy payloads and checkpoint each only after authority attribution."""
+        source_assessments = self._revalidate_plan_source_state(
+            plan, operation="migration.stage"
+        )
         self._validate_plan(plan)
         if plan.plan_kind is not MigrationPlanKind.MIGRATION:
             raise CacheBlobMigrationEvidenceMismatchError(
@@ -3041,7 +3195,9 @@ class OfflineMigrationService:
                 context={"operation": "migration.stage", "run_id": self.run_id},
             )
 
-        candidates = list(self._authority_candidate_entries(plan))
+        candidates = list(
+            self._authority_candidate_entries(plan, source_assessments=source_assessments)
+        )
         batch_references = list(current.candidate_batch_references)
         observed_batches = tuple(
             self._batch_receipt(plan, entry, ordinal)
@@ -3073,7 +3229,7 @@ class OfflineMigrationService:
                     completed_output_digests={"plan": plan.digest},
                 )
             )
-        expected = {assessment.entry.key: assessment for assessment in plan.assessments}
+        expected = {assessment.entry.key: assessment for assessment in source_assessments}
         seen_keys: set[str] = set()
         cursor = None
         while True:

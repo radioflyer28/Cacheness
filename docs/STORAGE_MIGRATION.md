@@ -64,6 +64,37 @@ serialize signing material, connection strings, credentials, or provider file
 locations. Human text is a rendering of validated model data; it is never a
 second plan format.
 
+### Shareable plans and protected maintenance evidence
+
+Canonical plans are shareable authorization records, not exports of source
+metadata. Each entry has a fixed allowlist of safe identifiers, generation,
+payload digest, byte size, disposition, reason, and separate SHA-256 bindings
+for the authenticated source catalog and signed manifest. The raw catalog
+values, full manifest, handler metadata, managed locator, provider credentials,
+and signing material are never in canonical plan bytes. The executor reads and
+authenticates the current source manifest again, recomputes both bindings, and
+refuses with `source_state_drift` before a candidate write if either binding or
+the source inventory changes. A caller-provided digest cannot authorize an
+unauthenticated manifest.
+
+The main authenticated run evidence records only bounded lifecycle facts,
+digests, receipt references, and stable error reasons. Existing
+authority-owned candidate evidence may retain a bounded exact *target* manifest
+after that candidate has been attributed by the lifecycle authority. Such a
+target manifest can contain application or handler metadata needed for exact
+resume or abort, but it is protected maintenance evidence: plans, reports,
+diagnostics, and logs never render its descriptor body. No maintenance artifact
+may contain signing keys, key-provider material, cloud credentials, service or
+database credentials, or equivalent infrastructure secrets.
+
+The entry, payload-byte, and evidence-byte limits define one independently
+recoverable maintenance run. A larger store must be split before it stages any
+candidate. The accepted recovery boundary is also deliberate: if a payload is
+published and the process dies before the authority checkpoint, it is an
+invisible, unattributed, unadopted orphan. It is outside the exact-reclamation
+guarantee; it never becomes visible data, while authority visibility and
+integrity checks remain fail-closed under ADR 0001.
+
 ## Version window and inspection
 
 The current canonical post-refactor layout is the first released baseline. It
