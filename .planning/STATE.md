@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 07
 current_phase_name: Explicit Migration and Rebuild Cutover
 status: executing
-stopped_at: Completed 07-17-PLAN.md
-last_updated: "2026-09-11T17:32:57.062Z"
+stopped_at: Completed 07-18-PLAN.md
+last_updated: "2026-09-11T17:53:58.322Z"
 last_activity: 2026-09-11
 last_activity_desc: Phase 07 execution started
-state_head: 4b528e2bc3aae2954bdb52b58b124c1b487f6465
+state_head: 07dfc95ee114b8cd1ce80152a77f8d5aa7ee1677
 progress:
   total_phases: 8
   completed_phases: 5
   total_plans: 100
-  completed_plans: 97
+  completed_plans: 98
 milestone_name: milestone
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-09-06)
 ## Current Position
 
 Phase: 07 (Explicit Migration and Rebuild Cutover) — EXECUTING
-Plan: 17 of 19
+Plan: 18 of 19
 Status: Ready to execute
 Last activity: 2026-09-11 — Phase 07 Plan 14 operation replay completed
 
@@ -180,6 +180,7 @@ Phase 03 rows in this historical table include superseded attempts and do not de
 | Phase 07 P15 | 35min | 2 tasks | 3 files |
 | Phase 07 P16 | 18min | 2 tasks | 5 files |
 | Phase 07 P17 | 10min | 2 tasks | 4 files |
+| Phase 07 P18 | 20min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -402,6 +403,8 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - [Phase 07]: Canonical migration plans bind source catalog and manifests by digest without serializing raw source data.
 - [Phase 07]: Migration and rebuild execution re-authenticate live source state before candidate mutation and reject source_state_drift.
 - [Phase 07]: Exact target descriptors remain only in existing bounded authority-owned candidate evidence; pre-checkpoint orphans stay invisible and unadopted.
+- [Phase 07]: Phase 7 fixed claims use AST-validated exact pytest selectors before execution.
+- [Phase 07]: Plans 07-12 through 07-19 threat rows are checked against a literal 38-ID ownership oracle.
 
 ### Pending Todos
 
@@ -432,6 +435,6 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 
 ## Session Continuity
 
-Last session: 2026-09-11T17:32:56.948Z
-Stopped at: Completed 07-17-PLAN.md
+Last session: 2026-09-11T17:53:58.204Z
+Stopped at: Completed 07-18-PLAN.md
 Resume file: None
