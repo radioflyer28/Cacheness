@@ -482,3 +482,125 @@ def test_projection_equipped_rebuild_replays_canonical_receipt_without_preaccept
     finally:
         source.close()
         destination.close()
+
+
+def test_rebuild_checkpoints_exact_destination_receipts_and_resumes_each_rebuild_state(
+    tmp_path: Path,
+) -> None:
+    """Every durable rebuild state resumes only from authenticated exact receipts."""
+
+    provider = _SharedMemoryKeyProvider()
+    source = _store(tmp_path / "source", provider)
+    destination = _store(tmp_path / "destination", provider)
+    try:
+        source.put_entry({"value": "first"}, key="first")
+        source.put_entry({"value": "second"}, key="second")
+        service = _service(source, destination, tmp_path / "maintenance")
+        plan = service.create_rebuild_plan(service.inspect())
+        service.confirm_rebuild(plan, confirmation=service.rebuild_confirmation(plan))
+
+        def lose_after_first_receipt(boundary: str) -> None:
+            if boundary == "rebuild.destination_committed_before_receipt_checkpoint":
+                raise _SimulatedProcessLoss("restart while rebuilding")
+
+        service._rebuild_fault_hook = lose_after_first_receipt
+        with pytest.raises(_SimulatedProcessLoss):
+            service.stage_rebuild(plan)
+        assert service.read_evidence().state is MaintenanceEvidenceState.REBUILDING
+
+        restarting = _service(source, destination, tmp_path / "maintenance")
+        assert restarting.resume(
+            plan, run_id=restarting.run_id, evidence_path=restarting.evidence_path
+        ).state is MaintenanceEvidenceState.REBUILD_STAGED
+        staged_evidence = restarting.read_evidence()
+        assert len(staged_evidence.rebuild_receipt_batches) == 2
+        assert all(
+            receipt.operation_id == restarting._rebuild_operation_id(
+                plan, plan.included_entries[index], index
+            )
+            for index, receipt in enumerate(
+                restarting._flatten_rebuild_receipts(staged_evidence)
+            )
+        )
+
+        verifying = restarting._write_evidence(
+            restarting._new_evidence(
+                state=MaintenanceEvidenceState.REBUILD_VERIFYING,
+                plan_digest=plan.digest,
+                source_identity=plan.source_identity,
+                destination_identity=plan.destination_identity,
+                completed_steps=staged_evidence.completed_steps,
+                authority_receipts=staged_evidence.authority_receipts,
+                cleanup_debt=staged_evidence.cleanup_debt,
+                **restarting._rebuild_progress(staged_evidence),
+                completed_output_digests=staged_evidence.completed_output_digests,
+            )
+        )
+        assert verifying.state is MaintenanceEvidenceState.REBUILD_VERIFYING
+
+        assert restarting.resume(
+            plan, run_id=restarting.run_id, evidence_path=restarting.evidence_path
+        ).state is MaintenanceEvidenceState.REBUILD_VERIFIED
+        assert restarting.resume(
+            plan, run_id=restarting.run_id, evidence_path=restarting.evidence_path
+        ).state is MaintenanceEvidenceState.REBUILD_VERIFIED
+    finally:
+        source.close()
+        destination.close()
+
+
+def test_rebuild_verification_failure_cleans_only_exact_receipts_and_persists_debt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Changed ownership is retained and recorded as retryable exact cleanup debt."""
+
+    provider = _SharedMemoryKeyProvider()
+    source = _store(tmp_path / "source", provider)
+    destination = _store(tmp_path / "destination", provider)
+    try:
+        source.put_entry({"value": "first"}, key="first")
+        source.put_entry({"value": "second"}, key="second")
+        source.put_entry({"value": "third"}, key="third")
+        service = _service(source, destination, tmp_path / "maintenance")
+        plan = service.create_rebuild_plan(service.inspect())
+        service.confirm_rebuild(plan, confirmation=service.rebuild_confirmation(plan))
+        original_stage_entry = service._stage_rebuild_entry
+        original_delete = destination.delete
+
+        def conflict_then_fail(rebuild_plan, assessment, entry_ordinal):
+            if entry_ordinal == 2:
+                destination.put_entry({"value": "new-owner"}, key="first")
+                raise OSError("verification staging failed")
+            return original_stage_entry(rebuild_plan, assessment, entry_ordinal)
+
+        def fail_exact_second_delete(key, *, expected=None):
+            if key == "second":
+                raise OSError("destination cleanup unavailable")
+            return original_delete(key, expected=expected)
+
+        monkeypatch.setattr(service, "_stage_rebuild_entry", conflict_then_fail)
+        monkeypatch.setattr(destination, "delete", fail_exact_second_delete)
+        with pytest.raises(OSError, match="verification staging failed"):
+            service.stage_rebuild(plan)
+
+        evidence = service.read_evidence()
+        first, second = tuple(
+            receipt
+            for batch in evidence.rebuild_receipt_batches
+            for receipt in batch.receipts
+        )
+        assert evidence.state is MaintenanceEvidenceState.ABORTED
+        assert evidence.retired_rebuild_operation_ids == ()
+        assert evidence.cleanup_debt == (
+            f"rebuild:{second.operation_id}:second:{second.generation}:{second.locator}",
+            f"rebuild:{first.operation_id}:first:{first.generation}:{first.locator}",
+        )
+        assert destination.get("first") == {"value": "new-owner"}
+        assert destination.get("second") == {"value": "second"}
+        assert source.get("first") == {"value": "first"}
+        assert source.get("second") == {"value": "second"}
+        assert source.get("third") == {"value": "third"}
+    finally:
+        source.close()
+        destination.close()
