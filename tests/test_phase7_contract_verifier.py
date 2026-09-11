@@ -368,6 +368,83 @@ def test_fixed_manifest_includes_every_gap_plan_threat_exactly_once() -> None:
     assert verifier.validate_gap_plan_threat_inventory(REPOSITORY_ROOT) == ()
 
 
+def test_fixed_manifest_maps_current_three_gap_repairs_exactly() -> None:
+    """The latest repair set cannot be satisfied by adjacent whole-file tests."""
+    verifier = _load_verifier()
+
+    transform = (
+        "tests/test_migration_cutover.py::"
+        "test_same_version_different_format_uses_exact_directed_transform_and_destination_manifest"
+    )
+    s3_abort = (
+        "tests/test_migration_remote_contract.py::"
+        "test_s3_abort_typed_operational_failures_checkpoint_exact_debt_and_retry"
+    )
+    abort_count = (
+        "tests/test_migration_cutover.py::"
+        "test_partial_abort_receipt_counts_only_deleted_or_proven_absent_candidates"
+    )
+    rebuild_settlement = (
+        "tests/test_rebuild_workflow.py::"
+        "test_rebuild_cleanup_debt_stays_resumable_until_exact_settlement"
+    )
+    terminal_evidence = (
+        "tests/test_rebuild_workflow.py::"
+        "test_rebuild_evidence_rejects_terminal_aborted_cleanup_debt"
+    )
+    forged_debt = (
+        "tests/test_rebuild_workflow.py::"
+        "test_rebuild_cleanup_retry_rejects_forged_debt_without_payload_access"
+    )
+    changed_owner = (
+        "tests/test_rebuild_workflow.py::"
+        "test_rebuild_cleanup_retry_preserves_changed_current_ownership"
+    )
+
+    assert verifier.PHASE7_PLAN_PATHS[-3:] == (
+        ".planning/phases/07-explicit-migration-and-rebuild-cutover/07-20-PLAN.md",
+        ".planning/phases/07-explicit-migration-and-rebuild-cutover/07-21-PLAN.md",
+        ".planning/phases/07-explicit-migration-and-rebuild-cutover/07-22-PLAN.md",
+    )
+    assert len(verifier.GAP_PLAN_THREAT_IDS) == 50
+    assert len(verifier._DECLARED_PHASE7_THREAT_IDS) == 96
+    assert {
+        "T-07-20-01",
+        "T-07-20-02",
+        "T-07-20-03",
+        "T-07-20-04",
+        "T-07-21-01",
+        "T-07-21-02",
+        "T-07-21-03",
+        "T-07-21-04",
+        "T-07-22-01",
+        "T-07-22-02",
+        "T-07-22-03",
+        "T-07-22-04",
+    }.issubset(verifier.GAP_PLAN_THREAT_IDS)
+    assert verifier.SECURITY_THREAT_NODES["T-07-20-01"] == (transform,)
+    assert verifier.SECURITY_THREAT_NODES["T-07-20-02"] == (s3_abort,)
+    assert verifier.SECURITY_THREAT_NODES["T-07-20-03"] == (s3_abort,)
+    assert verifier.SECURITY_THREAT_NODES["T-07-20-04"] == (abort_count,)
+    assert verifier.SECURITY_THREAT_NODES["T-07-21-01"] == (rebuild_settlement,)
+    assert verifier.SECURITY_THREAT_NODES["T-07-21-02"] == (terminal_evidence,)
+    assert verifier.SECURITY_THREAT_NODES["T-07-21-03"] == (forged_debt,)
+    assert verifier.SECURITY_THREAT_NODES["T-07-21-04"] == (changed_owner,)
+    assert transform in verifier.MIGRATION_REQUIREMENT_NODES["MIGR-04"]
+    assert s3_abort in verifier.MIGRATION_REQUIREMENT_NODES["MIGR-04"]
+    assert {s3_abort, abort_count, rebuild_settlement, terminal_evidence, forged_debt, changed_owner}.issubset(
+        verifier.MIGRATION_REQUIREMENT_NODES["MIGR-05"]
+    )
+    assert transform in verifier.DECISION_NODES["D-03"]
+    assert transform in verifier.DECISION_NODES["D-10"]
+    assert s3_abort in verifier.DECISION_NODES["D-16"]
+    assert rebuild_settlement in verifier.DECISION_NODES["D-19"]
+    assert forged_debt in verifier.DECISION_NODES["D-20"]
+    assert changed_owner in verifier.DECISION_NODES["D-21"]
+    assert transform in verifier.FLAGGED_ASSUMPTION_NODES["A-MIGR04"]
+    assert rebuild_settlement in verifier.FLAGGED_ASSUMPTION_NODES["A-MIGR05"]
+
+
 def test_fixed_gap_supply_chain_threats_map_to_frozen_command_contracts() -> None:
     """Gap-plan supply-chain evidence binds only to frozen command validation."""
     verifier = _load_verifier()
