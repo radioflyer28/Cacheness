@@ -203,6 +203,7 @@ def _sqlite_store(root: Path, key_provider: _SharedMemoryKeyProvider) -> BlobSto
         manifest_key_provider=key_provider,
     )
     store.initialize()
+    store.handlers.register_handler(_MemoryMigrationHandler(), priority=0)
     return store
 
 
