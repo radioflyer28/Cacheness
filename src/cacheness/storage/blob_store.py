@@ -347,6 +347,10 @@ class BlobStore:
         # provisioned through this public boundary, while existing layouts
         # remain read-only validation failures rather than implicit upgrades.
         self.lifecycle_authority.preflight_mutation()
+        # The decorator's early admission check may have observed the
+        # PostgreSQL authority before it loaded its persisted identity. Re-read
+        # the canonical worker fence before any payload or key material work.
+        self._require_canonical_store()
         self._materialize_authority_store()
         if self.topology.qualified_profile.requirements.coordination_scope == "multiple_hosts":
             # A remote authority must not materialize its catalog merely to
