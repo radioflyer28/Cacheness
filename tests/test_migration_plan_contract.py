@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from cacheness.storage.migration import (
@@ -22,6 +24,71 @@ from cacheness.storage.migration import (
 )
 from cacheness.storage.migration_authority import AuthorityIdentitySnapshot, AuthorityInventoryEntry
 from cacheness.storage.manifest import StoreVersionDimensions
+
+
+def test_machine_plan_digest_binds_sensitive_catalog_and_manifest_without_serializing_them() -> None:
+    """Plans bind authenticated source state without becoming a metadata export."""
+    sentinel = "source-state-secret-sentinel"
+    source_contract = _identity("release-2")
+    compatibility = CompatibilityMatrix(
+        ReleaseWindow(current_release="release-2", immediately_previous_release="release-1")
+    ).classify(source_contract, source_contract)
+
+    def build_plan(*, catalog_value: str, manifest_value: str) -> MigrationPlan:
+        return MigrationPlan.create(
+            run_id="confidential-plan",
+            source_identity=AuthorityIdentitySnapshot("source-store", 4, "sqlite"),
+            destination_identity=AuthorityIdentitySnapshot("destination-store", 2, "sqlite"),
+            entries=(
+                MigrationEntryAssessment(
+                    entry=AuthorityInventoryEntry(
+                        key="entry-a",
+                        generation="generation-a",
+                        locator="generations/private-locator",
+                        manifest=json.dumps(
+                            {
+                                "credential": sentinel,
+                                "handler_attribute": manifest_value,
+                                "signing_material": sentinel,
+                            },
+                            sort_keys=True,
+                        ).encode("utf-8"),
+                        payload_digest="a" * 64,
+                        byte_size=7,
+                    ),
+                    disposition=MigrationDisposition.MIGRATABLE,
+                    reason=MigrationReason.COMPATIBLE_EDGE,
+                    catalog_values={
+                        "application_metadata": catalog_value,
+                        "credential": sentinel,
+                    },
+                ),
+            ),
+            release_window=ReleaseWindow("release-2", "release-1"),
+            compatibility=compatibility,
+        )
+
+    plan = build_plan(catalog_value=sentinel, manifest_value=sentinel)
+    changed_catalog = build_plan(catalog_value="changed-catalog", manifest_value=sentinel)
+    changed_manifest = build_plan(catalog_value=sentinel, manifest_value="changed-manifest")
+    encoded = plan.to_canonical_bytes()
+    record = json.loads(encoded)
+    entry = record["entries"][0]
+
+    assert plan.digest != changed_catalog.digest
+    assert plan.digest != changed_manifest.digest
+    assert sentinel.encode("utf-8") not in encoded
+    assert "catalog_values" not in entry
+    assert "manifest" not in entry["entry"]
+    assert set(entry) == {
+        "disposition",
+        "entry",
+        "reason",
+        "source_catalog_digest",
+        "source_manifest_digest",
+    }
+    assert set(entry["entry"]) == {"byte_size", "generation", "key", "payload_digest"}
+    assert MigrationPlan.from_canonical_bytes(encoded).to_canonical_bytes() == encoded
 
 
 def _identity(
