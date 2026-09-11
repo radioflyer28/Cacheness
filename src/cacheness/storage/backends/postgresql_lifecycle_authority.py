@@ -32,6 +32,7 @@ from cacheness.storage.lifecycle_authority import (
     CleanupDebt,
     EntryExpectation,
     EntrySnapshot,
+    MutationReplay,
     MutationSpec,
     PageToken,
     PreparedMutation,
@@ -1499,6 +1500,51 @@ class PostgresqlLifecycleAuthority:
             expected=EntryExpectation(row[3], row[4], row[5], row[6]), manifest=bytes(row[7]),
         )
         return _MutationRow(spec, row[8], row[9], row[10])
+
+    def read_mutation(self, operation_id: str) -> MutationReplay | None:
+        """Read one exact operation replay from the existing remote authority."""
+        MutationSpec.validate_operation_id(operation_id)
+
+        def read(cursor: Any) -> MutationReplay | None:
+            try:
+                mutation = self._read_mutation(cursor, operation_id)
+                if mutation is None:
+                    return None
+                if (mutation.verified_digest is None) != (mutation.verified_size is None):
+                    raise ValueError("verification proof fields are incomplete")
+                proof = (
+                    None
+                    if mutation.verified_digest is None
+                    else VerificationProof(
+                        mutation.verified_digest,
+                        mutation.verified_size,
+                        mutation.spec.manifest,
+                    )
+                )
+                prepared = PreparedMutation(operation_id, mutation.spec)
+                if mutation.state == "prepared":
+                    return MutationReplay(prepared, mutation.state, proof)
+                if mutation.state == "promoted":
+                    return MutationReplay(
+                        prepared,
+                        mutation.state,
+                        proof,
+                        self._promoted_result(cursor, operation_id),
+                    )
+            except (TypeError, ValueError) as error:
+                raise CacheBlobBackendError(
+                    "PostgreSQL lifecycle authority mutation row is malformed",
+                    context={
+                        "operation": "postgresql_lifecycle_authority",
+                        "stage": "read_mutation",
+                    },
+                ) from error
+            raise CacheBlobLifecycleConflictError(
+                "PostgreSQL lifecycle operation is not replayable",
+                context={"operation_id": operation_id, "state": mutation.state},
+            )
+
+        return self._read_only("read_mutation", read)
 
     def _entry_from_row(self, row: tuple[Any, ...], *, stage: str) -> EntrySnapshot:
         """Decode one canonical row only after its bounded values corroborate."""

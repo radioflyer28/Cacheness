@@ -788,6 +788,74 @@ def test_prepare_and_verification_use_exact_bound_values() -> None:
     assert "returning operation_id" in _query_text(verification_query)
 
 
+def test_postgresql_read_mutation_returns_exact_prepared_and_promoted_replay() -> None:
+    """A deterministic read transcript reconstructs one operation without mutation."""
+    from cacheness.storage.backends.postgresql_lifecycle_authority import (
+        PostgresqlLifecycleAuthority,
+    )
+
+    spec = _spec()
+    proof = VerificationProof("c" * 64, len(spec.manifest), spec.manifest)
+    prepared_row = (
+        spec.key,
+        spec.generation,
+        spec.candidate_locator,
+        spec.expected.lineage,
+        spec.expected.revision,
+        spec.expected.generation,
+        spec.expected.manifest_digest,
+        spec.manifest,
+        proof.digest,
+        proof.byte_size,
+        "prepared",
+    )
+    prepared_factory = _Factory(scripts=[[None], [prepared_row]])
+    prepared_authority = PostgresqlLifecycleAuthority(
+        prepared_factory, schema="phase5_authority"
+    )
+
+    assert prepared_authority.read_mutation("absent-operation") is None
+    prepared = prepared_authority.read_mutation(spec.operation_id)
+    assert prepared is not None
+    assert prepared.prepared == PreparedMutation(spec.operation_id, spec)
+    assert prepared.state == "prepared"
+    assert prepared.verification == proof
+    assert prepared.promotion is None
+    prepared_statements = [
+        _query_text(query)
+        for connection in prepared_factory.connections
+        for query, _ in connection.executions
+    ]
+    assert any(
+        "mutations" in statement and "select" in statement
+        for statement in prepared_statements
+    )
+    assert not any("insert into" in statement or "update " in statement for statement in prepared_statements)
+
+    promoted_row = prepared_row[:-1] + ("promoted",)
+    promotion_row = (
+        spec.key,
+        spec.generation,
+        spec.candidate_locator,
+        spec.manifest,
+        1,
+        2,
+    )
+    promoted_factory = _Factory(scripts=[[promoted_row, promotion_row, []]])
+    promoted_authority = PostgresqlLifecycleAuthority(
+        promoted_factory, schema="phase5_authority"
+    )
+
+    promoted = promoted_authority.read_mutation(spec.operation_id)
+    assert promoted is not None
+    assert promoted.prepared == PreparedMutation(spec.operation_id, spec)
+    assert promoted.state == "promoted"
+    assert promoted.verification == proof
+    assert promoted.promotion is not None
+    assert promoted.promotion.entry.expectation.revision == 2
+    assert promoted.promotion.cleanup_debt == ()
+
+
 def test_verification_rejects_zero_affected_rows_and_rolls_back() -> None:
     """A proof can only attach to its exact prepared mutation."""
     from cacheness.storage.backends.postgresql_lifecycle_authority import (

@@ -38,6 +38,7 @@ from .lifecycle_authority import (
     CleanupDebt,
     EntryExpectation,
     EntrySnapshot,
+    MutationReplay,
     MutationSpec,
     PageToken,
     PreparedMutation,
@@ -1445,6 +1446,56 @@ class SqliteLifecycleAuthority:
             ),
             tuple(CleanupDebt(*debt_row) for debt_row in debt_rows),
         )
+
+    def read_mutation(self, operation_id: str) -> MutationReplay | None:
+        """Read one exact replay record without changing SQLite authority state."""
+        MutationSpec.validate_operation_id(operation_id)
+        with self._read_connection() as connection:
+            if connection is None:
+                return None
+            row = connection.execute(
+                "SELECT key, generation, locator, expected_lineage, expected_revision, "
+                "expected_generation, expected_manifest_digest, manifest, verified_digest, "
+                "verified_size, state FROM mutations WHERE operation_id = ?",
+                (operation_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            try:
+                spec = MutationSpec.create(
+                    operation_id=operation_id,
+                    key=row[0],
+                    generation=row[1],
+                    candidate_locator=row[2],
+                    expected=EntryExpectation(row[3], row[4], row[5], row[6]),
+                    manifest=bytes(row[7]),
+                )
+                prepared = PreparedMutation(operation_id, spec)
+                if (row[8] is None) != (row[9] is None):
+                    raise ValueError("verification proof fields are incomplete")
+                proof = (
+                    None
+                    if row[8] is None
+                    else VerificationProof(row[8], row[9], spec.manifest)
+                )
+                if row[10] == "prepared":
+                    return MutationReplay(prepared, row[10], proof)
+                if row[10] == "promoted":
+                    return MutationReplay(
+                        prepared,
+                        row[10],
+                        proof,
+                        self._promoted_result(connection, operation_id),
+                    )
+            except (TypeError, ValueError) as error:
+                raise CacheBlobBackendError(
+                    "SQLite lifecycle authority mutation row is malformed",
+                    context={"operation": "lifecycle_authority_read_mutation"},
+                ) from error
+            raise CacheBlobLifecycleConflictError(
+                "SQLite lifecycle operation is not replayable",
+                context={"operation_id": operation_id, "state": row[10]},
+            )
 
     def _classify_promoted_mutation(
         self,

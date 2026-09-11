@@ -122,6 +122,73 @@ def _promote(authority: object, operation_id: str) -> object:
 
 
 @pytest.mark.parametrize("kind", ("memory", "sqlite"))
+def test_local_authorities_expose_exact_operation_replay_without_new_authority_state(
+    tmp_path: Path, kind: str
+) -> None:
+    """Exact operation reads are side-effect-free across local authority tiers."""
+    authority = (
+        InMemoryLifecycleAuthority()
+        if kind == "memory"
+        else SqliteLifecycleAuthority.for_root(tmp_path / "sqlite-replay")
+    )
+    spec = MutationSpec.create(
+        operation_id=f"{kind}-replay",
+        key="replay-key",
+        generation="replay-generation",
+        candidate_locator="generations/replay-generation.native",
+        expected=EntryExpectation.absent(),
+        manifest=b"replay-manifest",
+    )
+    proof = VerificationProof("b" * 64, 7, spec.manifest)
+    try:
+        assert authority.read_mutation(spec.operation_id) is None
+
+        prepared = authority.prepare_mutation(spec)
+        prepared_state = authority.snapshot_state()
+        replay = authority.read_mutation(spec.operation_id)
+        assert replay is not None
+        assert replay.prepared == prepared
+        assert replay.state == "prepared"
+        assert replay.verification is None
+        assert replay.promotion is None
+        assert authority.snapshot_state() == prepared_state
+
+        authority.record_verification(prepared, proof)
+        verified_state = authority.snapshot_state()
+        verified = authority.read_mutation(spec.operation_id)
+        assert verified is not None
+        assert verified.prepared == prepared
+        assert verified.state == "prepared"
+        assert verified.verification == proof
+        assert verified.promotion is None
+        assert authority.snapshot_state() == verified_state
+
+        promoted = authority.promote_mutation(prepared)
+        promoted_state = authority.snapshot_state()
+        replayed = authority.read_mutation(spec.operation_id)
+        assert replayed is not None
+        assert replayed.prepared == prepared
+        assert replayed.state == "promoted"
+        assert replayed.verification == proof
+        assert replayed.promotion == promoted
+        assert authority.snapshot_state() == promoted_state
+
+        with pytest.raises(CacheBlobLifecycleConflictError):
+            authority.prepare_mutation(
+                MutationSpec.create(
+                    operation_id=spec.operation_id,
+                    key="different-key",
+                    generation=spec.generation,
+                    candidate_locator=spec.candidate_locator,
+                    expected=EntryExpectation.absent(),
+                    manifest=spec.manifest,
+                )
+            )
+    finally:
+        authority.close()
+
+
+@pytest.mark.parametrize("kind", ("memory", "sqlite"))
 def test_local_tiers_share_safety_without_claiming_equal_progress(
     tmp_path: Path, kind: str
 ) -> None:
