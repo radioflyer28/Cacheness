@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 07
 current_phase_name: Explicit Migration and Rebuild Cutover
 status: executing
-stopped_at: Completed 07-14-PLAN.md
-last_updated: "2026-09-11T05:54:38.842Z"
-last_activity: 2026-09-10
+stopped_at: Completed 07-15-PLAN.md
+last_updated: "2026-09-11T16:54:49.612Z"
+last_activity: 2026-09-11
 last_activity_desc: Phase 07 execution started
-state_head: 1de0566bd7b022035b3b383dc9c442dc181970f5
+state_head: 511725cfdb69f1f1946ab30ac18ca475fec5602c
 progress:
   total_phases: 8
   completed_phases: 5
   total_plans: 100
-  completed_plans: 94
+  completed_plans: 95
 milestone_name: milestone
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-09-06)
 ## Current Position
 
 Phase: 07 (Explicit Migration and Rebuild Cutover) — EXECUTING
-Plan: 14 of 19
+Plan: 15 of 19
 Status: Ready to execute
 Last activity: 2026-09-11 — Phase 07 Plan 14 operation replay completed
 
@@ -177,6 +177,7 @@ Phase 03 rows in this historical table include superseded attempts and do not de
 | Phase 07 P12 | 23min | 2 tasks | 8 files |
 | Phase 07-explicit-migration-and-rebuild-cutover P13 | 2h 57m | 2 tasks | 3 files |
 | Phase 07 P14 | 19min | 2 tasks | 9 files |
+| Phase 07 P15 | 35min | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -392,6 +393,8 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - [Phase 07]: Maintenance operation retries read only an exact canonical authority record; paths, listings, timing, and caller receipts never establish lifecycle ownership or completion.
 - [Phase 07]: Projection suppression is internal to the maintenance canonical-put receipt path; ordinary BlobStore writes retain normal post-commit projection behavior.
 - [Phase 07]: Prepared replay accepts only the authority-indexed immutable locator when signed descriptor digest and size corroborate it; mismatches fail closed.
+- [Phase 07]: Rebuild retries derive deterministic operation IDs and accept completion only from the exact existing lifecycle-authority replay; bounded evidence stores projection-free BlobReceipt identities, never a second intent.
+- [Phase 07]: Rebuild cleanup deletes only exact receipt-matching generations; changed ownership and operational deletion failures remain explicit rebuild cleanup debt.
 
 ### Pending Todos
 
@@ -422,6 +425,6 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 
 ## Session Continuity
 
-Last session: 2026-09-11T05:54:38.705Z
-Stopped at: Completed 07-14-PLAN.md
+Last session: 2026-09-11T16:54:49.393Z
+Stopped at: Completed 07-15-PLAN.md
 Resume file: None
