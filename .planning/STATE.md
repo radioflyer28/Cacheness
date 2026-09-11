@@ -2,18 +2,18 @@
 gsd_state_version: 1.0
 milestone: v1.0
 current_phase: 07
-current_phase_name: explicit-migration-and-rebuild-cutover
+current_phase_name: Explicit Migration and Rebuild Cutover
 status: executing
-stopped_at: Completed 07-19-PLAN.md
-last_updated: "2026-09-11T21:09:04.930Z"
+stopped_at: Completed 07-20-PLAN.md
+last_updated: "2026-09-11T23:22:03.884Z"
 last_activity: 2026-09-11
 last_activity_desc: Phase 07 execution started
-state_head: 56ced10552252aa9c12425e015f218707bd5f318
+state_head: 17a3f1664d7355764f7b0434ef708ad220dd2b16
 progress:
   total_phases: 8
   completed_phases: 5
   total_plans: 103
-  completed_plans: 99
+  completed_plans: 100
 milestone_name: milestone
 ---
 
@@ -28,10 +28,10 @@ See: .planning/PROJECT.md (updated 2026-09-06)
 
 ## Current Position
 
-Phase: 07 (explicit-migration-and-rebuild-cutover) — READY TO EXECUTE
-Plan: 19 of 19
+Phase: 07 (Explicit Migration and Rebuild Cutover) — EXECUTING
+Plan: 2 of 22
 Status: Ready to execute
-Last activity: 2026-09-11 — Phase 07 Plan 14 operation replay completed
+Last activity: 2026-09-11 — Phase 07 execution started
 
 Phase 05 closed with 9/9 canonical plans summarized, 9/9 verified must-haves,
 19/19 Nyquist-covered tasks, and 43/43 canonical security threats closed
@@ -182,6 +182,7 @@ Phase 03 rows in this historical table include superseded attempts and do not de
 | Phase 07 P17 | 10min | 2 tasks | 4 files |
 | Phase 07 P18 | 20min | 2 tasks | 2 files |
 | Phase 07 P19 | 20min | 2 tasks | 2 files |
+| Phase 07 P20 | 12min | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -408,6 +409,8 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - [Phase 07]: Plans 07-12 through 07-19 threat rows are checked against a literal 38-ID ownership oracle.
 - [Phase 07]: Phase 7 validation accepts only authority-attributed recovery; invisible pre-checkpoint orphans remain outside exact reclamation.
 - [Phase 07]: Phase 7 all-mode verification is deterministic local evidence; live service, platform, performance, and obstore adoption claims remain Phase 8 or later.
+- [Phase 07]: Phase 07 Plan 20: The destination handler declares the migration target format and version; source readability only establishes whether the source is readable.
+- [Phase 07]: Phase 07 Plan 20: Abort records only OSError and CacheBlobBackendError as attributed cleanup debt; integrity and ownership disagreement remain fail closed.
 
 ### Pending Todos
 
@@ -438,6 +441,6 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 
 ## Session Continuity
 
-Last session: 2026-09-11T20:15:37.420Z
-Stopped at: Completed 07-19-PLAN.md
+Last session: 2026-09-11T23:22:03.762Z
+Stopped at: Completed 07-20-PLAN.md
 Resume file: None
