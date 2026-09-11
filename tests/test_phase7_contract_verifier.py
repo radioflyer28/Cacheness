@@ -280,3 +280,74 @@ def test_main_never_renders_failed_requirement_as_pass(
     assert exit_code == 1
     assert "MIGR-04: see diagnostics" in output.out
     assert "MIGR-04: PASS" not in output.out
+
+
+def test_fixed_manifest_requires_exact_path_and_test_name_selectors() -> None:
+    """Every reviewed claim must execute a specific test, never a whole file."""
+    verifier = _load_verifier()
+
+    mappings = (
+        verifier.MIGRATION_REQUIREMENT_NODES,
+        verifier.DECISION_NODES,
+        verifier.SECURITY_THREAT_NODES,
+        verifier.FLAGGED_ASSUMPTION_NODES,
+        verifier.PLAN01_PROHIBITION_NODES,
+    )
+    for mapping in mappings:
+        for selectors in mapping.values():
+            assert selectors
+            assert len(selectors) == len(set(selectors))
+            for selector in selectors:
+                path, test_name = selector.split("::", maxsplit=1)
+                assert path.startswith("tests/")
+                assert path in verifier.PHASE7_TEST_NODES
+                assert test_name.startswith("test_")
+
+    assert set(verifier.FLAGGED_ASSUMPTION_NODES) == {
+        "A-MIGR03",
+        "A-MIGR04",
+        "A-MIGR05",
+        "A-MIGR06",
+    }
+    assert {
+        "tests/test_migration_cutover.py::test_migration_run_enforces_entry_byte_and_evidence_limits_with_split_plan",
+        "tests/test_migration_cutover.py::test_uncheckpointed_candidate_orphan_remains_invisible_unadopted_and_outside_exact_cleanup",
+        "tests/test_migration_cutover.py::test_resume_and_abort_staging_use_only_authority_attributed_batches",
+    }.issubset(verifier.MIGRATION_REQUIREMENT_NODES["MIGR-04"])
+    assert {
+        "tests/test_blob_store_atomic_lifecycle.py::test_blobstore_maintenance_canonical_put_replays_projection_free_receipt_after_response_loss",
+        "tests/test_rebuild_workflow.py::test_rebuild_response_loss_rederives_operation_id_and_replays_authority_receipt",
+        "tests/test_rebuild_workflow.py::test_projection_equipped_rebuild_replays_canonical_receipt_without_preacceptance_or_duplicate_derived_work",
+    }.issubset(verifier.MIGRATION_REQUIREMENT_NODES["MIGR-05"])
+
+
+def test_fixed_manifest_includes_every_gap_plan_threat_exactly_once() -> None:
+    """The fixed 38-row gap inventory is exact, owned, and independently checked."""
+    verifier = _load_verifier()
+
+    assert len(verifier.GAP_PLAN_THREAT_IDS) == 38
+    assert len(set(verifier.GAP_PLAN_THREAT_IDS)) == 38
+    assert len(verifier._DECLARED_PHASE7_THREAT_IDS) == 84
+    assert set(verifier.GAP_PLAN_THREAT_IDS).issubset(
+        verifier.SECURITY_THREAT_NODES
+    )
+    assert verifier.validate_gap_plan_threat_inventory(REPOSITORY_ROOT) == ()
+
+
+def test_fixed_gap_supply_chain_threats_map_to_frozen_command_contracts() -> None:
+    """Gap-plan supply-chain evidence binds only to frozen command validation."""
+    verifier = _load_verifier()
+
+    expected = (
+        "T-07-13-SC",
+        "T-07-17-SC",
+        "T-07-18-SC",
+        "T-07-19-SC",
+    )
+    selector = (
+        "tests/test_phase7_contract_verifier.py::"
+        "test_fixed_gap_supply_chain_threats_map_to_frozen_command_contracts"
+    )
+    for threat_id in expected:
+        assert verifier.SECURITY_THREAT_NODES[threat_id] == (selector,)
+    assert verifier.audit_gap_plan_command_contracts(REPOSITORY_ROOT) == ()
