@@ -3915,8 +3915,7 @@ class OfflineMigrationService:
                     "aborted maintenance evidence does not bind the supplied plan",
                     context={"operation": "migration.abort", "run_id": self.run_id},
                 )
-            deleted_entries = evidence.candidate_entry_count
-            return AbortReceipt(run_id=self.run_id, deleted_entries=deleted_entries)
+            return AbortReceipt(run_id=self.run_id, deleted_entries=0)
         if evidence.state not in {
             MaintenanceEvidenceState.INSPECTED,
             MaintenanceEvidenceState.PLANNED,
