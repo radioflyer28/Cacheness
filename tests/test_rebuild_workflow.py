@@ -719,3 +719,163 @@ def test_rebuild_evidence_rejects_terminal_aborted_cleanup_debt(
     finally:
         source.close()
         destination.close()
+
+
+@pytest.mark.parametrize("component", ("operation", "key", "generation", "locator"))
+def test_rebuild_cleanup_retry_rejects_forged_debt_without_payload_access(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    component: str,
+) -> None:
+    """A signed-looking debt string cannot broaden cleanup ownership."""
+
+    provider = _SharedMemoryKeyProvider()
+    source = _store(tmp_path / "source", provider)
+    destination = _store(tmp_path / "destination", provider)
+    try:
+        source.put_entry({"value": "first"}, key="first")
+        source.put_entry({"value": "second"}, key="second")
+        service = _service(source, destination, tmp_path / "maintenance")
+        plan = service.create_rebuild_plan(service.inspect())
+        service.confirm_rebuild(plan, confirmation=service.rebuild_confirmation(plan))
+        original_stage_entry = service._stage_rebuild_entry
+
+        def stage_then_fail(rebuild_plan, assessment, entry_ordinal):
+            if entry_ordinal == 1:
+                raise OSError("rebuild staging failed")
+            return original_stage_entry(rebuild_plan, assessment, entry_ordinal)
+
+        def fail_cleanup(*_args, **_kwargs):
+            raise OSError("cleanup participant unavailable")
+
+        monkeypatch.setattr(service, "_stage_rebuild_entry", stage_then_fail)
+        monkeypatch.setattr(destination, "delete", fail_cleanup)
+        with pytest.raises(OSError, match="rebuild staging failed"):
+            service.stage_rebuild(plan)
+
+        evidence = service.read_evidence()
+        receipt = evidence.rebuild_receipt_batches[0].receipts[0]
+        debt_parts = {
+            "operation": ("f" * 64, receipt.key, receipt.generation, receipt.locator),
+            "key": (receipt.operation_id, "forged-key", receipt.generation, receipt.locator),
+            "generation": (
+                receipt.operation_id,
+                receipt.key,
+                "forged-generation",
+                receipt.locator,
+            ),
+            "locator": (
+                receipt.operation_id,
+                receipt.key,
+                receipt.generation,
+                "forged-locator",
+            ),
+        }
+        operation_id, key, generation, locator = debt_parts[component]
+        forged_debt = f"rebuild:{operation_id}:{key}:{generation}:{locator}"
+        service._write_evidence(
+            service._new_evidence(
+                state=evidence.state,
+                plan_digest=plan.digest,
+                source_identity=plan.source_identity,
+                destination_identity=plan.destination_identity,
+                completed_steps=evidence.completed_steps,
+                authority_receipts=evidence.authority_receipts,
+                cleanup_debt=(forged_debt,),
+                **service._rebuild_progress(evidence),
+                completed_output_digests=evidence.completed_output_digests,
+            )
+        )
+
+        participant_accesses: list[str] = []
+
+        def unexpected_participant_access(*_args, **_kwargs):
+            participant_accesses.append(component)
+            raise AssertionError("forged debt must fail before participant access")
+
+        monkeypatch.setattr(destination, "get_entry_info", unexpected_participant_access)
+        monkeypatch.setattr(destination, "delete", unexpected_participant_access)
+        monkeypatch.setattr(
+            destination, "delete_migration_payload", unexpected_participant_access
+        )
+
+        with pytest.raises(
+            CacheBlobMigrationEvidenceMismatchError,
+            match="exact authenticated receipt",
+        ):
+            service.resume(plan, run_id=service.run_id, evidence_path=service.evidence_path)
+        assert participant_accesses == []
+        assert source.get("first") == {"value": "first"}
+        assert source.get("second") == {"value": "second"}
+    finally:
+        source.close()
+        destination.close()
+
+
+def test_rebuild_cleanup_retry_preserves_changed_current_ownership(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Receipt settlement removes an old locator without deleting a later owner."""
+
+    provider = _SharedMemoryKeyProvider()
+    source = _store(tmp_path / "source", provider)
+    destination = _store(tmp_path / "destination", provider)
+    try:
+        source.put_entry({"value": "first"}, key="first")
+        source.put_entry({"value": "second"}, key="second")
+        service = _service(source, destination, tmp_path / "maintenance")
+        plan = service.create_rebuild_plan(service.inspect())
+        service.confirm_rebuild(plan, confirmation=service.rebuild_confirmation(plan))
+        original_stage_entry = service._stage_rebuild_entry
+        original_delete_payload = destination.delete_migration_payload
+
+        def replace_owner_then_fail(rebuild_plan, assessment, entry_ordinal):
+            if entry_ordinal == 1:
+                destination.put_entry({"value": "new-owner"}, key="first")
+                raise OSError("rebuild staging failed")
+            return original_stage_entry(rebuild_plan, assessment, entry_ordinal)
+
+        def fail_old_locator_cleanup(_locator: str) -> None:
+            raise OSError("retired payload cleanup unavailable")
+
+        monkeypatch.setattr(service, "_stage_rebuild_entry", replace_owner_then_fail)
+        monkeypatch.setattr(
+            destination, "delete_migration_payload", fail_old_locator_cleanup
+        )
+        with pytest.raises(OSError, match="rebuild staging failed"):
+            service.stage_rebuild(plan)
+
+        evidence = service.read_evidence()
+        receipt = evidence.rebuild_receipt_batches[0].receipts[0]
+        assert evidence.cleanup_debt == (service._rebuild_cleanup_debt(receipt),)
+        assert destination.get("first") == {"value": "new-owner"}
+
+        settled_locators: list[str] = []
+
+        def delete_only_recorded_locator(locator: str) -> None:
+            settled_locators.append(locator)
+            original_delete_payload(locator)
+
+        def current_key_delete_is_forbidden(*_args, **_kwargs):
+            raise AssertionError("settlement must not delete the current key owner")
+
+        monkeypatch.setattr(
+            destination, "delete_migration_payload", delete_only_recorded_locator
+        )
+        monkeypatch.setattr(destination, "delete", current_key_delete_is_forbidden)
+        resumed = service.resume(
+            plan, run_id=service.run_id, evidence_path=service.evidence_path
+        )
+
+        settled = service.read_evidence()
+        assert resumed.state is MaintenanceEvidenceState.ABORTED
+        assert settled.cleanup_debt == ()
+        assert settled.retired_rebuild_operation_ids == (receipt.operation_id,)
+        assert settled_locators == [receipt.locator]
+        assert destination.get("first") == {"value": "new-owner"}
+        assert source.get("first") == {"value": "first"}
+        assert source.get("second") == {"value": "second"}
+    finally:
+        source.close()
+        destination.close()
