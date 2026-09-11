@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 07
 current_phase_name: Explicit Migration and Rebuild Cutover
 status: executing
-stopped_at: Completed 07-13-PLAN.md
-last_updated: "2026-09-11T05:32:09.600Z"
+stopped_at: Completed 07-14-PLAN.md
+last_updated: "2026-09-11T05:54:38.842Z"
 last_activity: 2026-09-10
 last_activity_desc: Phase 07 execution started
-state_head: 676bb1f8fe30ddeeaba23e925fa1acb542d68a07
+state_head: 1de0566bd7b022035b3b383dc9c442dc181970f5
 progress:
   total_phases: 8
   completed_phases: 5
   total_plans: 100
-  completed_plans: 93
+  completed_plans: 94
 milestone_name: milestone
 ---
 
@@ -29,9 +29,9 @@ See: .planning/PROJECT.md (updated 2026-09-06)
 ## Current Position
 
 Phase: 07 (Explicit Migration and Rebuild Cutover) — EXECUTING
-Plan: 3 of 19
+Plan: 14 of 19
 Status: Ready to execute
-Last activity: 2026-09-10 — Phase 07 execution started
+Last activity: 2026-09-11 — Phase 07 Plan 14 operation replay completed
 
 Phase 05 closed with 9/9 canonical plans summarized, 9/9 verified must-haves,
 19/19 Nyquist-covered tasks, and 43/43 canonical security threats closed
@@ -176,6 +176,7 @@ Phase 03 rows in this historical table include superseded attempts and do not de
 | Phase 07 P11 | 27m | 2 tasks | 4 files |
 | Phase 07 P12 | 23min | 2 tasks | 8 files |
 | Phase 07-explicit-migration-and-rebuild-cutover P13 | 2h 57m | 2 tasks | 3 files |
+| Phase 07 P14 | 19min | 2 tasks | 9 files |
 
 ## Accumulated Context
 
@@ -388,6 +389,9 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - [Phase 07]: Migration resume and abort recover only exact authority-attributed candidate batches; pre-checkpoint immutable payloads remain invisible, unadopted, and outside guaranteed exact cleanup.
 - [Phase 07]: A pre-identity idle observation is only an early fast check; persisted PostgreSQL state must authorize worker readiness after identity load.
 - [Phase 07]: BlobStore initialization and direct PostgreSQL preflight reuse require_ordinary_worker_access instead of adding local coordination or a second authority.
+- [Phase 07]: Maintenance operation retries read only an exact canonical authority record; paths, listings, timing, and caller receipts never establish lifecycle ownership or completion.
+- [Phase 07]: Projection suppression is internal to the maintenance canonical-put receipt path; ordinary BlobStore writes retain normal post-commit projection behavior.
+- [Phase 07]: Prepared replay accepts only the authority-indexed immutable locator when signed descriptor digest and size corroborate it; mismatches fail closed.
 
 ### Pending Todos
 
@@ -418,6 +422,6 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 
 ## Session Continuity
 
-Last session: 2026-09-11T05:32:09.472Z
-Stopped at: Completed 07-13-PLAN.md
+Last session: 2026-09-11T05:54:38.705Z
+Stopped at: Completed 07-14-PLAN.md
 Resume file: None
