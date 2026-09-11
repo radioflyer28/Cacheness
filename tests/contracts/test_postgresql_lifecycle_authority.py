@@ -11,6 +11,7 @@ import pytest
 from cacheness.error_handling import (
     CacheBlobLifecycleConflictError,
     CacheBlobLifecycleTimeoutError,
+    CacheBlobMigrationOfflineDecisionRequiredError,
     CacheBlobMigrationRequiredError,
 )
 from cacheness.storage.lifecycle_authority import (
@@ -248,6 +249,129 @@ def test_blob_store_public_initialize_provisions_a_fresh_postgresql_authority(
         second = [_query_text(query) for query, _ in factory.connections[1].executions]
         assert any("create schema" in statement for statement in first)
         assert not any("create " in statement for statement in second)
+    finally:
+        store.close()
+        authority.close()
+
+
+def test_fresh_blobstore_initialize_rechecks_activated_offline_after_postgresql_identity_load(
+    tmp_path,
+) -> None:
+    """A fresh remote worker must fence persisted offline activation before readiness."""
+    from cacheness.storage import BlobStore
+    from cacheness.storage.backends.blob_backends import InMemoryBlobBackend
+    from cacheness.storage.backends.postgresql_lifecycle_authority import (
+        POSTGRESQL_AUTHORITY_CAPABILITY,
+        POSTGRESQL_AUTHORITY_SCHEMA_VERSION,
+        PostgresqlLifecycleAuthority,
+    )
+    from cacheness.storage.composition import BackendRef, StoreTopology
+
+    events: list[str] = []
+
+    class RecordingManifestKey:
+        def get_key(self) -> bytes:
+            events.append("manifest_key")
+            return b"r" * 32
+
+    class RecordingRemotePayload(InMemoryBlobBackend):
+        qualification_identity = "s3"
+        topology_capabilities = {
+            "durable": True,
+            "process_scope": "multi_host",
+            "host_scope": "multi_host",
+            "immutable_generations": True,
+            "streaming": True,
+            "listing": True,
+        }
+
+        def materialize_handler_io(self) -> object:
+            events.append("materialize")
+            return super().materialize_handler_io()
+
+    class RecordingAuthority(PostgresqlLifecycleAuthority):
+        qualification_identity = "postgresql"
+
+        def initialize(self) -> None:
+            events.append("authority_initialize")
+            super().initialize()
+
+        def publication_state(self) -> AuthorityPublicationState:
+            events.append(f"publication_state:{self.store_identity}")
+            return super().publication_state()
+
+    required_tables = [
+        ("authority_meta",),
+        ("entry_lineage",),
+        ("entries",),
+        ("mutations",),
+        ("cleanup_debt",),
+        ("clear_runs",),
+        ("clear_targets",),
+        ("reconciliation_runs",),
+        ("reconciliation_actions",),
+        ("migration_store_entries",),
+    ]
+    required_constraints = [
+        ("authority_meta_singleton_check",),
+        ("mutations_operation_id_key",),
+        ("mutations_mutation_id_key",),
+        ("cleanup_debt_operation_locator_role_key",),
+        ("clear_targets_run_id_key_key",),
+        ("reconciliation_actions_run_id_source_action_id_key",),
+        ("migration_store_entries_run_id_selection_key_key",),
+    ]
+    factory = _Factory(
+        scripts=[
+            [],
+            [
+                (
+                    POSTGRESQL_AUTHORITY_SCHEMA_VERSION,
+                    "persisted-store",
+                    POSTGRESQL_AUTHORITY_CAPABILITY,
+                ),
+                required_tables,
+                required_constraints,
+            ],
+            [
+                (
+                    7,
+                    "run-remote-cutover",
+                    "a" * 64,
+                    "b" * 64,
+                    7,
+                    8,
+                    AuthorityPublicationState.ACTIVATED_OFFLINE.value,
+                    "candidate",
+                    True,
+                )
+            ],
+        ]
+    )
+    authority = RecordingAuthority(factory, schema="phase7_authority")
+    payload = RecordingRemotePayload()
+    store = BlobStore(
+        StoreTopology(
+            payload=BackendRef(instance=payload),
+            authority=BackendRef(instance=authority),
+        ),
+        cache_dir=tmp_path / "remote-store",
+        manifest_key_provider=RecordingManifestKey(),
+    )
+
+    try:
+        with pytest.raises(CacheBlobMigrationOfflineDecisionRequiredError):
+            store.initialize()
+
+        assert authority.store_identity == "persisted-store"
+        assert events == [
+            "publication_state:None",
+            "authority_initialize",
+            "publication_state:persisted-store",
+        ]
+        assert factory.calls == 3
+        assert store._initialized is False
+        assert store.guarded_handler_io is None
     finally:
         store.close()
         authority.close()
