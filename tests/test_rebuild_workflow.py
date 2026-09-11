@@ -615,17 +615,107 @@ def test_rebuild_verification_failure_cleans_only_exact_receipts_and_persists_de
             for batch in evidence.rebuild_receipt_batches
             for receipt in batch.receipts
         )
-        assert evidence.state is MaintenanceEvidenceState.ABORTED
-        assert evidence.retired_rebuild_operation_ids == ()
+        assert evidence.state is MaintenanceEvidenceState.REBUILDING
+        assert evidence.retired_rebuild_operation_ids == (first.operation_id,)
         assert evidence.cleanup_debt == (
             f"rebuild:{second.operation_id}:second:{second.generation}:{second.locator}",
-            f"rebuild:{first.operation_id}:first:{first.generation}:{first.locator}",
         )
         assert destination.get("first") == {"value": "new-owner"}
         assert destination.get("second") == {"value": "second"}
         assert source.get("first") == {"value": "first"}
         assert source.get("second") == {"value": "second"}
         assert source.get("third") == {"value": "third"}
+    finally:
+        source.close()
+        destination.close()
+
+
+def test_rebuild_cleanup_debt_stays_resumable_until_exact_settlement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Response-loss cleanup debt settles only through the recorded receipt."""
+
+    provider = _SharedMemoryKeyProvider()
+    source = _store(tmp_path / "source", provider)
+    destination = _store(tmp_path / "destination", provider)
+    try:
+        source.put_entry({"value": "first"}, key="first")
+        source.put_entry({"value": "second"}, key="second")
+        service = _service(source, destination, tmp_path / "maintenance")
+        plan = service.create_rebuild_plan(service.inspect())
+        service.confirm_rebuild(plan, confirmation=service.rebuild_confirmation(plan))
+        original_stage_entry = service._stage_rebuild_entry
+        original_delete = destination.delete
+
+        def stage_then_fail(rebuild_plan, assessment, entry_ordinal):
+            if entry_ordinal == 1:
+                raise OSError("rebuild staging failed")
+            return original_stage_entry(rebuild_plan, assessment, entry_ordinal)
+
+        def delete_then_lose_response(key, *, expected=None):
+            original_delete(key, expected=expected)
+            raise OSError("cleanup delete response lost")
+
+        monkeypatch.setattr(service, "_stage_rebuild_entry", stage_then_fail)
+        monkeypatch.setattr(destination, "delete", delete_then_lose_response)
+        with pytest.raises(OSError, match="rebuild staging failed"):
+            service.stage_rebuild(plan)
+
+        evidence = service.read_evidence()
+        receipt = evidence.rebuild_receipt_batches[0].receipts[0]
+        assert evidence.state is MaintenanceEvidenceState.REBUILDING
+        assert evidence.retired_rebuild_operation_ids == ()
+        assert evidence.cleanup_debt == (service._rebuild_cleanup_debt(receipt),)
+        assert destination.get_entry_info("first") is None
+
+        monkeypatch.setattr(destination, "delete", original_delete)
+        resumed = service.resume(
+            plan, run_id=service.run_id, evidence_path=service.evidence_path
+        )
+
+        settled = service.read_evidence()
+        assert resumed.state is MaintenanceEvidenceState.ABORTED
+        assert settled.state is MaintenanceEvidenceState.ABORTED
+        assert settled.cleanup_debt == ()
+        assert settled.retired_rebuild_operation_ids == (receipt.operation_id,)
+        assert destination.get("first") is None
+        assert source.get("first") == {"value": "first"}
+        assert source.get("second") == {"value": "second"}
+    finally:
+        source.close()
+        destination.close()
+
+
+def test_rebuild_evidence_rejects_terminal_aborted_cleanup_debt(
+    tmp_path: Path,
+) -> None:
+    """Terminal rebuild evidence cannot stand in for unsettled cleanup debt."""
+
+    provider = _SharedMemoryKeyProvider()
+    source = _store(tmp_path / "source", provider)
+    destination = _store(tmp_path / "destination", provider)
+    try:
+        source.put_entry({"value": "entry"}, key="entry")
+        service = _service(source, destination, tmp_path / "maintenance")
+        plan = service.create_rebuild_plan(service.inspect())
+        service.confirm_rebuild(plan, confirmation=service.rebuild_confirmation(plan))
+        service.stage_rebuild(plan)
+        evidence = service.read_evidence()
+        receipt = evidence.rebuild_receipt_batches[0].receipts[0]
+
+        with pytest.raises(ValueError, match="ABORTED rebuild evidence"):
+            service._new_evidence(
+                state=MaintenanceEvidenceState.ABORTED,
+                plan_digest=plan.digest,
+                source_identity=plan.source_identity,
+                destination_identity=plan.destination_identity,
+                completed_steps=(*evidence.completed_steps, "abort_rebuild"),
+                authority_receipts=evidence.authority_receipts,
+                cleanup_debt=(service._rebuild_cleanup_debt(receipt),),
+                **service._rebuild_progress(evidence),
+                completed_output_digests=evidence.completed_output_digests,
+            )
     finally:
         source.close()
         destination.close()
