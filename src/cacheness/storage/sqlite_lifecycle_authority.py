@@ -1773,12 +1773,7 @@ class SqliteLifecycleAuthority:
             state_row = self._publication_state_row(connection)
             state = AuthorityPublicationState(state_row[6])
             if state is AuthorityPublicationState.CANDIDATE:
-                if (
-                    state_row[1] == receipt.run_id
-                    and state_row[2] == receipt.plan_digest
-                    and state_row[3] == receipt.candidate_digest
-                    and state_row[4] == receipt.source_revision
-                ):
+                if state_row[1] == receipt.run_id and state_row[2] == receipt.plan_digest and state_row[4] == receipt.source_revision:
                     rows = connection.execute(
                         "SELECT key, generation, locator, manifest, manifest_digest "
                         "FROM migration_store_entries WHERE run_id = ? AND selection = 'candidate' "
@@ -1787,6 +1782,29 @@ class SqliteLifecycleAuthority:
                     ).fetchall()
                     stored = self._candidate_entries_from_rows(rows)
                     if stored == entries:
+                        return receipt
+                    if stored == entries[: len(stored)]:
+                        for entry in entries[len(stored) :]:
+                            connection.execute(
+                                "INSERT INTO migration_store_entries("
+                                "run_id, selection, key, generation, locator, manifest, manifest_digest, "
+                                "lineage, entry_revision) VALUES (?, 'candidate', ?, ?, ?, ?, ?, 0, ?)",
+                                (
+                                    receipt.run_id,
+                                    entry.key,
+                                    entry.generation,
+                                    entry.locator,
+                                    entry.manifest,
+                                    entry.manifest_digest,
+                                    receipt.source_revision,
+                                ),
+                            )
+                        connection.execute(
+                            "UPDATE authority_state SET migration_candidate_digest = ? "
+                            "WHERE singleton = 1 AND migration_run_id = ? AND migration_plan_digest = ? "
+                            "AND migration_state = 'candidate'",
+                            (receipt.candidate_digest, receipt.run_id, receipt.plan_digest),
+                        )
                         return receipt
                 raise CacheBlobLifecycleConflictError(
                     "A different verified migration candidate is already recorded"
@@ -1826,6 +1844,38 @@ class SqliteLifecycleAuthority:
             return receipt
 
         return self._transaction(record)
+
+    def candidate_entries_for_run(self, *, run_id: str) -> tuple[AuthorityInventoryEntry, ...]:
+        """Return only this authority's durably attributed candidate descriptors."""
+        with self._read_connection() as connection:
+            if connection is None:
+                raise CacheBlobMigrationRequiredError(
+                    "SQLite migration candidate evidence requires an initialized authority"
+                )
+            connection.execute("BEGIN")
+            try:
+                state_row = self._publication_state_row(connection)
+                if state_row[1] != run_id or AuthorityPublicationState(state_row[6]) not in {
+                    AuthorityPublicationState.CANDIDATE,
+                    AuthorityPublicationState.ACTIVATED_OFFLINE,
+                    AuthorityPublicationState.ACTIVE,
+                    AuthorityPublicationState.ROLLED_BACK,
+                }:
+                    connection.execute("COMMIT")
+                    return ()
+                rows = connection.execute(
+                    "SELECT key, generation, locator, manifest, manifest_digest "
+                    "FROM migration_store_entries WHERE run_id = ? AND selection = 'candidate' "
+                    "ORDER BY key",
+                    (run_id,),
+                ).fetchall()
+                entries = self._candidate_entries_from_rows(rows)
+                connection.execute("COMMIT")
+                return entries
+            except BaseException:
+                if connection.in_transaction:
+                    connection.execute("ROLLBACK")
+                raise
 
     def activate_verified_candidate(
         self,

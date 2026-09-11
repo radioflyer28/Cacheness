@@ -733,7 +733,6 @@ class PostgresqlLifecycleAuthority:
                 if (
                     state_row[1] == receipt.run_id
                     and state_row[2] == receipt.plan_digest
-                    and state_row[3] == receipt.candidate_digest
                     and state_row[4] == receipt.source_revision
                 ):
                     cursor.execute(
@@ -743,7 +742,35 @@ class PostgresqlLifecycleAuthority:
                         ).format(self._table("migration_store_entries")),
                         (receipt.run_id,),
                     )
-                    if self._candidate_entries_from_rows(cursor.fetchall()) == entries:
+                    stored = self._candidate_entries_from_rows(cursor.fetchall())
+                    if stored == entries:
+                        return receipt
+                    if stored == entries[: len(stored)]:
+                        for entry in entries[len(stored) :]:
+                            cursor.execute(
+                                sql.SQL(
+                                    "INSERT INTO {} (run_id, selection, key, generation, locator, manifest, "
+                                    "manifest_digest, lineage, entry_revision) "
+                                    "VALUES (%s, 'candidate', %s, %s, %s, %s, %s, 0, %s)"
+                                ).format(self._table("migration_store_entries")),
+                                (
+                                    receipt.run_id,
+                                    entry.key,
+                                    entry.generation,
+                                    entry.locator,
+                                    entry.manifest,
+                                    entry.manifest_digest,
+                                    receipt.source_revision,
+                                ),
+                            )
+                        cursor.execute(
+                            sql.SQL(
+                                "UPDATE {} SET migration_candidate_digest = %s "
+                                "WHERE singleton = TRUE AND migration_run_id = %s "
+                                "AND migration_plan_digest = %s AND migration_state = 'candidate'"
+                            ).format(self._table("authority_meta")),
+                            (receipt.candidate_digest, receipt.run_id, receipt.plan_digest),
+                        )
                         return receipt
                 raise CacheBlobLifecycleConflictError(
                     "A different verified migration candidate is already recorded"
@@ -793,6 +820,28 @@ class PostgresqlLifecycleAuthority:
             return receipt
 
         return self._transaction("record_verified_candidate", record)
+
+    def candidate_entries_for_run(self, *, run_id: str) -> tuple[AuthorityInventoryEntry, ...]:
+        """Return only this authority's durably attributed candidate descriptors."""
+        def read(cursor: Any) -> tuple[AuthorityInventoryEntry, ...]:
+            state_row = self._publication_state_row(cursor)
+            if state_row[1] != run_id or AuthorityPublicationState(state_row[6]) not in {
+                AuthorityPublicationState.CANDIDATE,
+                AuthorityPublicationState.ACTIVATED_OFFLINE,
+                AuthorityPublicationState.ACTIVE,
+                AuthorityPublicationState.ROLLED_BACK,
+            }:
+                return ()
+            cursor.execute(
+                sql.SQL(
+                    "SELECT key, generation, locator, manifest, manifest_digest "
+                    "FROM {} WHERE run_id = %s AND selection = 'candidate' ORDER BY key"
+                ).format(self._table("migration_store_entries")),
+                (run_id,),
+            )
+            return self._candidate_entries_from_rows(cursor.fetchall())
+
+        return self._read_only("candidate_entries_for_run", read)
 
     def activate_verified_candidate(
         self,

@@ -18,6 +18,7 @@ from pathlib import Path
 import re
 from types import MappingProxyType
 from typing import Iterable, Mapping
+from uuid import uuid4
 
 from cacheness.error_handling import (
     CacheBlobMigrationEvidenceError,
@@ -43,6 +44,8 @@ from .migration_authority import (
     AuthorityPublicationState,
     AuthorityIdentitySnapshot,
     AuthorityInventoryEntry,
+    CandidateBatchReceipt,
+    CandidateEntryReceipt,
     FinalizeReceipt,
     MigrationAuthority,
     RollbackReceipt,
@@ -71,6 +74,9 @@ _MAX_PLAN_TEXT_BYTES = 262_144
 _MAX_PLAN_DEPTH = 16
 _MAX_PLAN_NODES = 16_384
 _MAX_PLAN_COLLECTION_ITEMS = 4_096
+_DEFAULT_MAX_ENTRIES_PER_RUN = 256
+_DEFAULT_MAX_BYTES_PER_RUN = 64 * 1024 * 1024
+_DEFAULT_MAX_EVIDENCE_BYTES_PER_RUN = 64 * 1024
 
 
 class CompatibilityDimension(str, Enum):
@@ -1455,6 +1461,75 @@ def render_migration_report(plan: MigrationPlan) -> str:
 
 
 @dataclass(frozen=True)
+class MigrationRunLimits:
+    """Explicit bounded scale policy for one independently recoverable run."""
+
+    max_entries_per_run: int = _DEFAULT_MAX_ENTRIES_PER_RUN
+    max_bytes_per_run: int = _DEFAULT_MAX_BYTES_PER_RUN
+    max_evidence_bytes_per_run: int = _DEFAULT_MAX_EVIDENCE_BYTES_PER_RUN
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "max_entries_per_run",
+            "max_bytes_per_run",
+            "max_evidence_bytes_per_run",
+        ):
+            value = getattr(self, field_name)
+            if type(value) is not int or value <= 0:
+                raise ValueError(f"{field_name} must be a positive integer")
+
+
+@dataclass(frozen=True)
+class MigrationRunPartition:
+    """One deterministic, independently actionable bounded portion of an inventory."""
+
+    ordinal: int
+    keys: tuple[str, ...]
+    entry_count: int
+    byte_count: int
+    evidence_byte_count: int
+
+    def __post_init__(self) -> None:
+        if type(self.ordinal) is not int or self.ordinal < 0:
+            raise ValueError("partition ordinal must be a non-negative integer")
+        if not self.keys or len(set(self.keys)) != len(self.keys):
+            raise ValueError("partition keys must be a unique non-empty tuple")
+        if self.entry_count != len(self.keys):
+            raise ValueError("partition entry count disagrees with keys")
+        for field_name in ("byte_count", "evidence_byte_count"):
+            value = getattr(self, field_name)
+            if type(value) is not int or value < 0:
+                raise ValueError(f"partition {field_name} must be non-negative")
+
+
+@dataclass(frozen=True)
+class MigrationSplitRequired:
+    """Stable non-mutating result for a catalog that exceeds one run's caps."""
+
+    reason: str
+    limits: MigrationRunLimits
+    partitions: tuple[MigrationRunPartition, ...]
+
+    def __post_init__(self) -> None:
+        if self.reason != "split_required":
+            raise ValueError("split result reason must be split_required")
+        if not isinstance(self.limits, MigrationRunLimits):
+            raise TypeError("split result requires MigrationRunLimits")
+        if not self.partitions or not all(
+            isinstance(partition, MigrationRunPartition) for partition in self.partitions
+        ):
+            raise ValueError("split result requires bounded partitions")
+        if tuple(partition.ordinal for partition in self.partitions) != tuple(
+            range(len(self.partitions))
+        ):
+            raise ValueError("split partitions must have contiguous ordinals")
+        if len({key for partition in self.partitions for key in partition.keys}) != sum(
+            partition.entry_count for partition in self.partitions
+        ):
+            raise ValueError("split partitions must not overlap")
+
+
+@dataclass(frozen=True)
 class MigrationStepResult:
     """Minimal result for one completed explicit maintenance action."""
 
@@ -1524,6 +1599,7 @@ class OfflineMigrationService:
         run_id: str,
         stopped_workers_acknowledged: bool,
         compatibility_edges: Iterable[MigrationCompatibilityEdge],
+        run_limits: MigrationRunLimits | None = None,
     ) -> None:
         if not stopped_workers_acknowledged:
             raise ValueError("offline migration requires stopped-worker acknowledgement")
@@ -1537,6 +1613,9 @@ class OfflineMigrationService:
         self.work_directory = self._validated_work_directory(work_directory)
         self._stopped_workers_acknowledged = stopped_workers_acknowledged
         self.compatibility_edges = tuple(compatibility_edges)
+        self.run_limits = MigrationRunLimits() if run_limits is None else run_limits
+        if not isinstance(self.run_limits, MigrationRunLimits):
+            raise TypeError("run_limits must be a MigrationRunLimits value")
         if not self.compatibility_edges:
             raise ValueError("offline migration requires an explicit compatibility edge")
         if not all(isinstance(edge, MigrationCompatibilityEdge) for edge in self.compatibility_edges):
@@ -1649,14 +1728,23 @@ class OfflineMigrationService:
         destination_identity: AuthorityIdentitySnapshot,
         completed_steps: tuple[str, ...],
         candidate_receipt: VerifiedCandidateReceipt | None = None,
+        candidate_batch_references: tuple[str, ...] = (),
+        candidate_checkpoint_revision: int | None = None,
+        candidate_entry_count: int = 0,
+        candidate_byte_count: int = 0,
         activation_receipt: ActivationReceipt | None = None,
         authority_receipts: tuple[str, ...] = (),
         cleanup_debt: tuple[str, ...] = (),
         completed_output_digests: Mapping[str, str] | None = None,
     ) -> MaintenanceRunEvidence:
         """Build a fully bound evidence record without serializing signing bytes."""
+        if candidate_receipt is not None and candidate_entry_count == 0:
+            candidate_entry_count = candidate_receipt.entry_count
+            candidate_byte_count = candidate_receipt.byte_count
+        if candidate_receipt is not None and candidate_checkpoint_revision is None:
+            candidate_checkpoint_revision = candidate_receipt.destination_revision
         return MaintenanceRunEvidence(
-            evidence_version=1,
+            evidence_version=2,
             run_id=self.run_id,
             plan_digest=plan_digest,
             source_identity=source_identity,
@@ -1667,11 +1755,25 @@ class OfflineMigrationService:
             state=state,
             completed_steps=completed_steps,
             candidate_receipt=candidate_receipt,
+            candidate_batch_references=candidate_batch_references,
+            candidate_checkpoint_revision=candidate_checkpoint_revision,
+            candidate_entry_count=candidate_entry_count,
+            candidate_byte_count=candidate_byte_count,
             activation_receipt=activation_receipt,
             authority_receipts=authority_receipts,
             cleanup_debt=cleanup_debt,
             completed_output_digests=completed_output_digests or {},
         )
+
+    @staticmethod
+    def _candidate_progress(evidence: MaintenanceRunEvidence) -> dict[str, object]:
+        """Carry signed candidate-progress references across workflow transitions."""
+        return {
+            "candidate_batch_references": evidence.candidate_batch_references,
+            "candidate_checkpoint_revision": evidence.candidate_checkpoint_revision,
+            "candidate_entry_count": evidence.candidate_entry_count,
+            "candidate_byte_count": evidence.candidate_byte_count,
+        }
 
     @staticmethod
     def _inventory_page(authority, cursor=None):
@@ -1694,25 +1796,29 @@ class OfflineMigrationService:
         return manifest
 
     def _candidate_blob_id(self, manifest: BlobManifest) -> str:
-        """Derive one contained opaque payload identifier for an immutable candidate."""
+        """Mint an opaque attempt-local identifier for one immutable candidate.
+
+        A payload written before the authority acknowledges its descriptor has
+        no recovery identity.  Retrying therefore uses a fresh locator rather
+        than deriving and reusing the earlier payload's name.
+        """
         material = "\x00".join(
-            (self.run_id, manifest.key, manifest.generation, manifest.digest)
+            (self.run_id, manifest.key, manifest.generation, manifest.digest, uuid4().hex)
         ).encode("utf-8")
         return f"{hashlib.sha256(material).hexdigest()}{''.join(Path(manifest.locator).suffixes)}"
 
-    def _candidate_locator(self, manifest: BlobManifest) -> str:
+    def _candidate_locator(self, candidate_id: str) -> str:
         """Derive the exact backend locator without treating a candidate path as authority."""
-        blob_id = self._candidate_blob_id(manifest)
         backend = self.destination.payload_backend
         remote_locator = getattr(backend, "migration_candidate_locator", None)
         if callable(remote_locator):
-            return remote_locator(run_id=self.run_id, candidate_id=blob_id)
+            return remote_locator(run_id=self.run_id, candidate_id=candidate_id)
         base_dir = getattr(backend, "base_dir", None)
         shard_chars = getattr(backend, "shard_chars", None)
         if isinstance(base_dir, Path) and type(shard_chars) is int:
-            shard = blob_id[:shard_chars] if shard_chars else ""
-            return str(base_dir / shard / blob_id) if shard else str(base_dir / blob_id)
-        return blob_id
+            shard = candidate_id[:shard_chars] if shard_chars else ""
+            return str(base_dir / shard / candidate_id) if shard else str(base_dir / candidate_id)
+        return candidate_id
 
     def _write_evidence(self, evidence: MaintenanceRunEvidence) -> MaintenanceRunEvidence:
         if not self.evidence_path.exists():
@@ -1821,7 +1927,83 @@ class OfflineMigrationService:
         )
         return inspection
 
-    def plan(self, inspection: MigrationInspection) -> MigrationPlan:
+    @staticmethod
+    def _candidate_evidence_size(assessment: MigrationEntryAssessment) -> int:
+        """Bound an authority-held target descriptor without rendering its manifest."""
+        entry = assessment.entry
+        return (
+            len(entry.manifest)
+            + len(entry.key.encode("utf-8"))
+            + len(entry.generation.encode("utf-8"))
+            + len(entry.locator.encode("utf-8"))
+            + 256
+        )
+
+    def _split_required(
+        self, assessments: tuple[MigrationEntryAssessment, ...]
+    ) -> MigrationSplitRequired | None:
+        """Partition an oversized catalog before any external candidate write."""
+        total_bytes = sum(assessment.entry.byte_size for assessment in assessments)
+        total_evidence_bytes = sum(
+            self._candidate_evidence_size(assessment) for assessment in assessments
+        )
+        limits = self.run_limits
+        if (
+            len(assessments) <= limits.max_entries_per_run
+            and total_bytes <= limits.max_bytes_per_run
+            and total_evidence_bytes <= limits.max_evidence_bytes_per_run
+        ):
+            return None
+
+        partitions: list[MigrationRunPartition] = []
+        current: list[MigrationEntryAssessment] = []
+        current_bytes = 0
+        current_evidence_bytes = 0
+        for assessment in sorted(assessments, key=lambda item: item.entry.key):
+            entry_bytes = assessment.entry.byte_size
+            evidence_bytes = self._candidate_evidence_size(assessment)
+            if (
+                entry_bytes > limits.max_bytes_per_run
+                or evidence_bytes > limits.max_evidence_bytes_per_run
+            ):
+                raise ValueError("one migration entry exceeds every independently recoverable run")
+            exceeds = (
+                len(current) + 1 > limits.max_entries_per_run
+                or current_bytes + entry_bytes > limits.max_bytes_per_run
+                or current_evidence_bytes + evidence_bytes
+                > limits.max_evidence_bytes_per_run
+            )
+            if current and exceeds:
+                partitions.append(
+                    MigrationRunPartition(
+                        ordinal=len(partitions),
+                        keys=tuple(item.entry.key for item in current),
+                        entry_count=len(current),
+                        byte_count=current_bytes,
+                        evidence_byte_count=current_evidence_bytes,
+                    )
+                )
+                current = []
+                current_bytes = 0
+                current_evidence_bytes = 0
+            current.append(assessment)
+            current_bytes += entry_bytes
+            current_evidence_bytes += evidence_bytes
+        if current:
+            partitions.append(
+                MigrationRunPartition(
+                    ordinal=len(partitions),
+                    keys=tuple(item.entry.key for item in current),
+                    entry_count=len(current),
+                    byte_count=current_bytes,
+                    evidence_byte_count=current_evidence_bytes,
+                )
+            )
+        return MigrationSplitRequired(
+            reason="split_required", limits=limits, partitions=tuple(partitions)
+        )
+
+    def plan(self, inspection: MigrationInspection) -> MigrationPlan | MigrationSplitRequired:
         """Freeze an entry-complete plan after revalidating inspection evidence."""
         if not isinstance(inspection, MigrationInspection):
             raise TypeError("inspection must be a MigrationInspection")
@@ -1845,6 +2027,9 @@ class OfflineMigrationService:
             for assessment in inspection.assessments
         ):
             raise ValueError("migration plan contains non-migratable entries")
+        split = self._split_required(inspection.assessments)
+        if split is not None:
+            return split
         plan = MigrationPlan.create(
             run_id=self.run_id,
             source_identity=inspection.source_identity,
@@ -2321,8 +2506,103 @@ class OfflineMigrationService:
         )
         return MigrationStepResult(MaintenanceEvidenceState.REBUILD_ACCEPTED, True, self.evidence_path)
 
+    def _authority_candidate_entries(
+        self, plan: MigrationPlan
+    ) -> tuple[AuthorityInventoryEntry, ...]:
+        """Load only descriptors that the destination authority has attributed."""
+        loader = getattr(self._destination_authority, "candidate_entries_for_run", None)
+        if not callable(loader):
+            raise CacheBlobMigrationEvidenceMismatchError(
+                "destination authority cannot attest migration candidate progress",
+                context={"operation": "migration.resume", "run_id": self.run_id},
+            )
+        observed = loader(run_id=self.run_id)
+        if not isinstance(observed, tuple) or not all(
+            isinstance(entry, AuthorityInventoryEntry) for entry in observed
+        ):
+            raise CacheBlobMigrationEvidenceMismatchError(
+                "destination authority returned malformed candidate descriptors",
+                context={"operation": "migration.resume", "run_id": self.run_id},
+            )
+        expected = {assessment.entry.key: assessment.entry for assessment in plan.assessments}
+        by_key = {entry.key: entry for entry in observed}
+        if len(by_key) != len(observed) or set(by_key) - set(expected):
+            raise CacheBlobMigrationEvidenceMismatchError(
+                "authority candidate descriptors are not an exact plan subset",
+                context={"operation": "migration.resume", "run_id": self.run_id},
+            )
+        ordered: list[AuthorityInventoryEntry] = []
+        for assessment in plan.assessments:
+            candidate = by_key.get(assessment.entry.key)
+            if candidate is None:
+                continue
+            manifest = self._authenticated_manifest(candidate.manifest, role="candidate")
+            source = assessment.entry
+            if (
+                candidate.generation != source.generation
+                or candidate.payload_digest != source.payload_digest
+                or candidate.byte_size != source.byte_size
+                or manifest.key != candidate.key
+                or manifest.generation != candidate.generation
+                or manifest.locator != candidate.locator
+                or manifest.digest != candidate.payload_digest
+                or manifest.byte_size != candidate.byte_size
+            ):
+                raise CacheBlobMigrationEvidenceMismatchError(
+                    "authority candidate descriptor does not bind the planned source entry",
+                    context={"operation": "migration.resume", "run_id": self.run_id},
+                )
+            ordered.append(candidate)
+        return tuple(ordered)
+
+    def _candidate_receipt(
+        self, plan: MigrationPlan, entries: tuple[AuthorityInventoryEntry, ...]
+    ) -> VerifiedCandidateReceipt:
+        """Bind the authority-attributed candidate subset to this immutable plan."""
+        return VerifiedCandidateReceipt(
+            run_id=self.run_id,
+            plan_digest=plan.digest,
+            source_identity=plan.source_identity,
+            source_revision=plan.source_identity.revision,
+            destination_identity=plan.destination_identity,
+            destination_revision=plan.destination_identity.revision,
+            candidate_digest=candidate_digest(entries),
+            entry_count=len(entries),
+            byte_count=sum(entry.byte_size for entry in entries),
+        )
+
+    @staticmethod
+    def _batch_receipt(
+        plan: MigrationPlan,
+        entry: AuthorityInventoryEntry,
+        entry_ordinal: int,
+    ) -> CandidateBatchReceipt:
+        """Describe one acknowledged entry without storing payload data in evidence."""
+        descriptor = CandidateEntryReceipt(
+            entry_ordinal=entry_ordinal,
+            key=entry.key,
+            generation=entry.generation,
+            locator=entry.locator,
+            target_manifest=entry.manifest,
+            payload_digest=entry.payload_digest,
+            byte_size=entry.byte_size,
+        )
+        return CandidateBatchReceipt(
+            run_id=plan.run_id,
+            plan_digest=plan.digest,
+            batch_ordinal=entry_ordinal,
+            first_entry_ordinal=entry_ordinal,
+            past_last_entry_ordinal=entry_ordinal + 1,
+            destination_identity=plan.destination_identity,
+            destination_revision=plan.destination_identity.revision,
+            entries=(descriptor,),
+            candidate_digest=candidate_digest((entry,)),
+            entry_count=1,
+            byte_count=entry.byte_size,
+        )
+
     def stage(self, plan: MigrationPlan) -> MigrationStepResult:
-        """Copy authenticated immutable payloads into an invisible candidate."""
+        """Copy payloads and checkpoint each only after authority attribution."""
         self._validate_plan(plan)
         if plan.plan_kind is not MigrationPlanKind.MIGRATION:
             raise CacheBlobMigrationEvidenceMismatchError(
@@ -2332,7 +2612,7 @@ class OfflineMigrationService:
         current = self.read_evidence()
         if current.state is MaintenanceEvidenceState.PLANNED:
             self._expect_evidence(MaintenanceEvidenceState.PLANNED, plan_digest=plan.digest)
-            self._write_evidence(
+            current = self._write_evidence(
                 self._new_evidence(
                     state=MaintenanceEvidenceState.STAGING,
                     plan_digest=plan.digest,
@@ -2343,14 +2623,23 @@ class OfflineMigrationService:
                 )
             )
         elif current.state is MaintenanceEvidenceState.STAGING:
-            self._expect_evidence(MaintenanceEvidenceState.STAGING, plan_digest=plan.digest)
+            current = self._expect_evidence(
+                MaintenanceEvidenceState.STAGING, plan_digest=plan.digest
+            )
         else:
             raise CacheBlobMigrationEvidenceMismatchError(
                 "maintenance evidence is not ready to stage this plan",
                 context={"operation": "migration.stage", "run_id": self.run_id},
             )
+
+        candidates = list(self._authority_candidate_entries(plan))
+        batch_references = list(current.candidate_batch_references)
+        if len(batch_references) != len(candidates):
+            raise CacheBlobMigrationEvidenceMismatchError(
+                "staging evidence and authority candidate progress disagree",
+                context={"operation": "migration.stage", "run_id": self.run_id},
+            )
         expected = {assessment.entry.key: assessment for assessment in plan.assessments}
-        candidates: list[AuthorityInventoryEntry] = []
         seen_keys: set[str] = set()
         cursor = None
         while True:
@@ -2364,24 +2653,24 @@ class OfflineMigrationService:
                 ).hexdigest():
                     raise ValueError("source entry changed; reinspection is required")
                 seen_keys.add(snapshot.key)
+                if snapshot.key in {entry.key for entry in candidates}:
+                    continue
                 manifest = self._authenticated_manifest(snapshot.manifest, role="source")
                 source_io = self.source._materialize_authority_store()
                 with source_io.open_snapshot(
                     manifest.locator, dict(manifest.handler_metadata)
                 ) as source_snapshot:
                     payload = source_snapshot.path.read_bytes()
-                if hashlib.sha256(payload).hexdigest() != manifest.digest or len(payload) != manifest.byte_size:
+                if (
+                    hashlib.sha256(payload).hexdigest() != manifest.digest
+                    or len(payload) != manifest.byte_size
+                ):
                     raise ValueError("source payload fails authenticated integrity verification")
-                candidate_locator = self._candidate_locator(manifest)
-                # The operator acknowledgement binds every participant write
-                # through current evidence. Revalidate again immediately
-                # before this external effect; it is not a global-quiescence
-                # claim and does not make the object authoritative.
+                candidate_id = self._candidate_blob_id(manifest)
+                candidate_locator = self._candidate_locator(candidate_id)
                 self._revalidate_identities(plan)
                 destination_io = self.destination._materialize_authority_store()
-                remote_candidate_writer = getattr(
-                    destination_io, "write_migration_candidate", None
-                )
+                remote_candidate_writer = getattr(destination_io, "write_migration_candidate", None)
                 if callable(remote_candidate_writer):
                     remote_receipt = remote_candidate_writer(
                         run_id=self.run_id,
@@ -2406,9 +2695,7 @@ class OfflineMigrationService:
                         )
                     written_locator = remote_receipt.locator
                 else:
-                    written_locator = self.destination.payload_backend.write_blob(
-                        self._candidate_blob_id(manifest), payload
-                    )
+                    written_locator = self.destination.payload_backend.write_blob(candidate_id, payload)
                 expected_written_locator = candidate_locator
                 if self.destination.topology.qualified_profile.pair == ("memory", "memory"):
                     expected_written_locator = f"memory://{candidate_locator}"
@@ -2422,14 +2709,33 @@ class OfflineMigrationService:
                 )
                 candidate_raw = candidate_manifest.canonical_bytes()
                 self._authenticated_manifest(candidate_raw, role="candidate")
-                candidates.append(
-                    AuthorityInventoryEntry(
-                        key=snapshot.key,
-                        generation=snapshot.generation,
-                        locator=candidate_locator,
-                        manifest=candidate_raw,
-                        payload_digest=manifest.digest,
-                        byte_size=manifest.byte_size,
+                candidate = AuthorityInventoryEntry(
+                    key=snapshot.key,
+                    generation=snapshot.generation,
+                    locator=candidate_locator,
+                    manifest=candidate_raw,
+                    payload_digest=manifest.digest,
+                    byte_size=manifest.byte_size,
+                )
+                candidates.append(candidate)
+                receipt = self._candidate_receipt(plan, tuple(candidates))
+                self._destination_authority.record_verified_candidate(
+                    receipt=receipt, entries=tuple(candidates)
+                )
+                batch = self._batch_receipt(plan, candidate, len(candidates) - 1)
+                batch_references.append(batch.candidate_digest)
+                current = self._write_evidence(
+                    self._new_evidence(
+                        state=MaintenanceEvidenceState.STAGING,
+                        plan_digest=plan.digest,
+                        source_identity=plan.source_identity,
+                        destination_identity=plan.destination_identity,
+                        completed_steps=("inspect", "plan"),
+                        candidate_batch_references=tuple(batch_references),
+                        candidate_checkpoint_revision=plan.destination_identity.revision,
+                        candidate_entry_count=len(candidates),
+                        candidate_byte_count=sum(entry.byte_size for entry in candidates),
+                        completed_output_digests={"plan": plan.digest},
                     )
                 )
             if page.exhausted:
@@ -2439,16 +2745,14 @@ class OfflineMigrationService:
             raise ValueError("source inventory changed; reinspection is required")
         self._revalidate_identities(plan)
         self._candidate_entries = tuple(candidates)
-        receipt = VerifiedCandidateReceipt(
-            run_id=self.run_id,
-            plan_digest=plan.digest,
-            source_identity=plan.source_identity,
-            source_revision=plan.source_identity.revision,
-            destination_identity=plan.destination_identity,
-            destination_revision=plan.destination_identity.revision,
-            candidate_digest=candidate_digest(self._candidate_entries),
-            entry_count=len(self._candidate_entries),
-            byte_count=sum(entry.byte_size for entry in self._candidate_entries),
+        receipt = self._candidate_receipt(plan, self._candidate_entries)
+        if receipt.entry_count != len(plan.assessments):
+            raise CacheBlobMigrationEvidenceMismatchError(
+                "authority candidate does not cover every planned source entry",
+                context={"operation": "migration.stage", "run_id": self.run_id},
+            )
+        self._destination_authority.record_verified_candidate(
+            receipt=receipt, entries=self._candidate_entries
         )
         self._write_evidence(
             self._new_evidence(
@@ -2458,6 +2762,10 @@ class OfflineMigrationService:
                 destination_identity=plan.destination_identity,
                 completed_steps=("inspect", "plan", "stage"),
                 candidate_receipt=receipt,
+                candidate_batch_references=tuple(batch_references),
+                candidate_checkpoint_revision=plan.destination_identity.revision,
+                candidate_entry_count=receipt.entry_count,
+                candidate_byte_count=receipt.byte_count,
                 completed_output_digests={
                     "plan": plan.digest,
                     "stage": receipt.candidate_digest,
@@ -2469,84 +2777,38 @@ class OfflineMigrationService:
     def _candidate_from_evidence(
         self, evidence: MaintenanceRunEvidence, plan: MigrationPlan
     ) -> tuple[AuthorityInventoryEntry, ...]:
-        """Rebuild expected descriptors from the plan, then verify recorded outputs.
-
-        Candidate presence is never progress evidence.  The plan plus signed
-        receipt determines each expected immutable output, which is then read
-        and hashed before a resume can skip the completed stage.
-        """
+        """Recover only descriptors durably attributed by the authority."""
         receipt = evidence.candidate_receipt
         if receipt is None:
             raise CacheBlobMigrationEvidenceMismatchError(
                 "candidate receipt is required for resume",
                 context={"operation": "migration.resume", "run_id": self.run_id},
             )
-        candidates = self._expected_candidate_entries(plan)
+        candidates = self._authority_candidate_entries(plan)
         if (
             receipt.plan_digest != plan.digest
             or receipt.candidate_digest != candidate_digest(candidates)
             or receipt.entry_count != len(candidates)
             or receipt.byte_count != sum(item.byte_size for item in candidates)
+            or evidence.candidate_entry_count != len(candidates)
+            or evidence.candidate_byte_count != sum(item.byte_size for item in candidates)
+            or evidence.candidate_checkpoint_revision != plan.destination_identity.revision
         ):
             raise CacheBlobMigrationEvidenceMismatchError(
                 "candidate descriptors do not match authenticated evidence",
                 context={"operation": "migration.resume", "run_id": self.run_id},
             )
-        self._verify_candidate_outputs(candidates)
-        return candidates
-
-    def _expected_candidate_entries(
-        self, plan: MigrationPlan
-    ) -> tuple[AuthorityInventoryEntry, ...]:
-        """Derive the only valid candidate descriptors from current planned input."""
-        expected = {assessment.entry.key: assessment for assessment in plan.assessments}
-        candidates: list[AuthorityInventoryEntry] = []
-        seen_keys: set[str] = set()
-        cursor = None
-        while True:
-            page = self._inventory_page(self._source_authority, cursor)
-            if page.identity != plan.source_identity:
-                raise CacheBlobMigrationPlanStaleError(
-                    "source inventory changed; reinspection is required",
-                    context={"operation": "migration.resume", "run_id": self.run_id},
-                )
-            for snapshot in page.entries:
-                assessment = expected.get(snapshot.key)
-                if assessment is None or assessment.entry.manifest_digest != hashlib.sha256(
-                    snapshot.manifest
-                ).hexdigest():
-                    raise CacheBlobMigrationPlanStaleError(
-                        "source entry changed; reinspection is required",
-                        context={"operation": "migration.resume", "run_id": self.run_id},
-                    )
-                seen_keys.add(snapshot.key)
-                manifest = self._authenticated_manifest(snapshot.manifest, role="source")
-                candidate_locator = self._candidate_locator(manifest)
-                candidate_manifest = sign_current_manifest(
-                    replace(manifest, locator=candidate_locator), self._evidence_key
-                )
-                candidate_raw = candidate_manifest.canonical_bytes()
-                self._authenticated_manifest(candidate_raw, role="candidate")
-                candidates.append(
-                    AuthorityInventoryEntry(
-                        key=snapshot.key,
-                        generation=snapshot.generation,
-                        locator=candidate_locator,
-                        manifest=candidate_raw,
-                        payload_digest=manifest.digest,
-                        byte_size=manifest.byte_size,
-                    )
-                )
-            if page.exhausted:
-                break
-            cursor = page.next_cursor
-        if seen_keys != set(expected):
-            raise CacheBlobMigrationPlanStaleError(
-                "source inventory changed; reinspection is required",
+        batches = tuple(
+            self._batch_receipt(plan, entry, ordinal)
+            for ordinal, entry in enumerate(candidates)
+        )
+        if tuple(batch.candidate_digest for batch in batches) != evidence.candidate_batch_references:
+            raise CacheBlobMigrationEvidenceMismatchError(
+                "authority candidate batches do not match authenticated evidence",
                 context={"operation": "migration.resume", "run_id": self.run_id},
             )
-        self._revalidate_identities(plan)
-        return tuple(candidates)
+        self._verify_candidate_outputs(candidates)
+        return candidates
 
     def _verify_candidate_outputs(
         self, candidates: tuple[AuthorityInventoryEntry, ...]
@@ -2593,6 +2855,7 @@ class OfflineMigrationService:
                     destination_identity=plan.destination_identity,
                     completed_steps=("inspect", "plan", "stage"),
                     candidate_receipt=evidence.candidate_receipt,
+                    **self._candidate_progress(evidence),
                     completed_output_digests=dict(evidence.completed_output_digests),
                 )
             )
@@ -2616,6 +2879,7 @@ class OfflineMigrationService:
                 destination_identity=plan.destination_identity,
                 completed_steps=("inspect", "plan", "stage", "verify"),
                 candidate_receipt=receipt,
+                **self._candidate_progress(evidence),
                 completed_output_digests={
                     **evidence.completed_output_digests,
                     "verify": receipt.candidate_digest,
@@ -2651,6 +2915,7 @@ class OfflineMigrationService:
                 destination_identity=plan.destination_identity,
                 completed_steps=("inspect", "plan", "stage", "verify", "activate"),
                 candidate_receipt=receipt,
+                **self._candidate_progress(evidence),
                 activation_receipt=activation,
                 authority_receipts=(activation_digest,),
                 completed_output_digests={
@@ -2729,6 +2994,7 @@ class OfflineMigrationService:
                 destination_identity=plan.destination_identity,
                 completed_steps=("inspect", "plan", "stage", "verify", "activate", "rollback"),
                 candidate_receipt=evidence.candidate_receipt,
+                **self._candidate_progress(evidence),
                 activation_receipt=evidence.activation_receipt,
                 authority_receipts=(*evidence.authority_receipts, rollback_digest),
                 completed_output_digests={
@@ -2787,6 +3053,7 @@ class OfflineMigrationService:
                 destination_identity=plan.destination_identity,
                 completed_steps=("inspect", "plan", "stage", "verify", "activate", "finalize"),
                 candidate_receipt=evidence.candidate_receipt,
+                **self._candidate_progress(evidence),
                 activation_receipt=evidence.activation_receipt,
                 authority_receipts=(*evidence.authority_receipts, finalized_digest),
                 completed_output_digests={
@@ -2967,6 +3234,7 @@ class OfflineMigrationService:
                 destination_identity=plan.destination_identity,
                 completed_steps=(*evidence.completed_steps, "abort"),
                 candidate_receipt=evidence.candidate_receipt,
+                **self._candidate_progress(evidence),
                 activation_receipt=evidence.activation_receipt,
                 authority_receipts=evidence.authority_receipts,
                 cleanup_debt=evidence.cleanup_debt,
@@ -3012,6 +3280,7 @@ class OfflineMigrationService:
                     destination_identity=plan.destination_identity,
                     completed_steps=evidence.completed_steps,
                     candidate_receipt=evidence.candidate_receipt,
+                    **self._candidate_progress(evidence),
                     activation_receipt=evidence.activation_receipt,
                     authority_receipts=evidence.authority_receipts,
                     completed_output_digests=evidence.completed_output_digests,
@@ -3034,6 +3303,7 @@ class OfflineMigrationService:
                     destination_identity=plan.destination_identity,
                     completed_steps=evidence.completed_steps,
                     candidate_receipt=evidence.candidate_receipt,
+                    **self._candidate_progress(evidence),
                     activation_receipt=evidence.activation_receipt,
                     authority_receipts=evidence.authority_receipts,
                     cleanup_debt=tuple(pending),
@@ -3058,6 +3328,7 @@ class OfflineMigrationService:
                 destination_identity=plan.destination_identity,
                 completed_steps=(*evidence.completed_steps, "purge"),
                 candidate_receipt=evidence.candidate_receipt,
+                **self._candidate_progress(evidence),
                 activation_receipt=evidence.activation_receipt,
                 authority_receipts=evidence.authority_receipts,
                 completed_output_digests={
@@ -3194,6 +3465,7 @@ class OfflineMigrationService:
                         destination_identity=plan.destination_identity,
                         completed_steps=("inspect", "plan", "stage", "verify", "activate"),
                         candidate_receipt=receipt,
+                        **self._candidate_progress(evidence),
                         activation_receipt=activation,
                         authority_receipts=(activation_digest,),
                         completed_output_digests={

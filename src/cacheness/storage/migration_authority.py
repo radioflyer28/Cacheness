@@ -18,7 +18,6 @@ from typing import Protocol, runtime_checkable
 from .lifecycle_authority import EntrySnapshot
 
 _MAX_TEXT_BYTES = 512
-_MAX_CANDIDATE_ENTRIES = 256
 _MAX_INVENTORY_PAGE_ENTRIES = 256
 _MAX_INVENTORY_WORK_BYTES = 131_072
 SQLITE_MIGRATION_AUTHORITY_SCHEMA_VERSION = 8
@@ -183,8 +182,8 @@ class AuthorityInventoryPage:
 
 def candidate_digest(entries: tuple[AuthorityInventoryEntry, ...]) -> str:
     """Hash a canonical candidate description without serializing secret material."""
-    if len(entries) > _MAX_CANDIDATE_ENTRIES:
-        raise ValueError("maintenance candidate exceeds the entry bound")
+    if len({entry.key for entry in entries}) != len(entries):
+        raise ValueError("maintenance candidate contains duplicate keys")
     record = [
         {
             "byte_size": entry.byte_size,
@@ -198,6 +197,128 @@ def candidate_digest(entries: tuple[AuthorityInventoryEntry, ...]) -> str:
     ]
     encoded = json.dumps(record, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+@dataclass(frozen=True)
+class CandidateEntryReceipt:
+    """One exact authority-attributed candidate descriptor in a bounded batch.
+
+    The complete signed target manifest remains inside authority-owned evidence.
+    It is deliberately not suitable for a shareable migration plan or report.
+    """
+
+    entry_ordinal: int
+    key: str
+    generation: str
+    locator: str
+    target_manifest: bytes
+    payload_digest: str
+    byte_size: int
+
+    def __post_init__(self) -> None:
+        if type(self.entry_ordinal) is not int or self.entry_ordinal < 0:
+            raise ValueError("entry_ordinal must be a non-negative integer")
+        for field_name in ("key", "generation", "locator"):
+            _bounded_text(getattr(self, field_name), field_name)
+        if not isinstance(self.target_manifest, bytes) or not self.target_manifest:
+            raise ValueError("target_manifest must be non-empty bytes")
+        if len(self.target_manifest) > 1024 * 1024:
+            raise ValueError("target_manifest exceeds the maintenance bound")
+        if (
+            not isinstance(self.payload_digest, str)
+            or len(self.payload_digest) != 64
+            or any(character not in "0123456789abcdef" for character in self.payload_digest)
+        ):
+            raise ValueError("payload_digest must be a SHA-256 hexadecimal value")
+        if type(self.byte_size) is not int or self.byte_size < 0:
+            raise ValueError("byte_size must be a non-negative integer")
+
+    @property
+    def manifest_digest(self) -> str:
+        """Return a non-secret binding for the authority-held manifest bytes."""
+        return hashlib.sha256(self.target_manifest).hexdigest()
+
+    def as_inventory_entry(self) -> AuthorityInventoryEntry:
+        """Adapt the lossless batch descriptor for existing authority storage."""
+        return AuthorityInventoryEntry(
+            key=self.key,
+            generation=self.generation,
+            locator=self.locator,
+            manifest=self.target_manifest,
+            payload_digest=self.payload_digest,
+            byte_size=self.byte_size,
+        )
+
+
+@dataclass(frozen=True)
+class CandidateBatchReceipt:
+    """One contiguous, exact batch committed to existing candidate evidence.
+
+    This receipt does not publish a candidate or create a second lifecycle
+    state.  It only describes effects already attributed by the destination
+    authority after their immutable payload publication completed.
+    """
+
+    run_id: str
+    plan_digest: str
+    batch_ordinal: int
+    first_entry_ordinal: int
+    past_last_entry_ordinal: int
+    destination_identity: AuthorityIdentitySnapshot
+    destination_revision: int
+    entries: tuple[CandidateEntryReceipt, ...]
+    candidate_digest: str
+    entry_count: int
+    byte_count: int
+
+    def __post_init__(self) -> None:
+        _bounded_text(self.run_id, "run_id")
+        for field_name in ("plan_digest", "candidate_digest"):
+            value = getattr(self, field_name)
+            if (
+                not isinstance(value, str)
+                or len(value) != 64
+                or any(character not in "0123456789abcdef" for character in value)
+            ):
+                raise ValueError(f"{field_name} must be a SHA-256 hexadecimal value")
+        for field_name in (
+            "batch_ordinal",
+            "first_entry_ordinal",
+            "past_last_entry_ordinal",
+            "destination_revision",
+            "entry_count",
+            "byte_count",
+        ):
+            value = getattr(self, field_name)
+            if type(value) is not int or value < 0:
+                raise ValueError(f"{field_name} must be a non-negative integer")
+        if self.past_last_entry_ordinal <= self.first_entry_ordinal:
+            raise ValueError("candidate batch range must be non-empty")
+        if self.destination_revision != self.destination_identity.revision:
+            raise ValueError("destination_revision must match destination_identity")
+        if not isinstance(self.entries, tuple) or not self.entries:
+            raise ValueError("candidate batch entries must be a non-empty tuple")
+        if not all(isinstance(entry, CandidateEntryReceipt) for entry in self.entries):
+            raise TypeError("candidate batch entries must be CandidateEntryReceipt values")
+        if self.entry_count != len(self.entries) or self.entry_count != (
+            self.past_last_entry_ordinal - self.first_entry_ordinal
+        ):
+            raise ValueError("candidate batch entry count disagrees with its range")
+        expected_ordinals = tuple(
+            range(self.first_entry_ordinal, self.past_last_entry_ordinal)
+        )
+        if tuple(entry.entry_ordinal for entry in self.entries) != expected_ordinals:
+            raise ValueError("candidate batch entry ordinals must be contiguous")
+        inventory_entries = tuple(entry.as_inventory_entry() for entry in self.entries)
+        if self.byte_count != sum(entry.byte_size for entry in self.entries):
+            raise ValueError("candidate batch byte count disagrees with entries")
+        if self.candidate_digest != candidate_digest(inventory_entries):
+            raise ValueError("candidate batch digest disagrees with entries")
+
+    @property
+    def inventory_entries(self) -> tuple[AuthorityInventoryEntry, ...]:
+        """Expose descriptors only to authority and maintenance orchestration."""
+        return tuple(entry.as_inventory_entry() for entry in self.entries)
 
 
 @dataclass(frozen=True)
@@ -324,6 +445,8 @@ __all__ = [
     "AuthorityIdentitySnapshot",
     "AuthorityInventoryEntry",
     "AuthorityInventoryPage",
+    "CandidateBatchReceipt",
+    "CandidateEntryReceipt",
     "FinalizeReceipt",
     "MigrationAuthority",
     "POSTGRESQL_MIGRATION_AUTHORITY_CAPABILITY",

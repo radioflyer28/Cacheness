@@ -519,6 +519,17 @@ class InMemoryLifecycleAuthority:
             if self._migration_state is AuthorityPublicationState.CANDIDATE:
                 if self._migration_receipt == receipt and self._migration_candidates == entries:
                     return receipt
+                if (
+                    self._migration_receipt is not None
+                    and self._migration_receipt.run_id == receipt.run_id
+                    and self._migration_receipt.plan_digest == receipt.plan_digest
+                    and self._migration_receipt.source_identity == receipt.source_identity
+                    and self._migration_receipt.source_revision == receipt.source_revision
+                    and self._migration_candidates == entries[: len(self._migration_candidates)]
+                ):
+                    self._migration_receipt = receipt
+                    self._migration_candidates = entries
+                    return receipt
                 raise CacheBlobLifecycleConflictError(
                     "A different verified migration candidate is already recorded"
                 )
@@ -550,6 +561,24 @@ class InMemoryLifecycleAuthority:
             return receipt
 
         return self._transition(record)
+
+    def candidate_entries_for_run(self, *, run_id: str) -> tuple[AuthorityInventoryEntry, ...]:
+        """Return only exact candidate descriptors already held by this authority."""
+        self._require_open()
+        with self._lock:
+            if (
+                self._migration_receipt is None
+                or self._migration_receipt.run_id != run_id
+                or self._migration_state
+                not in {
+                    AuthorityPublicationState.CANDIDATE,
+                    AuthorityPublicationState.ACTIVATED_OFFLINE,
+                    AuthorityPublicationState.ACTIVE,
+                    AuthorityPublicationState.ROLLED_BACK,
+                }
+            ):
+                return ()
+            return self._migration_candidates
 
     def publication_state(self) -> AuthorityPublicationState:
         """Return narrow maintenance status without admitting ordinary workers."""

@@ -32,14 +32,15 @@ from .migration_authority import (
 )
 
 
-_EVIDENCE_VERSION = 1
-_EVIDENCE_DOMAIN = b"cacheness-maintenance-evidence-v1\x00"
+_EVIDENCE_VERSION = 2
+_EVIDENCE_DOMAIN = b"cacheness-maintenance-evidence-v2\x00"
 _MAX_EVIDENCE_BYTES = 65_536
 _MAX_TEXT_BYTES = 512
 _MAX_CANONICAL_DEPTH = 16
 _MAX_CANONICAL_NODES = 16_384
 _MAX_CANONICAL_ITEMS = 4_096
 _MAX_COMPLETED_STEPS = 16
+_MAX_CANDIDATE_BATCH_REFERENCES = 256
 _RUN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
 
 
@@ -163,7 +164,11 @@ _LEGAL_TRANSITIONS: Mapping[MaintenanceEvidenceState, frozenset[MaintenanceEvide
         }
     ),
     MaintenanceEvidenceState.STAGING: frozenset(
-        {MaintenanceEvidenceState.STAGED, MaintenanceEvidenceState.ABORTED}
+        {
+            MaintenanceEvidenceState.STAGING,
+            MaintenanceEvidenceState.STAGED,
+            MaintenanceEvidenceState.ABORTED,
+        }
     ),
     MaintenanceEvidenceState.STAGED: frozenset(
         {MaintenanceEvidenceState.VERIFYING, MaintenanceEvidenceState.ABORTED}
@@ -349,6 +354,10 @@ class MaintenanceRunEvidence:
     state: MaintenanceEvidenceState
     completed_steps: tuple[str, ...]
     candidate_receipt: VerifiedCandidateReceipt | None = None
+    candidate_batch_references: tuple[str, ...] = ()
+    candidate_checkpoint_revision: int | None = None
+    candidate_entry_count: int = 0
+    candidate_byte_count: int = 0
     activation_receipt: ActivationReceipt | None = None
     authority_receipts: tuple[str, ...] = ()
     cleanup_debt: tuple[str, ...] = ()
@@ -395,6 +404,34 @@ class MaintenanceRunEvidence:
                 or self.candidate_receipt.destination_revision != self.destination_revision
             ):
                 raise ValueError("candidate_receipt does not bind this evidence")
+        if (
+            not isinstance(self.candidate_batch_references, tuple)
+            or len(self.candidate_batch_references) > _MAX_CANDIDATE_BATCH_REFERENCES
+        ):
+            raise ValueError("candidate_batch_references must be a bounded tuple")
+        if len(set(self.candidate_batch_references)) != len(self.candidate_batch_references):
+            raise ValueError("candidate_batch_references must be unique")
+        for reference in self.candidate_batch_references:
+            _sha256(reference, "candidate batch reference")
+        if self.candidate_checkpoint_revision is not None and (
+            type(self.candidate_checkpoint_revision) is not int
+            or self.candidate_checkpoint_revision < 0
+        ):
+            raise ValueError("candidate_checkpoint_revision must be a non-negative integer")
+        for field_name in ("candidate_entry_count", "candidate_byte_count"):
+            value = getattr(self, field_name)
+            if type(value) is not int or value < 0:
+                raise ValueError(f"{field_name} must be a non-negative integer")
+        if self.candidate_batch_references and (
+            self.candidate_checkpoint_revision is None
+            or self.candidate_entry_count == 0
+        ):
+            raise ValueError("candidate batch references require attributed progress")
+        if self.candidate_receipt is not None and (
+            self.candidate_receipt.entry_count != self.candidate_entry_count
+            or self.candidate_receipt.byte_count != self.candidate_byte_count
+        ):
+            raise ValueError("candidate receipt disagrees with attributed progress")
         if self.activation_receipt is not None and self.candidate_receipt is None:
             raise ValueError("activation_receipt requires candidate_receipt")
         for field_name, values in (
@@ -427,6 +464,10 @@ class MaintenanceRunEvidence:
             "acknowledgement": self.acknowledgement.to_record(),
             "activation_receipt": None,
             "authority_receipts": list(self.authority_receipts),
+            "candidate_batch_references": list(self.candidate_batch_references),
+            "candidate_byte_count": self.candidate_byte_count,
+            "candidate_checkpoint_revision": self.candidate_checkpoint_revision,
+            "candidate_entry_count": self.candidate_entry_count,
             "candidate_receipt": None,
             "cleanup_debt": list(self.cleanup_debt),
             "completed_output_digests": dict(sorted(self.completed_output_digests.items())),
@@ -456,6 +497,10 @@ class MaintenanceRunEvidence:
             "acknowledgement",
             "activation_receipt",
             "authority_receipts",
+            "candidate_batch_references",
+            "candidate_byte_count",
+            "candidate_checkpoint_revision",
+            "candidate_entry_count",
             "candidate_receipt",
             "cleanup_debt",
             "completed_output_digests",
@@ -478,6 +523,7 @@ class MaintenanceRunEvidence:
             not isinstance(steps, list)
             or not isinstance(output_digests, Mapping)
             or not isinstance(record["authority_receipts"], list)
+            or not isinstance(record["candidate_batch_references"], list)
             or not isinstance(record["cleanup_debt"], list)
         ):
             raise ValueError("maintenance evidence completion records are invalid")
@@ -512,6 +558,10 @@ class MaintenanceRunEvidence:
             state=state,
             completed_steps=tuple(steps),
             candidate_receipt=candidate_receipt,
+            candidate_batch_references=tuple(record["candidate_batch_references"]),
+            candidate_checkpoint_revision=record["candidate_checkpoint_revision"],
+            candidate_entry_count=record["candidate_entry_count"],
+            candidate_byte_count=record["candidate_byte_count"],
             activation_receipt=activation_receipt,
             authority_receipts=tuple(record["authority_receipts"]),
             cleanup_debt=tuple(record["cleanup_debt"]),

@@ -51,7 +51,7 @@ def _identity(*, revision: int = 4, store_id: str = "source-store") -> Authority
 def _evidence(*, state: MaintenanceEvidenceState = MaintenanceEvidenceState.INSPECTED) -> MaintenanceRunEvidence:
     source = _identity()
     return MaintenanceRunEvidence(
-        evidence_version=1,
+        evidence_version=2,
         run_id="maintenance-run-001",
         plan_digest="a" * 64,
         source_identity=source,
