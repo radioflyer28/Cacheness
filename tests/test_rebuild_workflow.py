@@ -798,6 +798,8 @@ def test_rebuild_cleanup_retry_rejects_forged_debt_without_payload_access(
         monkeypatch.setattr(
             destination, "delete_migration_payload", unexpected_participant_access
         )
+        monkeypatch.setattr(destination, "list", unexpected_participant_access)
+        monkeypatch.setattr(destination, "list_page", unexpected_participant_access)
 
         with pytest.raises(
             CacheBlobMigrationEvidenceMismatchError,
@@ -864,6 +866,8 @@ def test_rebuild_cleanup_retry_preserves_changed_current_ownership(
             destination, "delete_migration_payload", delete_only_recorded_locator
         )
         monkeypatch.setattr(destination, "delete", current_key_delete_is_forbidden)
+        monkeypatch.setattr(destination, "list", current_key_delete_is_forbidden)
+        monkeypatch.setattr(destination, "list_page", current_key_delete_is_forbidden)
         resumed = service.resume(
             plan, run_id=service.run_id, evidence_path=service.evidence_path
         )
