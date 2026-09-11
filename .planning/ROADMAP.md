@@ -433,7 +433,7 @@ Plans:
 
 **Accepted recovery/progress limit (checker override, 2026-09-10):** A crash after immutable payload publication but before its authority checkpoint may leave an invisible, unattributed orphan. It is never visible, never automatically adopted, and guaranteed exact cleanup is outside Phase 7. Integrity and authority visibility remain guaranteed while perfect orphan reclamation is not; resume/abort guarantees apply only to effects durably attributed in authority-owned evidence. This is an ADR 0001 topology-specific recovery/progress limit, not failed atomicity. Phase 7 adds no pre-publication maintenance intent, extra journal/lifecycle state, coordination mechanism, or production obstore adoption.
 
-**Plans**: 19/19 plans executed; 8 gap-closure plans ready
+**Plans**: 19/22 plans executed; 3 gap-closure plans ready
 
 Plans:
 
@@ -504,6 +504,18 @@ Plans:
 
 - [x] 07-19-PLAN.md — Run quick/all fixed verification and record truthful blocker, warning, spike-boundary, and Phase 8 evidence.
 
+**Wave 16** *(gap closure; blocked on the verified Plan 07-19 baseline)*
+
+- [ ] 07-20-PLAN.md — Correct same-version format transforms and make typed S3 abort failures resumable through exact existing cleanup debt.
+
+**Wave 17** *(blocked on migration target and abort repairs)*
+
+- [ ] 07-21-PLAN.md — Settle rebuild cleanup debt from authenticated exact receipts before entering terminal ABORTED.
+
+**Wave 18** *(blocked on all three behavioral repairs)*
+
+- [ ] 07-22-PLAN.md — Bind the repairs to exact fixed-verifier selectors and record truthful final validation.
+
 ### Phase 8: Production Gates and Performance Stabilization
 
 **Goal**: Users can rely on reproducible release evidence across supported installations, Python versions, backends, failures, and operational scale.
@@ -530,7 +542,7 @@ Plans:
 | 4. Metadata Composition and Topology Contracts | 14/14 | Complete    | 2026-09-08 |
 | 5. Payload Backends and Supported Topology Qualification | 9/9 | Complete    | 2026-09-08 |
 | 6. UnifiedCache Policy Composition | 11/11 | Complete    | 2026-09-09 |
-| 7. Explicit Migration and Rebuild Cutover | 19/19 | In Progress|  |
+| 7. Explicit Migration and Rebuild Cutover | 19/22 | In Progress|  |
 | 8. Production Gates and Performance Stabilization | 0/TBD | Not started | - |
 
 ## Backlog
