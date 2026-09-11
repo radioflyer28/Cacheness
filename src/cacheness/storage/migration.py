@@ -411,6 +411,9 @@ class MigrationReason(str, Enum):
     COMPATIBLE_EDGE = "compatible_edge"
     DIRECTED_EDGE = "directed_edge"
     MISSING_DIRECTED_EDGE = "missing_directed_edge"
+    SOURCE_MISMATCH = "source_mismatch"
+    DESTINATION_MISMATCH = "destination_mismatch"
+    NON_EXECUTABLE_TRANSFORMATION = "non_executable_transformation"
     RELEASE_WINDOW_UNSUPPORTED = "release_window_unsupported"
     DIMENSION_BLOCKED = "dimension_blocked"
     DIMENSION_UNVERIFIABLE = "dimension_unverifiable"
@@ -438,9 +441,17 @@ class MigrationCompatibilityEdge:
             test_only=True,
         )
 
-    def supports(self, versions: StoreVersionDimensions) -> bool:
-        """Return whether the inspected explicit dimensions match this edge."""
-        return versions == self.source
+    def supports(
+        self,
+        source: StoreVersionDimensions,
+        destination: StoreVersionDimensions,
+    ) -> bool:
+        """Return whether both inspected endpoints exactly match this edge.
+
+        The destination is an independently persisted contract.  A matching
+        source alone can never authorize a copy or a native transformation.
+        """
+        return source == self.source and destination == self.destination
 
 
 @dataclass(frozen=True)
@@ -1804,6 +1815,28 @@ class OfflineMigrationService:
             raise ValueError(f"{role} manifest is not canonical")
         return manifest
 
+    def _configured_destination_contract(
+        self, manifest: BlobManifest
+    ) -> tuple[object, StoreVersionDimensions]:
+        """Return the destination handler contract without inspecting payload bytes."""
+        handler = self.destination.handlers.get_handler_by_type(manifest.handler_type)
+        payload_version = getattr(handler, "payload_format_version", None)
+        if type(payload_version) is not int or payload_version < 1:
+            raise ValueError("destination handler declares an invalid payload contract")
+        return handler, StoreVersionDimensions(payload_format_version=payload_version)
+
+    def _matching_compatibility_edges(
+        self,
+        manifest: BlobManifest,
+        destination_versions: StoreVersionDimensions,
+    ) -> tuple[MigrationCompatibilityEdge, ...]:
+        """Return only edges whose source and configured destination both match."""
+        return tuple(
+            edge
+            for edge in self.compatibility_edges
+            if edge.supports(manifest.versions, destination_versions)
+        )
+
     def _candidate_blob_id(self, manifest: BlobManifest) -> str:
         """Mint an opaque attempt-local identifier for one immutable candidate.
 
@@ -1902,12 +1935,55 @@ class OfflineMigrationService:
                         )
                     )
                     continue
-                if any(edge.supports(manifest.versions) for edge in self.compatibility_edges):
+                source_matches = tuple(
+                    edge
+                    for edge in self.compatibility_edges
+                    if edge.source == manifest.versions
+                )
+                try:
+                    destination_handler, destination_versions = (
+                        self._configured_destination_contract(manifest)
+                    )
+                    matching_edges = self._matching_compatibility_edges(
+                        manifest, destination_versions
+                    )
+                    self.source.handlers.resolve_payload_contract(
+                        manifest.handler_type,
+                        manifest.payload_format,
+                        manifest.payload_format_version,
+                    )
+                except (ValueError, CacheManifestUnsupportedVersionError):
+                    matching_edges = ()
+                    destination_handler = None
+                if len(matching_edges) != 1:
+                    disposition = MigrationDisposition.REBUILDABLE
+                    reason = (
+                        MigrationReason.DESTINATION_MISMATCH
+                        if source_matches
+                        else MigrationReason.SOURCE_MISMATCH
+                    )
+                elif (
+                    manifest.payload_format == destination_handler.payload_format
+                    and manifest.payload_format_version
+                    == destination_handler.payload_format_version
+                ):
                     disposition = MigrationDisposition.MIGRATABLE
                     reason = MigrationReason.COMPATIBLE_EDGE
                 else:
-                    disposition = MigrationDisposition.REBUILDABLE
-                    reason = MigrationReason.UNSUPPORTED_DIMENSIONS
+                    try:
+                        self.source.handlers.resolve_payload_transformation(
+                            manifest.handler_type,
+                            manifest.payload_format,
+                            manifest.payload_format_version,
+                            destination_handler.payload_format,
+                            destination_handler.payload_format_version,
+                        )
+                    except (ValueError, CacheManifestUnsupportedVersionError):
+                        disposition = MigrationDisposition.REBUILDABLE
+                        reason = MigrationReason.NON_EXECUTABLE_TRANSFORMATION
+                    else:
+                        disposition = MigrationDisposition.MIGRATABLE
+                        reason = MigrationReason.DIRECTED_EDGE
                 assessments.append(
                     MigrationEntryAssessment(
                         entry=entry,

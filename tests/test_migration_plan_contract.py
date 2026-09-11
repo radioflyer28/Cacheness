@@ -7,6 +7,7 @@ import pytest
 from cacheness.storage.migration import (
     CompatibilityDimension,
     CompatibilityIdentity,
+    MigrationCompatibilityEdge,
     CompatibilityMatrix,
     CompatibilityOutcome,
     MigrationDisposition,
@@ -20,6 +21,7 @@ from cacheness.storage.migration import (
     render_migration_report,
 )
 from cacheness.storage.migration_authority import AuthorityIdentitySnapshot, AuthorityInventoryEntry
+from cacheness.storage.manifest import StoreVersionDimensions
 
 
 def _identity(
@@ -72,6 +74,23 @@ def test_matrix_requires_one_exact_edge_per_changed_dimension() -> None:
     assert payload_result.dimension_outcomes[CompatibilityDimension.PAYLOAD] is CompatibilityOutcome.SUPPORTED
     assert catalog_result.outcome is CompatibilityOutcome.REBUILD_ONLY
     assert catalog_result.dimension_outcomes[CompatibilityDimension.CATALOG] is CompatibilityOutcome.REBUILD_ONLY
+
+
+def test_compatibility_edge_requires_exact_destination_dimensions() -> None:
+    """A source match alone never authorizes a different configured target."""
+    source = StoreVersionDimensions()
+    destination = StoreVersionDimensions(payload_format_version=2)
+    edge = MigrationCompatibilityEdge(
+        source=source,
+        destination=destination,
+        name="object-v1-to-v2",
+    )
+
+    assert edge.supports(source, destination) is True
+    assert edge.supports(source, StoreVersionDimensions()) is False
+    assert edge.supports(
+        StoreVersionDimensions(store_epoch=2), destination
+    ) is False
 
 
 def test_matrix_rejects_ambiguous_or_out_of_window_edges() -> None:

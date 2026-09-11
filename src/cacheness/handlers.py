@@ -1674,6 +1674,11 @@ class HandlerRegistry:
         edges = handler.payload_transformation_edges()
         if not isinstance(edges, tuple):
             raise ValueError("handler payload transformation edges must be a tuple")
+        transform_implementation = getattr(type(handler), "transform_payload", None)
+        if edges and transform_implementation is CacheHandler.transform_payload:
+            raise ValueError(
+                "handler payload transformations require a concrete transform implementation"
+            )
         edge_keys: set[tuple[str, int, str, int]] = set()
         for edge in edges:
             if not isinstance(edge, PayloadTransformationEdge):

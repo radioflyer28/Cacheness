@@ -9,7 +9,7 @@ import pytest
 from cacheness.config import CacheConfig, HandlerConfig
 from cacheness.error_handling import CacheManifestUnsupportedVersionError
 from cacheness.handlers import HandlerRegistry
-from cacheness.interfaces import PayloadTransformationEdge
+from cacheness.interfaces import CacheHandler, PayloadTransformationEdge
 
 
 class _MappingHandler:
@@ -104,6 +104,33 @@ class _DuplicateMcapHandler(_McapHandler):
         return (edge, edge)
 
 
+class _DeclaredButRejectingMcapHandler(_MappingHandler, CacheHandler):
+    """Declares an edge while inheriting CacheHandler's rejecting default."""
+
+    @property
+    def data_type(self) -> str:
+        return "rejecting-mcap"
+
+    @property
+    def payload_format(self) -> str:
+        return "mcap-v2"
+
+    @property
+    def payload_format_version(self) -> int:
+        return 2
+
+    def supports_payload_contract(
+        self, payload_format: str, payload_format_version: int
+    ) -> bool:
+        return (payload_format, payload_format_version) in {
+            ("mcap-v1", 1),
+            ("mcap-v2", 2),
+        }
+
+    def payload_transformation_edges(self) -> tuple[PayloadTransformationEdge, ...]:
+        return (PayloadTransformationEdge("mcap-v1", 1, "mcap-v2", 2),)
+
+
 def _registry() -> HandlerRegistry:
     """Use a predictable built-in baseline for priority assertions."""
 
@@ -187,3 +214,11 @@ def test_invalid_transformation_edges_are_rejected_without_global_fallback() -> 
     registry = _registry()
     with pytest.raises(ValueError, match="duplicate"):
         registry.register_handler(_DuplicateMcapHandler())
+
+
+def test_registered_handler_rejects_declared_edge_without_concrete_transform() -> None:
+    """An advertised conversion cannot resolve to CacheHandler's rejection stub."""
+    registry = _registry()
+
+    with pytest.raises(ValueError, match="concrete transform"):
+        registry.register_handler(_DeclaredButRejectingMcapHandler())
