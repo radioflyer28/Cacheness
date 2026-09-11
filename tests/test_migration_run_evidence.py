@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+import hashlib
 import logging
 from pathlib import Path
 
@@ -16,9 +18,11 @@ from cacheness.error_handling import (
 from cacheness.storage import BackendRef, BlobStore, StoreTopology
 from cacheness.storage.migration import (
     MigrationCompatibilityEdge,
+    MigrationPlan,
     OfflineMigrationService,
 )
 from cacheness.storage.migration_authority import AuthorityIdentitySnapshot
+from cacheness.storage.manifest import BlobManifest
 from cacheness.storage.migration_evidence import (
     MaintenanceEvidenceState,
     MaintenanceEvidenceStore,
@@ -260,6 +264,90 @@ def test_resume_refuses_mismatched_output_or_stale_source_without_adoption(tmp_p
                 plan, run_id=service.run_id, evidence_path=service.evidence_path
             )
         assert destination.lifecycle_authority.identity_snapshot().revision == destination_revision
+    finally:
+        source.close()
+        destination.close()
+
+
+def test_execution_rereads_authenticates_and_rejects_plan_bound_manifest_or_catalog_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Shared plans authorize only fresh authenticated source state before writes."""
+    provider = _SentinelKeyProvider()
+    source = _memory_store(tmp_path / "source", provider)
+    destination = _memory_store(tmp_path / "destination", provider)
+    try:
+        source.put_entry(
+            {"answer": 42},
+            key="entry",
+            catalog_values={"unknown_authenticated_attribute": "preserve-me"},
+        )
+        service = _service(source, destination, tmp_path / "maintenance")
+        shared_plan = MigrationPlan.from_canonical_bytes(
+            service.plan(service.inspect()).to_canonical_bytes()
+        )
+
+        service.stage(shared_plan)
+        candidate = service._candidate_entries[0]
+        candidate_manifest = BlobManifest.from_canonical_bytes(candidate.manifest)
+        assert candidate_manifest.catalog_values["unknown_authenticated_attribute"] == "preserve-me"
+
+        source.close()
+        destination.close()
+        source = _memory_store(tmp_path / "drift-source", provider)
+        destination = _memory_store(tmp_path / "drift-destination", provider)
+        service = _service(source, destination, tmp_path / "drift-maintenance")
+        source.put_entry(
+            {"answer": 42},
+            key="entry",
+            catalog_values={"unknown_authenticated_attribute": "before"},
+        )
+        stale_plan = MigrationPlan.from_canonical_bytes(
+            service.plan(service.inspect()).to_canonical_bytes()
+        )
+        source.put_entry(
+            {"answer": 42},
+            key="entry",
+            catalog_values={"unknown_authenticated_attribute": "after"},
+        )
+
+        writes: list[object] = []
+
+        def unexpected_candidate_write(*args: object, **kwargs: object) -> str:
+            writes.append((args, kwargs))
+            raise AssertionError("candidate write must follow source-state validation")
+
+        monkeypatch.setattr(destination.payload_backend, "write_blob", unexpected_candidate_write)
+        with pytest.raises(CacheBlobMigrationPlanStaleError, match="source_state_drift"):
+            service.stage(stale_plan)
+
+        assert writes == []
+        assert destination.get("entry") is None
+
+        source.close()
+        destination.close()
+        source = _memory_store(tmp_path / "forged-source", provider)
+        destination = _memory_store(tmp_path / "forged-destination", provider)
+        service = _service(source, destination, tmp_path / "forged-maintenance")
+        source.put_entry({"answer": 42}, key="entry")
+        forged_plan = MigrationPlan.from_canonical_bytes(
+            service.plan(service.inspect()).to_canonical_bytes()
+        )
+        authority = source.lifecycle_authority
+        authenticated_entry = authority._entries["entry"]
+        forged_manifest = authenticated_entry.manifest[:-1] + b"X"
+        authority._entries["entry"] = replace(
+            authenticated_entry,
+            manifest=forged_manifest,
+            expectation=replace(
+                authenticated_entry.expectation,
+                manifest_digest=hashlib.sha256(forged_manifest).hexdigest(),
+            ),
+        )
+
+        with pytest.raises(CacheBlobMigrationPlanStaleError, match="source_state_drift"):
+            service.stage(forged_plan)
+        assert destination.get("entry") is None
     finally:
         source.close()
         destination.close()
