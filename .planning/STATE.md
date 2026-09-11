@@ -2,18 +2,18 @@
 gsd_state_version: 1.0
 milestone: v1.0
 current_phase: 07
-current_phase_name: explicit-migration-and-rebuild-cutover
+current_phase_name: Explicit Migration and Rebuild Cutover
 status: executing
-stopped_at: Completed 07-11-PLAN.md
-last_updated: "2026-09-10T23:50:41.291Z"
-last_activity: 2026-09-09
+stopped_at: Completed 07-12-PLAN.md
+last_updated: "2026-09-11T02:31:18.981Z"
+last_activity: 2026-09-10
 last_activity_desc: Phase 07 execution started
-state_head: d4644742399b116e5a4eed1e742db60d629d9c4e
+state_head: b693719b2f7a72901ebc6e968d9663710c853b09
 progress:
   total_phases: 8
   completed_phases: 5
   total_plans: 100
-  completed_plans: 91
+  completed_plans: 92
 milestone_name: milestone
 ---
 
@@ -28,10 +28,10 @@ See: .planning/PROJECT.md (updated 2026-09-06)
 
 ## Current Position
 
-Phase: 07 (explicit-migration-and-rebuild-cutover) — READY TO EXECUTE
-Plan: 11 of 11
+Phase: 07 (Explicit Migration and Rebuild Cutover) — EXECUTING
+Plan: 2 of 19
 Status: Ready to execute
-Last activity: 2026-09-09 — Phase 07 execution started
+Last activity: 2026-09-10 — Phase 07 execution started
 
 Phase 05 closed with 9/9 canonical plans summarized, 9/9 verified must-haves,
 19/19 Nyquist-covered tasks, and 43/43 canonical security threats closed
@@ -174,6 +174,7 @@ Phase 03 rows in this historical table include superseded attempts and do not de
 | Phase 07 P09 | 1178s | 3 tasks | 6 files |
 | Phase 07 P10 | 12m | 2 tasks | 7 files |
 | Phase 07 P11 | 27m | 2 tasks | 4 files |
+| Phase 07 P12 | 23min | 2 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -383,6 +384,7 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - [Phase 07]: Phase 07: Recorded the public-API detector false positive verbatim and retained Phase 8 ownership of live PostgreSQL and AWS S3 qualification.
 - [Phase 07]: Phase 7 final verification uses a fixed literal inventory; live PostgreSQL and AWS S3 remain NOT RUN / NOT QUALIFIED Phase 8 work.
 - [Phase 07]: The observed clear/delete concurrency conflict remains pre-existing evidence; no lifecycle coordination or storage race patch was added.
+- [Phase 07]: Migration resume and abort recover only exact authority-attributed candidate batches; pre-checkpoint immutable payloads remain invisible, unadopted, and outside guaranteed exact cleanup.
 
 ### Pending Todos
 
@@ -413,6 +415,6 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 
 ## Session Continuity
 
-Last session: 2026-09-10T05:03:33.405Z
-Stopped at: Completed 07-11-PLAN.md
+Last session: 2026-09-11T02:31:18.854Z
+Stopped at: Completed 07-12-PLAN.md
 Resume file: None

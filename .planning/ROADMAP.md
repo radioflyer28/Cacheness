@@ -433,7 +433,7 @@ Plans:
 
 **Accepted recovery/progress limit (checker override, 2026-09-10):** A crash after immutable payload publication but before its authority checkpoint may leave an invisible, unattributed orphan. It is never visible, never automatically adopted, and guaranteed exact cleanup is outside Phase 7. Integrity and authority visibility remain guaranteed while perfect orphan reclamation is not; resume/abort guarantees apply only to effects durably attributed in authority-owned evidence. This is an ADR 0001 topology-specific recovery/progress limit, not failed atomicity. Phase 7 adds no pre-publication maintenance intent, extra journal/lifecycle state, coordination mechanism, or production obstore adoption.
 
-**Plans**: 11/19 plans executed; 8 gap-closure plans ready
+**Plans**: 12/19 plans executed; 8 gap-closure plans ready
 
 Plans:
 
@@ -477,7 +477,7 @@ Plans:
 
 **Wave 9** *(gap closure; blocked on verified Plan 07-11 baseline)*
 
-- [ ] 07-12-PLAN.md — Add bounded durable migration-batch attribution, uncapped complete-candidate aggregation, and resumable STAGING abort/debt.
+- [x] 07-12-PLAN.md — Add bounded durable migration-batch attribution, uncapped complete-candidate aggregation, and resumable STAGING abort/debt.
 - [ ] 07-13-PLAN.md — Re-run the canonical PostgreSQL worker fence after persisted identity/state load and before readiness.
 
 **Wave 10** *(blocked on both Wave 9 repairs)*
@@ -530,7 +530,7 @@ Plans:
 | 4. Metadata Composition and Topology Contracts | 14/14 | Complete    | 2026-09-08 |
 | 5. Payload Backends and Supported Topology Qualification | 9/9 | Complete    | 2026-09-08 |
 | 6. UnifiedCache Policy Composition | 11/11 | Complete    | 2026-09-09 |
-| 7. Explicit Migration and Rebuild Cutover | 11/19 | Gap closure planned |  |
+| 7. Explicit Migration and Rebuild Cutover | 12/19 | In Progress|  |
 | 8. Production Gates and Performance Stabilization | 0/TBD | Not started | - |
 
 ## Backlog
