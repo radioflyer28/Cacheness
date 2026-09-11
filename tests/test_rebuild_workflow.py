@@ -523,6 +523,31 @@ def test_rebuild_checkpoints_exact_destination_receipts_and_resumes_each_rebuild
             )
         )
 
+        staged_source = _store(tmp_path / "staged-resume-source", provider)
+        staged_destination = _store(tmp_path / "staged-resume-destination", provider)
+        try:
+            staged_source.put_entry({"value": "staged"}, key="staged")
+            staged_service = _service(
+                staged_source, staged_destination, tmp_path / "staged-resume-maintenance"
+            )
+            staged_plan = staged_service.create_rebuild_plan(staged_service.inspect())
+            staged_service.confirm_rebuild(
+                staged_plan, confirmation=staged_service.rebuild_confirmation(staged_plan)
+            )
+            assert staged_service.stage_rebuild(staged_plan).state is MaintenanceEvidenceState.REBUILD_STAGED
+
+            staged_restart = _service(
+                staged_source, staged_destination, tmp_path / "staged-resume-maintenance"
+            )
+            assert staged_restart.resume(
+                staged_plan,
+                run_id=staged_restart.run_id,
+                evidence_path=staged_restart.evidence_path,
+            ).state is MaintenanceEvidenceState.REBUILD_VERIFIED
+        finally:
+            staged_source.close()
+            staged_destination.close()
+
         verifying = restarting._write_evidence(
             restarting._new_evidence(
                 state=MaintenanceEvidenceState.REBUILD_VERIFYING,
