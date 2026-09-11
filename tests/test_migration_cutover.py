@@ -1016,6 +1016,8 @@ def test_partial_abort_receipt_counts_only_deleted_or_proven_absent_candidates(
 
         monkeypatch.setattr(destination, "delete_migration_payload", original_delete)
         assert service.abort(plan).state is MaintenanceEvidenceState.ABORTED
+        replayed = service.abort(plan)
+        assert replayed.deleted_entries == 0
     finally:
         source.close()
         destination.close()
