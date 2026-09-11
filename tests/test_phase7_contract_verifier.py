@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
+import shutil
 from types import ModuleType
 
 import pytest
@@ -83,6 +84,22 @@ def _load_verifier_source(source: str) -> ModuleType:
     module.__file__ = str(verifier_path)
     exec(compile(source, str(verifier_path), "exec"), module.__dict__)
     return module
+
+
+def _manifest_copy(tmp_path: Path, verifier: ModuleType) -> Path:
+    """Build only the fixed-manifest surface needed for hostile source mutation."""
+    root = tmp_path / "repository"
+    paths = (
+        *verifier.PHASE7_PRODUCTION_PATHS,
+        *verifier.PHASE7_TEST_NODES,
+        *verifier.PHASE7_PLAN_PATHS,
+        *verifier.PHASE7_CONTEXT_PATH,
+    )
+    for relative_path in paths:
+        destination = root / relative_path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(REPOSITORY_ROOT / relative_path, destination)
+    return root
 
 
 def test_fixed_manifest_is_complete_and_not_discovery_derived() -> None:
@@ -251,6 +268,15 @@ def test_document_and_coverage_audits_reject_false_qualification_and_secrets() -
         "secret provider path appears in rendered text",
     )
     assert verifier.audit_phase7_text("Phase 8 qualifies live PostgreSQL/AWS S3.") == ()
+    assert verifier.audit_phase7_text(
+        "obstore conditional create is bounded-memory in Phase 7"
+    ) == ("false obstore bounded-memory conditional-publication claim",)
+    assert verifier.audit_phase7_text(
+        "Phase 7 automatically selected silent multipart copy publication"
+    ) == ("silent multipart-copy publication policy claim",)
+    assert verifier.audit_phase7_text(
+        "The implementation exposes participant handles to handlers"
+    ) == ("handler exposure of participant handle or managed locator",)
 
     good_coverage = (REPOSITORY_ROOT / ".planning" / "phases" / "07-explicit-migration-and-rebuild-cutover" / "07-COVERAGE.md").read_text(encoding="utf-8")
     assert verifier.audit_coverage_document(good_coverage) == ()
@@ -359,3 +385,114 @@ def test_fixed_gap_supply_chain_threats_map_to_frozen_command_contracts() -> Non
     for threat_id in expected:
         assert verifier.SECURITY_THREAT_NODES[threat_id] == (selector,)
     assert verifier.audit_gap_plan_command_contracts(REPOSITORY_ROOT) == ()
+
+
+def test_fixed_manifest_rejects_removed_mapped_test_function_while_file_remains(
+    tmp_path: Path,
+) -> None:
+    """Removing a claimed function fails even when unrelated file tests remain."""
+    verifier = _load_verifier()
+    root = _manifest_copy(tmp_path, verifier)
+    target = root / "tests/test_phase7_contract_verifier.py"
+    source = target.read_text(encoding="utf-8")
+    marker = "def test_fixed_manifest_rejects_removed_mapped_test_function_while_file_remains("
+    start = source.index(marker)
+    end = source.index("\ndef ", start + len(marker))
+    target.write_text(source[:start] + source[end + 1 :], encoding="utf-8")
+
+    errors = verifier.validate_fixed_manifest(root)
+
+    assert (
+        "threat mapping references missing test selector: T-07-18-02: "
+        "tests/test_phase7_contract_verifier.py::"
+        "test_fixed_manifest_rejects_removed_mapped_test_function_while_file_remains"
+    ) in errors
+
+
+def test_fixed_manifest_rejects_renamed_mapped_test_function_while_file_remains(
+    tmp_path: Path,
+) -> None:
+    """Renaming one claimed function cannot fall back to a passing module."""
+    verifier = _load_verifier()
+    root = _manifest_copy(tmp_path, verifier)
+    target = root / "tests/test_phase7_contract_verifier.py"
+    target.write_text(
+        target.read_text(encoding="utf-8").replace(
+            "test_fixed_manifest_rejects_renamed_mapped_test_function_while_file_remains",
+            "test_renamed_contract_evidence",
+            1,
+        ),
+        encoding="utf-8",
+    )
+
+    errors = verifier.validate_fixed_manifest(root)
+
+    assert (
+        "threat mapping references missing test selector: T-07-18-02: "
+        "tests/test_phase7_contract_verifier.py::"
+        "test_fixed_manifest_rejects_renamed_mapped_test_function_while_file_remains"
+    ) in errors
+
+
+def test_fixed_manifest_rejects_gap_threat_without_exact_selector(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Gap row, mapping, and selector removal each fail before pytest runs."""
+    verifier = _load_verifier()
+    mutated_mapping = dict(verifier.SECURITY_THREAT_NODES)
+    mutated_mapping["T-07-G12-01"] = ()
+    monkeypatch.setattr(verifier, "SECURITY_THREAT_NODES", mutated_mapping)
+    assert (
+        "threat mapping has no executable evidence: T-07-G12-01"
+        in verifier.validate_fixed_manifest(REPOSITORY_ROOT)
+    )
+
+    root = _manifest_copy(tmp_path, verifier)
+    plan = root / ".planning/phases/07-explicit-migration-and-rebuild-cutover/07-12-PLAN.md"
+    source = plan.read_text(encoding="utf-8")
+    plan.write_text(source.replace("| T-07-G12-01 |", "| T-07-G12-X |", 1), encoding="utf-8")
+    errors = verifier.validate_gap_plan_threat_inventory(root)
+    assert (
+        "gap threat inventory missing: "
+        ".planning/phases/07-explicit-migration-and-rebuild-cutover/07-12-PLAN.md: "
+        "T-07-G12-01"
+    ) in errors
+    assert (
+        "gap threat inventory unexpected: "
+        ".planning/phases/07-explicit-migration-and-rebuild-cutover/07-12-PLAN.md: "
+        "T-07-G12-X"
+    ) in errors
+
+    duplicate_root = _manifest_copy(tmp_path / "duplicate", verifier)
+    duplicate_plan = duplicate_root / ".planning/phases/07-explicit-migration-and-rebuild-cutover/07-12-PLAN.md"
+    duplicate_source = duplicate_plan.read_text(encoding="utf-8")
+    row = "| T-07-G12-01 | Tampering | Authority-owned candidate evidence | high | mitigate | Bounded authenticated receipts protect every exact ordinal/key/generation/locator/target-manifest/digest/size descriptor; shareable renderers receive only digests and resume revalidates authority-attributed outputs. |"
+    duplicate_plan.write_text(
+        duplicate_source.replace(row, f"{row}\n{row}", 1), encoding="utf-8"
+    )
+    assert (
+        "gap threat inventory duplicate: "
+        ".planning/phases/07-explicit-migration-and-rebuild-cutover/07-12-PLAN.md: "
+        "T-07-G12-01"
+    ) in verifier.validate_gap_plan_threat_inventory(duplicate_root)
+
+
+def test_fixed_pytest_execution_uses_the_validated_selector_union(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The verifier passes its exact, de-duplicated nodes to pytest unchanged."""
+    verifier = _load_verifier()
+    executed: list[tuple[str, ...]] = []
+
+    def record_pytest(
+        _root: Path, nodes: tuple[str, ...], _label: str, *, options: tuple[str, ...] = ()
+    ) -> tuple[bool, str]:
+        assert options == ()
+        executed.append(nodes)
+        return True, "recorded"
+
+    monkeypatch.setattr(verifier, "_run_pytest", record_pytest)
+    passed, errors = verifier.verify_repository(REPOSITORY_ROOT, quick=True)
+
+    assert passed, errors
+    assert executed == [verifier.fixed_pytest_nodes(True)]
