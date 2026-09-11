@@ -282,7 +282,7 @@ SECURITY_THREAT_NODES = {
     "T-07-17-05": ("tests/test_migration_run_evidence.py::test_execution_rereads_authenticates_and_rejects_plan_bound_manifest_or_catalog_drift",),
     "T-07-17-SC": ("tests/test_phase7_contract_verifier.py::test_fixed_gap_supply_chain_threats_map_to_frozen_command_contracts",),
     "T-07-18-01": ("tests/test_phase7_contract_verifier.py::test_fixed_manifest_requires_exact_path_and_test_name_selectors",),
-    "T-07-18-02": ("tests/test_phase7_contract_verifier.py::test_source_mutation_cannot_drop_a_fixed_test_node",),
+    "T-07-18-02": ("tests/test_phase7_contract_verifier.py::test_fixed_manifest_rejects_removed_mapped_test_function_while_file_remains", "tests/test_phase7_contract_verifier.py::test_fixed_manifest_rejects_renamed_mapped_test_function_while_file_remains"),
     "T-07-18-03": ("tests/test_phase7_contract_verifier.py::test_fixed_manifest_requires_exact_path_and_test_name_selectors",),
     "T-07-18-04": ("tests/test_phase7_contract_verifier.py::test_fixed_manifest_requires_exact_path_and_test_name_selectors",),
     "T-07-18-05": ("tests/test_phase7_contract_verifier.py::test_fixed_manifest_requires_exact_path_and_test_name_selectors",),
@@ -738,7 +738,9 @@ def audit_phase7_text(text: str) -> tuple[str, ...]:
     ):
         findings.append("silent multipart-copy publication policy claim")
     if re.search(
-        r"(?:handlers? receive|expose.{0,40}handlers?).{0,80}(?:participant handle|managed locator)",
+        r"(?:handlers? receive.{0,80}|expose.{0,80}handlers?).{0,80}"
+        r"(?:participant handles?|managed locators?)"
+        r"|(?:participant handles?|managed locators?).{0,80}handlers?",
         normalized,
     ):
         findings.append("handler exposure of participant handle or managed locator")
@@ -1019,7 +1021,7 @@ def verify_repository(root: Path, quick: bool) -> tuple[bool, tuple[str, ...]]:
             errors.extend(audit_phase7_text((root / relative_path).read_text(encoding="utf-8")))
         except OSError as error:
             errors.append(f"documentation audit unreadable: {relative_path}: {error}")
-    context_path = root / PHASE7_CONTEXT_PATH
+    context_path = root / PHASE7_CONTEXT_PATH[0]
     try:
         context = context_path.read_text(encoding="utf-8")
         for decision in DECISION_NODES:
