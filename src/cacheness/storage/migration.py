@@ -20,6 +20,7 @@ from typing import Iterable, Mapping
 from uuid import uuid4
 
 from cacheness.error_handling import (
+    CacheBlobBackendError,
     CacheBlobMigrationEvidenceError,
     CacheBlobMigrationEvidenceMismatchError,
     CacheBlobMigrationOfflineDecisionRequiredError,
@@ -3448,7 +3449,11 @@ class OfflineMigrationService:
         return MigrationStepResult(MaintenanceEvidenceState.STAGED, True, self.evidence_path)
 
     def _candidate_from_evidence(
-        self, evidence: MaintenanceRunEvidence, plan: MigrationPlan
+        self,
+        evidence: MaintenanceRunEvidence,
+        plan: MigrationPlan,
+        *,
+        verify_outputs: bool = True,
     ) -> tuple[AuthorityInventoryEntry, ...]:
         """Recover only descriptors durably attributed by the authority."""
         receipt = evidence.candidate_receipt
@@ -3480,7 +3485,8 @@ class OfflineMigrationService:
                 "authority candidate batches do not match authenticated evidence",
                 context={"operation": "migration.resume", "run_id": self.run_id},
             )
-        self._verify_candidate_outputs(candidates)
+        if verify_outputs:
+            self._verify_candidate_outputs(candidates)
         return candidates
 
     def _attributed_staging_candidates(
@@ -3928,9 +3934,10 @@ class OfflineMigrationService:
         candidates = (
             self._attributed_staging_candidates(evidence, plan)
             if evidence.state is MaintenanceEvidenceState.STAGING
-            else self._candidate_from_evidence(evidence, plan)
+            else self._candidate_from_evidence(evidence, plan, verify_outputs=False)
         )
         cleanup_debt: list[str] = []
+        deleted_entries = 0
         for candidate in candidates:
             retirement = self._retirement_digest(candidate)
             try:
@@ -3940,6 +3947,7 @@ class OfflineMigrationService:
                     with destination_io.open_snapshot(candidate.locator, {}) as snapshot:
                         payload = snapshot.path.read_bytes()
                 except FileNotFoundError:
+                    deleted_entries += 1
                     continue
                 except OSError:
                     cleanup_debt.append(retirement)
@@ -3953,10 +3961,14 @@ class OfflineMigrationService:
                     or hashlib.sha256(payload).hexdigest() != candidate.payload_digest
                     or len(payload) != candidate.byte_size
                 ):
-                    cleanup_debt.append(retirement)
-                    continue
+                    raise CacheBlobMigrationEvidenceMismatchError(
+                        "candidate manifest ownership or integrity does not match "
+                        "authority-attributed cleanup evidence",
+                        context={"operation": "migration.abort", "run_id": self.run_id},
+                    )
                 self.destination.delete_migration_payload(candidate.locator)
-            except (OSError, ValueError):
+                deleted_entries += 1
+            except (OSError, CacheBlobBackendError):
                 cleanup_debt.append(retirement)
         cleanup_debt = list(dict.fromkeys(cleanup_debt))
         if cleanup_debt:
@@ -3977,7 +3989,7 @@ class OfflineMigrationService:
             )
             return AbortReceipt(
                 run_id=self.run_id,
-                deleted_entries=len(candidates),
+                deleted_entries=deleted_entries,
                 state=MaintenanceEvidenceState.STAGING,
             )
         if candidates:
@@ -4010,7 +4022,7 @@ class OfflineMigrationService:
                 },
             )
         )
-        return AbortReceipt(run_id=self.run_id, deleted_entries=len(candidates))
+        return AbortReceipt(run_id=self.run_id, deleted_entries=deleted_entries)
 
     def purge_confirmation(self, plan: MigrationPlan) -> str:
         """Return the exact separately confirmed D-15 retirement action token."""
