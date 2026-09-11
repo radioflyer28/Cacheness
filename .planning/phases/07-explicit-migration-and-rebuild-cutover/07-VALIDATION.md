@@ -31,6 +31,55 @@ Self-tests mutate source inventory and exercise adversarial executable fixtures 
 
 The all gate invokes the active installed gsd-core/bin/lib/api-coverage.cjs --json over the fixed Roadmap/Plan scope and compares its typed result to 07-COVERAGE.md.
 
+## Gap-closure fixed-verifier evidence (Plan 07-19)
+
+The following observations supersede neither the original evidence above nor
+the Phase 8 boundary. They record the post-gap exact-selector run. A row is
+only marked complete after the fixed verifier returns zero; quick mode validates
+the full manifest but intentionally does not execute the optional PostgreSQL
+adapter selector.
+
+| Command | Environment | Exit | Observed result |
+|---|---|---:|---|
+| `uv run --frozen python tools/verify_phase7_contracts.py --quick` | frozen base CPython 3.13.15 | 0 | Exact-manifest, architecture, documentation, baseline, coverage-record, 84-threat, and quick-selector checks passed. The verifier reported `MIGR-03` through `MIGR-06` as `PASS`; deterministic PostgreSQL adapter evidence is explicitly `NOT RUN` in quick mode. |
+| `uv run --frozen python -c '… fixed_pytest_nodes(True) … pytest -q …'` | frozen base CPython 3.13.15 | 0 | The verifier-owned quick selector union contained 66 unique exact selectors; execution completed with no failure or skip indication. |
+| `uv run --frozen python -c '… fixed_pytest_nodes(True) … pytest --collect-only -q -o addopts= …'` | frozen base CPython 3.13.15 | 0 | The exact quick union collected 80 test cases (including parametrized cases), with no collection error. This is a count observation only; the fixed verifier remains the completion authority. |
+
+### Authoritative blocker rows
+
+| Blocker | Exact regression evidence bound by the verifier | Quick status | Final status |
+|---|---|---|---|
+| CR-01 — bounded migration attribution and STAGING recovery | `test_migration_run_enforces_entry_byte_and_evidence_limits_with_split_plan`; `test_uncheckpointed_candidate_orphan_remains_invisible_unadopted_and_outside_exact_cleanup`; `test_resume_and_abort_staging_use_only_authority_attributed_batches`; `test_transformed_candidate_checkpointed_metadata_recovers_within_limits_and_uncheckpointed_orphan_remains_invisible` | PASS | Pending `--all` |
+| CR-02 — exact rebuild response-loss recovery and cleanup | `test_blobstore_maintenance_canonical_put_replays_projection_free_receipt_after_response_loss`; `test_rebuild_response_loss_rederives_operation_id_and_replays_authority_receipt`; `test_projection_equipped_rebuild_replays_canonical_receipt_without_preacceptance_or_duplicate_derived_work`; `test_rebuild_checkpoints_exact_destination_receipts_and_resumes_each_rebuild_state`; `test_rebuild_verification_failure_cleans_only_exact_receipts_and_persists_debt` | PASS | Pending `--all` |
+| CR-03 — destination compatibility and guarded handler transformation | `test_compatibility_edge_requires_exact_destination_dimensions`; `test_registered_custom_handler_resolves_one_exact_directed_transformation`; `test_registered_handler_rejects_declared_edge_without_concrete_transform`; `test_migration_executes_one_handler_transform_and_publishes_destination_manifest_identity` | PASS | Pending `--all` |
+| CR-04 — digest-bound confidential machine plans | `test_machine_plan_digest_binds_sensitive_catalog_and_manifest_without_serializing_them`; `test_execution_rereads_authenticates_and_rejects_plan_bound_manifest_or_catalog_drift` | PASS | Pending `--all` |
+| CR-05 — fresh PostgreSQL post-load ordinary-worker fence | `test_fresh_blobstore_initialize_rechecks_activated_offline_after_postgresql_identity_load`; `test_postgresql_preflight_mutation_checks_persisted_worker_fence_after_open` | Manifest validated; not in quick environment | Pending `--all` |
+| CR-06 — fail-closed exact-selector verifier | `test_fixed_manifest_requires_exact_path_and_test_name_selectors`; `test_fixed_manifest_includes_every_gap_plan_threat_exactly_once`; `test_fixed_manifest_rejects_removed_mapped_test_function_while_file_remains`; `test_fixed_manifest_rejects_renamed_mapped_test_function_while_file_remains`; `test_fixed_manifest_rejects_gap_threat_without_exact_selector` | PASS | Pending `--all` |
+
+### Accepted recovery/progress limit and non-implementation boundary
+
+The quick verifier's passing CR-01 selectors cover the accepted checker
+override without increasing its guarantee: every run has explicit entry, byte,
+and evidence limits; larger stores split into independently recoverable runs;
+and resume/abort operate only on authority-attributed effects. A crash after
+immutable publication but before the authority checkpoint can leave an
+invisible, unattributed, unadopted orphan outside guaranteed exact cleanup.
+Integrity and authority visibility remain guaranteed. This is ADR 0001's
+topology-specific recovery/progress limit, not a failed atomicity claim.
+
+For CR-02, the evidence is intentionally narrower than a second maintenance
+lifecycle: rebuild staging calls the existing lifecycle engine through the
+canonical maintenance wrapper, re-derives operation IDs, adds no maintenance
+pre-publication intent, journal, or state, replays the exact receipt with empty
+projection outcomes, and performs derived work only after explicit acceptance.
+
+The obstore spike remains a non-implementation boundary in Phase 7. Cacheness
+retains payload-participant/lifecycle authority ownership, the path-based
+handler contract, and guarded staging/snapshots. The spike's streaming and S3
+conditional-publication findings are PARTIAL; no obstore package, participant
+cutover, conditional-publication policy, or multipart-copy policy is claimed
+by this ledger.
+
 ### Non-live suite inventory
 
 The non-live suite excludes exactly these Phase 8-owned real-service modules. They are NOT RUN / NOT QUALIFIED, never skips or passes:
@@ -121,4 +170,3 @@ Before the non-live inventory correction, the initial all-extras gate returned e
 - [x] nyquist_compliant: true
 
 Approval: deterministic local Phase 7 gate complete; Phase 8 owns every listed non-qualification boundary.
-
