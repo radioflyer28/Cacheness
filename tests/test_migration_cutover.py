@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -9,6 +11,7 @@ import pytest
 
 from cacheness.storage import BackendRef, BlobStore, StoreTopology
 from cacheness.error_handling import (
+    CacheBlobMigrationEvidenceMismatchError,
     CacheBlobMigrationOfflineDecisionRequiredError,
     CacheBlobMigrationPlanStaleError,
 )
@@ -37,6 +40,56 @@ class _SharedMemoryKeyProvider:
 
     def get_key(self) -> bytes:
         return b"m" * 32
+
+
+class _MemoryMigrationHandler:
+    """Stable test-only native contract for current-to-current memory migration."""
+
+    @property
+    def data_type(self) -> str:
+        return "migration-memory-dict"
+
+    @property
+    def payload_format(self) -> str:
+        return "migration-memory-dict"
+
+    @property
+    def payload_format_version(self) -> int:
+        return 1
+
+    def supports_payload_contract(self, payload_format: str, version: int) -> bool:
+        return (payload_format, version) == (
+            self.payload_format,
+            self.payload_format_version,
+        )
+
+    def payload_transformation_edges(self) -> tuple[PayloadTransformationEdge, ...]:
+        return ()
+
+    def can_handle(self, value, config=None) -> bool:
+        del config
+        return isinstance(value, dict)
+
+    def put(self, value, file_path: Path, config):
+        del config
+        payload = json.dumps(value, sort_keys=True).encode("utf-8")
+        target = file_path.with_suffix(".migration")
+        target.write_bytes(payload)
+        return {
+            "actual_path": str(target),
+            "file_size": len(payload),
+            "payload_format": self.payload_format,
+            "payload_format_version": self.payload_format_version,
+            "metadata": {"native": "migration-memory-dict"},
+        }
+
+    def get(self, file_path: Path, metadata):
+        del metadata
+        return json.loads(file_path.read_text(encoding="utf-8"))
+
+    def get_file_extension(self, config) -> str:
+        del config
+        return ".migration"
 
 
 class _MigrationMcapHandler:
@@ -135,6 +188,7 @@ def _memory_store(root: Path, key_provider: _SharedMemoryKeyProvider) -> BlobSto
         manifest_key_provider=key_provider,
     )
     store.initialize()
+    store.handlers.register_handler(_MemoryMigrationHandler(), priority=0)
     return store
 
 
@@ -922,6 +976,77 @@ def test_resume_and_abort_staging_use_only_authority_attributed_batches(
         assert completed_abort.state is MaintenanceEvidenceState.ABORTED
         assert destination.lifecycle_authority.publication_state() is AuthorityPublicationState.IDLE
         assert source.get("entry-b") == {"value": "entry-b"}
+    finally:
+        source.close()
+        destination.close()
+
+
+def test_partial_abort_receipt_counts_only_deleted_or_proven_absent_candidates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A partial abort receipt counts only cleanup confirmed in that call."""
+    key_provider = _SharedMemoryKeyProvider()
+    source = _memory_store(tmp_path / "source", key_provider)
+    destination = _memory_store(tmp_path / "destination", key_provider)
+    try:
+        for key in ("entry-a", "entry-b"):
+            source.put_entry({"value": key}, key=key)
+        service = _service(source, destination, tmp_path / "maintenance", run_id="count")
+        plan = service.plan(service.inspect())
+        service.stage(plan)
+
+        original_delete = destination.delete_migration_payload
+        delete_calls = 0
+
+        def delete_then_lose_acknowledgement(locator: str) -> None:
+            nonlocal delete_calls
+            delete_calls += 1
+            original_delete(locator)
+            if delete_calls == 2:
+                raise OSError("simulated deletion acknowledgement loss")
+
+        monkeypatch.setattr(destination, "delete_migration_payload", delete_then_lose_acknowledgement)
+        partial = service.abort(plan)
+
+        assert partial.state is MaintenanceEvidenceState.STAGING
+        assert partial.deleted_entries == 1
+        assert len(service.read_evidence().cleanup_debt) == 1
+
+        monkeypatch.setattr(destination, "delete_migration_payload", original_delete)
+        assert service.abort(plan).state is MaintenanceEvidenceState.ABORTED
+    finally:
+        source.close()
+        destination.close()
+
+
+def test_abort_integrity_and_ownership_conflicts_remain_fail_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Candidate ownership disagreement is not relabeled as operational debt."""
+    key_provider = _SharedMemoryKeyProvider()
+    source = _memory_store(tmp_path / "source", key_provider)
+    destination = _memory_store(tmp_path / "destination", key_provider)
+    try:
+        source.put_entry({"value": "entry"}, key="entry")
+        service = _service(source, destination, tmp_path / "maintenance", run_id="ownership")
+        plan = service.plan(service.inspect())
+        service.stage(plan)
+        candidate = destination.lifecycle_authority.candidate_entries_for_run(
+            run_id=service.run_id
+        )[0]
+        monkeypatch.setattr(
+            service,
+            "_candidate_from_evidence",
+            lambda *_args, **_kwargs: (replace(candidate, key="other-entry"),),
+        )
+
+        with pytest.raises(CacheBlobMigrationEvidenceMismatchError, match="ownership"):
+            service.abort(plan)
+
+        assert service.read_evidence().state is MaintenanceEvidenceState.STAGED
+        assert service.read_evidence().cleanup_debt == ()
     finally:
         source.close()
         destination.close()
