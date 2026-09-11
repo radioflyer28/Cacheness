@@ -42,7 +42,10 @@ class _SharedMemoryKeyProvider:
 class _MigrationMcapHandler:
     """Path-based custom handler with one explicitly directed native upgrade."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, target_version: int = 2) -> None:
+        if target_version < 1:
+            raise ValueError("target_version must be positive")
+        self._target_version = target_version
         self.transform_calls = 0
         self.published_paths: list[Path] = []
 
@@ -56,18 +59,20 @@ class _MigrationMcapHandler:
 
     @property
     def payload_format_version(self) -> int:
-        return 2
+        return self._target_version
 
     def supports_payload_contract(
         self, payload_format: str, payload_format_version: int
     ) -> bool:
         return (payload_format, payload_format_version) in {
             ("mcap-v1", 1),
-            ("mcap-v2", 2),
+            ("mcap-v2", self._target_version),
         }
 
     def payload_transformation_edges(self) -> tuple[PayloadTransformationEdge, ...]:
-        return (PayloadTransformationEdge("mcap-v1", 1, "mcap-v2", 2),)
+        return (
+            PayloadTransformationEdge("mcap-v1", 1, "mcap-v2", self._target_version),
+        )
 
     def can_handle(self, data, config=None) -> bool:
         del config
@@ -94,10 +99,12 @@ class _MigrationMcapHandler:
 
     def get_file_extension(self, config) -> str:
         del config
-        return ".mcap2"
+        return f".mcap{self._target_version}"
 
     def transform_payload(self, snapshot, edge, *, destination_io, key: str, config):
-        assert edge == PayloadTransformationEdge("mcap-v1", 1, "mcap-v2", 2)
+        assert edge == PayloadTransformationEdge(
+            "mcap-v1", 1, "mcap-v2", self._target_version
+        )
         self.transform_calls += 1
         version_and_value = snapshot.path.read_text(encoding="utf-8").split(":", 1)
         assert version_and_value[0] == "mcap-v1"
@@ -107,6 +114,8 @@ class _MigrationMcapHandler:
             key,
             config,
         )
+        result["payload_format"] = "mcap-v2"
+        result["payload_format_version"] = self._target_version
         result["metadata"] = {
             **result["metadata"],
             "runtime_transform": {"source": "mcap-v1", "target": "mcap-v2"},
@@ -149,11 +158,14 @@ def _transforming_service(
     work_directory: Path,
     *,
     run_id: str,
+    target_version: int = 2,
 ) -> tuple[OfflineMigrationService, _MigrationMcapHandler]:
     """Configure one store-local custom format target for migration coverage."""
-    source_handler = _MigrationMcapHandler()
+    source_handler = _MigrationMcapHandler(target_version=target_version)
     source.handlers.register_handler(source_handler, priority=0)
-    destination.handlers.register_handler(_MigrationMcapHandler(), priority=0)
+    destination.handlers.register_handler(
+        _MigrationMcapHandler(target_version=target_version), priority=0
+    )
     service = OfflineMigrationService(
         source=source,
         destination=destination,
@@ -163,7 +175,7 @@ def _transforming_service(
         compatibility_edges=(
             MigrationCompatibilityEdge(
                 source=StoreVersionDimensions(payload_format_version=1),
-                destination=StoreVersionDimensions(payload_format_version=2),
+                destination=StoreVersionDimensions(payload_format_version=target_version),
                 name="mcap-v1-to-v2",
             ),
         ),
@@ -950,6 +962,62 @@ def test_migration_executes_one_handler_transform_and_publishes_destination_mani
             "source": "mcap-v1",
             "target": "mcap-v2",
         }
+        source_manifest = BlobManifest.from_canonical_bytes(
+            source.lifecycle_authority.read_entry("entry").manifest
+        )
+        assert candidate_manifest.digest != source_manifest.digest
+
+        service.verify(plan)
+        service.activate(plan)
+        destination.lifecycle_authority.finalize_verified_candidate(run_id=service.run_id)
+        assert destination.get("entry") == {"mcap_version": 2, "value": "payload"}
+    finally:
+        source.close()
+        destination.close()
+
+
+def test_same_version_different_format_uses_exact_directed_transform_and_destination_manifest(
+    tmp_path: Path,
+) -> None:
+    """A shared version integer never turns a changed native format into a copy."""
+    key_provider = _SharedMemoryKeyProvider()
+    source = _sqlite_store(tmp_path / "source", key_provider)
+    destination = _sqlite_store(tmp_path / "destination", key_provider)
+    try:
+        service, handler = _transforming_service(
+            source,
+            destination,
+            tmp_path / "maintenance",
+            run_id="same-version-transform-run",
+            target_version=1,
+        )
+        source.put_entry({"mcap_version": 1, "value": "payload"}, key="entry")
+
+        inspection = service.inspect()
+        plan = service.plan(inspection)
+        assert plan.assessments[0].disposition is MigrationDisposition.MIGRATABLE
+        assert plan.assessments[0].reason.value == "directed_edge"
+
+        service.stage(plan)
+
+        assert handler.transform_calls == 1
+        candidates = destination.lifecycle_authority.candidate_entries_for_run(
+            run_id=service.run_id
+        )
+        assert len(candidates) == 1
+        candidate_manifest = BlobManifest.from_canonical_bytes(candidates[0].manifest)
+        verify_current_manifest(candidate_manifest, key_provider.get_key())
+        assert candidate_manifest.payload_format == "mcap-v2"
+        assert candidate_manifest.payload_format_version == 1
+        assert candidate_manifest.versions.payload_format_version == 1
+        assert candidate_manifest.handler_metadata["runtime_transform"] == {
+            "source": "mcap-v1",
+            "target": "mcap-v2",
+        }
+        with destination._materialize_authority_store().open_snapshot(
+            candidates[0].locator, {}
+        ) as snapshot:
+            assert snapshot.path.read_bytes() == b"mcap-v2:payload"
         source_manifest = BlobManifest.from_canonical_bytes(
             source.lifecycle_authority.read_entry("entry").manifest
         )
