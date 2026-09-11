@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 07
 current_phase_name: Explicit Migration and Rebuild Cutover
 status: executing
-stopped_at: Completed 07-15-PLAN.md
-last_updated: "2026-09-11T16:54:49.612Z"
+stopped_at: Completed 07-16-PLAN.md
+last_updated: "2026-09-11T17:13:13.423Z"
 last_activity: 2026-09-11
 last_activity_desc: Phase 07 execution started
-state_head: 511725cfdb69f1f1946ab30ac18ca475fec5602c
+state_head: b8ec28cbb0f9de1b738044935b20c32e2ea4eac9
 progress:
   total_phases: 8
   completed_phases: 5
   total_plans: 100
-  completed_plans: 95
+  completed_plans: 96
 milestone_name: milestone
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-09-06)
 ## Current Position
 
 Phase: 07 (Explicit Migration and Rebuild Cutover) — EXECUTING
-Plan: 15 of 19
+Plan: 16 of 19
 Status: Ready to execute
 Last activity: 2026-09-11 — Phase 07 Plan 14 operation replay completed
 
@@ -178,6 +178,7 @@ Phase 03 rows in this historical table include superseded attempts and do not de
 | Phase 07-explicit-migration-and-rebuild-cutover P13 | 2h 57m | 2 tasks | 3 files |
 | Phase 07 P14 | 19min | 2 tasks | 9 files |
 | Phase 07 P15 | 35min | 2 tasks | 3 files |
+| Phase 07 P16 | 18min | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -395,6 +396,8 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - [Phase 07]: Prepared replay accepts only the authority-indexed immutable locator when signed descriptor digest and size corroborate it; mismatches fail closed.
 - [Phase 07]: Rebuild retries derive deterministic operation IDs and accept completion only from the exact existing lifecycle-authority replay; bounded evidence stores projection-free BlobReceipt identities, never a second intent.
 - [Phase 07]: Rebuild cleanup deletes only exact receipt-matching generations; changed ownership and operational deletion failures remain explicit rebuild cleanup debt.
+- [Phase 07]: Migration compatibility requires exact source and configured destination contract matching; source-only matches are rebuild-only.
+- [Phase 07]: Only authority-attributed transformed candidates resume or abort; pre-checkpoint immutable orphans remain invisible and unadopted without an exact-cleanup guarantee.
 
 ### Pending Todos
 
@@ -425,6 +428,6 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 
 ## Session Continuity
 
-Last session: 2026-09-11T16:54:49.393Z
-Stopped at: Completed 07-15-PLAN.md
+Last session: 2026-09-11T17:13:13.286Z
+Stopped at: Completed 07-16-PLAN.md
 Resume file: None
