@@ -74,10 +74,15 @@ def test_held_sqlite_writer_times_out_then_later_retry_succeeds(tmp_path: Path) 
     authority.close()
 
 
-def test_fresh_authorities_converge_without_admission_registry(tmp_path: Path) -> None:
-    """First use relies on SQLite bootstrap validation instead of FIFO tickets."""
+def test_initialized_authorities_converge_without_admission_registry(
+    tmp_path: Path,
+) -> None:
+    """Initialized authorities coordinate through SQLite, not FIFO tickets."""
     first = SqliteLifecycleAuthority.for_root(tmp_path / "fresh")
     second = SqliteLifecycleAuthority.for_root(tmp_path / "fresh")
+    # Bootstrap is an explicit deployment boundary. Concurrent first creation
+    # is intentionally outside the supported progress guarantee in ADR 0001.
+    first.initialize()
     start = Event()
     errors: list[Exception] = []
 
