@@ -707,3 +707,99 @@ def test_uncheckpointed_candidate_orphan_remains_invisible_unadopted_and_outside
     finally:
         source.close()
         destination.close()
+
+
+def test_resume_and_abort_staging_use_only_authority_attributed_batches(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """STAGING recovery replays only authority receipts and records exact deletion debt."""
+    key_provider = _SharedMemoryKeyProvider()
+    source = _memory_store(tmp_path / "source", key_provider)
+    destination = _memory_store(tmp_path / "destination", key_provider)
+    try:
+        for key in ("entry-a", "entry-b"):
+            source.put_entry({"value": key}, key=key)
+
+        resume_service = _service(
+            source, destination, tmp_path / "resume-maintenance", run_id="resume-staging"
+        )
+        resume_plan = resume_service.plan(resume_service.inspect())
+        original_evidence_write = resume_service._write_evidence
+
+        def interrupt_final_stage(evidence):
+            if evidence.state is MaintenanceEvidenceState.STAGED:
+                raise RuntimeError("interrupt after final authority checkpoint")
+            return original_evidence_write(evidence)
+
+        monkeypatch.setattr(resume_service, "_write_evidence", interrupt_final_stage)
+        with pytest.raises(RuntimeError, match="final authority checkpoint"):
+            resume_service.stage(resume_plan)
+        monkeypatch.setattr(resume_service, "_write_evidence", original_evidence_write)
+
+        staging_evidence = resume_service.read_evidence()
+        attributed_before_resume = destination.lifecycle_authority.candidate_entries_for_run(
+            run_id=resume_service.run_id
+        )
+        assert staging_evidence.state is MaintenanceEvidenceState.STAGING
+        assert len(staging_evidence.candidate_batch_references) == 2
+        assert len(attributed_before_resume) == 2
+
+        resumed = resume_service.resume(
+            resume_plan,
+            run_id=resume_service.run_id,
+            evidence_path=resume_service.evidence_path,
+        )
+        assert resumed.state is MaintenanceEvidenceState.STAGED
+        assert destination.lifecycle_authority.candidate_entries_for_run(
+            run_id=resume_service.run_id
+        ) == attributed_before_resume
+        assert resume_service.abort(resume_plan).state is MaintenanceEvidenceState.ABORTED
+        assert destination.lifecycle_authority.publication_state() is AuthorityPublicationState.IDLE
+
+        abort_service = _service(
+            source, destination, tmp_path / "abort-maintenance", run_id="abort-staging"
+        )
+        abort_plan = abort_service.plan(abort_service.inspect())
+        original_abort_evidence_write = abort_service._write_evidence
+
+        def interrupt_abort_final_stage(evidence):
+            if evidence.state is MaintenanceEvidenceState.STAGED:
+                raise RuntimeError("interrupt before staged evidence")
+            return original_abort_evidence_write(evidence)
+
+        monkeypatch.setattr(abort_service, "_write_evidence", interrupt_abort_final_stage)
+        with pytest.raises(RuntimeError, match="before staged evidence"):
+            abort_service.stage(abort_plan)
+        monkeypatch.setattr(abort_service, "_write_evidence", original_abort_evidence_write)
+
+        original_delete = destination.delete_migration_payload
+        delete_calls = 0
+
+        def delete_then_lose_acknowledgement(locator: str) -> None:
+            nonlocal delete_calls
+            delete_calls += 1
+            original_delete(locator)
+            if delete_calls == 2:
+                raise OSError("simulated deletion acknowledgement loss")
+
+        monkeypatch.setattr(
+            destination, "delete_migration_payload", delete_then_lose_acknowledgement
+        )
+        partial_abort = abort_service.abort(abort_plan)
+
+        assert partial_abort.state is MaintenanceEvidenceState.STAGING
+        assert len(abort_service.read_evidence().cleanup_debt) == 1
+        assert destination.get("entry-a") is None
+        assert source.get("entry-a") == {"value": "entry-a"}
+        assert destination.lifecycle_authority.publication_state() is AuthorityPublicationState.CANDIDATE
+
+        monkeypatch.setattr(destination, "delete_migration_payload", original_delete)
+        completed_abort = abort_service.abort(abort_plan)
+
+        assert completed_abort.state is MaintenanceEvidenceState.ABORTED
+        assert destination.lifecycle_authority.publication_state() is AuthorityPublicationState.IDLE
+        assert source.get("entry-b") == {"value": "entry-b"}
+    finally:
+        source.close()
+        destination.close()
