@@ -122,6 +122,7 @@ _PHASE7_REVIEWED_PLAN_PATHS = (
     ".planning/phases/07-explicit-migration-and-rebuild-cutover/07-20-PLAN.md",
     ".planning/phases/07-explicit-migration-and-rebuild-cutover/07-21-PLAN.md",
     ".planning/phases/07-explicit-migration-and-rebuild-cutover/07-22-PLAN.md",
+    ".planning/phases/07-explicit-migration-and-rebuild-cutover/07-23-PLAN.md",
 )
 PHASE7_PLAN_PATHS = tuple(_PHASE7_REVIEWED_PLAN_PATHS)
 PHASE7_CONTEXT_PATH = (
@@ -156,6 +157,8 @@ MIGRATION_REQUIREMENT_NODES = {
         "tests/test_rebuild_workflow.py::test_rebuild_evidence_rejects_terminal_aborted_cleanup_debt",
         "tests/test_rebuild_workflow.py::test_rebuild_cleanup_retry_rejects_forged_debt_without_payload_access",
         "tests/test_rebuild_workflow.py::test_rebuild_cleanup_retry_preserves_changed_current_ownership",
+        "tests/test_rebuild_workflow.py::test_rebuild_cleanup_debt_fences_forward_methods_and_resume_settles_exact_receipts",
+        "tests/test_rebuild_workflow.py::test_rebuild_evidence_rejects_accepted_cleanup_debt",
     ),
     "MIGR-06": (
         "tests/test_rebuild_workflow.py::test_rebuild_uses_registered_source_handler_and_destination_blobstore_lifecycle",
@@ -181,12 +184,12 @@ DECISION_NODES = {
     "D-13": ("tests/test_migration_cutover.py::test_memory_tracer_requires_explicit_whole_store_activation",),
     "D-14": ("tests/test_migration_cutover.py::test_offline_service_finalize_requires_exact_confirmation_and_seals_rollback",),
     "D-15": ("tests/test_migration_cutover.py::test_offline_service_abort_removes_only_its_unactivated_candidate",),
-    "D-16": ("tests/test_migration_cutover.py::test_resume_and_abort_staging_use_only_authority_attributed_batches", "tests/test_migration_remote_contract.py::test_s3_abort_typed_operational_failures_checkpoint_exact_debt_and_retry", "tests/test_migration_cutover.py::test_partial_abort_receipt_counts_only_deleted_or_proven_absent_candidates",),
+    "D-16": ("tests/test_migration_cutover.py::test_resume_and_abort_staging_use_only_authority_attributed_batches", "tests/test_migration_remote_contract.py::test_s3_abort_typed_operational_failures_checkpoint_exact_debt_and_retry", "tests/test_migration_cutover.py::test_partial_abort_receipt_counts_only_deleted_or_proven_absent_candidates", "tests/test_rebuild_workflow.py::test_rebuild_cleanup_debt_fences_forward_methods_and_resume_settles_exact_receipts",),
     "D-17": ("tests/test_migration_cutover.py::test_uncheckpointed_candidate_orphan_remains_invisible_unadopted_and_outside_exact_cleanup",),
     "D-18": ("tests/test_migration_plan_contract.py::test_canonical_plan_round_trips_and_human_report_uses_the_same_model",),
-    "D-19": ("tests/test_rebuild_workflow.py::test_rebuild_response_loss_rederives_operation_id_and_replays_authority_receipt", "tests/test_migration_remote_contract.py::test_s3_abort_typed_operational_failures_checkpoint_exact_debt_and_retry", "tests/test_rebuild_workflow.py::test_rebuild_cleanup_debt_stays_resumable_until_exact_settlement",),
-    "D-20": ("tests/contracts/test_lifecycle_authority.py::test_local_authorities_expose_exact_operation_replay_without_new_authority_state", "tests/test_rebuild_workflow.py::test_rebuild_cleanup_retry_rejects_forged_debt_without_payload_access",),
-    "D-21": ("tests/test_migration_cutover.py::test_resume_and_abort_staging_use_only_authority_attributed_batches", "tests/test_rebuild_workflow.py::test_rebuild_cleanup_retry_preserves_changed_current_ownership",),
+    "D-19": ("tests/test_rebuild_workflow.py::test_rebuild_response_loss_rederives_operation_id_and_replays_authority_receipt", "tests/test_migration_remote_contract.py::test_s3_abort_typed_operational_failures_checkpoint_exact_debt_and_retry", "tests/test_rebuild_workflow.py::test_rebuild_cleanup_debt_stays_resumable_until_exact_settlement", "tests/test_rebuild_workflow.py::test_rebuild_cleanup_debt_fences_forward_methods_and_resume_settles_exact_receipts",),
+    "D-20": ("tests/contracts/test_lifecycle_authority.py::test_local_authorities_expose_exact_operation_replay_without_new_authority_state", "tests/test_rebuild_workflow.py::test_rebuild_cleanup_retry_rejects_forged_debt_without_payload_access", "tests/test_rebuild_workflow.py::test_rebuild_cleanup_debt_fences_forward_methods_and_resume_settles_exact_receipts",),
+    "D-21": ("tests/test_migration_cutover.py::test_resume_and_abort_staging_use_only_authority_attributed_batches", "tests/test_rebuild_workflow.py::test_rebuild_cleanup_retry_preserves_changed_current_ownership", "tests/test_rebuild_workflow.py::test_rebuild_cleanup_debt_fences_forward_methods_and_resume_settles_exact_receipts",),
     "D-22": ("tests/test_migration_plan_contract.py::test_machine_plan_digest_binds_sensitive_catalog_and_manifest_without_serializing_them",),
 }
 
@@ -209,6 +212,7 @@ GAP_PLAN_THREAT_IDS = (
     "T-07-20-01", "T-07-20-02", "T-07-20-03", "T-07-20-04",
     "T-07-21-01", "T-07-21-02", "T-07-21-03", "T-07-21-04",
     "T-07-22-01", "T-07-22-02", "T-07-22-03", "T-07-22-04",
+    "T-07-23-01", "T-07-23-02", "T-07-23-03", "T-07-23-04",
 )
 _DECLARED_PHASE7_THREAT_IDS = (*ORIGINAL_PHASE7_THREAT_IDS, *GAP_PLAN_THREAT_IDS)
 
@@ -224,6 +228,7 @@ GAP_PLAN_THREAT_OWNERS = {
     ".planning/phases/07-explicit-migration-and-rebuild-cutover/07-20-PLAN.md": GAP_PLAN_THREAT_IDS[38:42],
     ".planning/phases/07-explicit-migration-and-rebuild-cutover/07-21-PLAN.md": GAP_PLAN_THREAT_IDS[42:46],
     ".planning/phases/07-explicit-migration-and-rebuild-cutover/07-22-PLAN.md": GAP_PLAN_THREAT_IDS[46:50],
+    ".planning/phases/07-explicit-migration-and-rebuild-cutover/07-23-PLAN.md": GAP_PLAN_THREAT_IDS[50:54],
 }
 
 SECURITY_THREAT_NODES = {
@@ -323,12 +328,16 @@ SECURITY_THREAT_NODES = {
     "T-07-22-02": ("tests/test_phase7_contract_verifier.py::test_fixed_manifest_includes_every_gap_plan_threat_exactly_once",),
     "T-07-22-03": ("tests/test_phase7_contract_verifier.py::test_main_never_renders_failed_requirement_as_pass",),
     "T-07-22-04": ("tests/test_phase7_contract_verifier.py::test_document_and_coverage_audits_reject_false_qualification_and_secrets",),
+    "T-07-23-01": ("tests/test_rebuild_workflow.py::test_rebuild_cleanup_debt_fences_forward_methods_and_resume_settles_exact_receipts",),
+    "T-07-23-02": ("tests/test_rebuild_workflow.py::test_rebuild_cleanup_debt_fences_forward_methods_and_resume_settles_exact_receipts",),
+    "T-07-23-03": ("tests/test_rebuild_workflow.py::test_rebuild_evidence_rejects_accepted_cleanup_debt",),
+    "T-07-23-04": ("tests/test_phase7_contract_verifier.py::test_fixed_manifest_maps_rebuild_cleanup_debt_fence_exactly",),
 }
 
 FLAGGED_ASSUMPTION_NODES = {
     "A-MIGR03": ("tests/test_migration_plan_contract.py::test_machine_plan_digest_binds_sensitive_catalog_and_manifest_without_serializing_them", "tests/test_migration_run_evidence.py::test_execution_rereads_authenticates_and_rejects_plan_bound_manifest_or_catalog_drift"),
     "A-MIGR04": ("tests/test_migration_plan_contract.py::test_compatibility_edge_requires_exact_destination_dimensions", "tests/test_handler_registration.py::test_registered_custom_handler_resolves_one_exact_directed_transformation", "tests/test_migration_cutover.py::test_transformed_candidate_checkpointed_metadata_recovers_within_limits_and_uncheckpointed_orphan_remains_invisible", "tests/test_migration_cutover.py::test_same_version_different_format_uses_exact_directed_transform_and_destination_manifest"),
-    "A-MIGR05": ("tests/test_migration_cutover.py::test_resume_and_abort_staging_use_only_authority_attributed_batches", "tests/test_blob_store_atomic_lifecycle.py::test_blobstore_maintenance_canonical_put_replays_projection_free_receipt_after_response_loss", "tests/test_migration_remote_contract.py::test_s3_abort_typed_operational_failures_checkpoint_exact_debt_and_retry", "tests/test_rebuild_workflow.py::test_rebuild_cleanup_debt_stays_resumable_until_exact_settlement", "tests/test_rebuild_workflow.py::test_rebuild_cleanup_retry_rejects_forged_debt_without_payload_access", "tests/test_rebuild_workflow.py::test_rebuild_cleanup_retry_preserves_changed_current_ownership"),
+    "A-MIGR05": ("tests/test_migration_cutover.py::test_resume_and_abort_staging_use_only_authority_attributed_batches", "tests/test_blob_store_atomic_lifecycle.py::test_blobstore_maintenance_canonical_put_replays_projection_free_receipt_after_response_loss", "tests/test_migration_remote_contract.py::test_s3_abort_typed_operational_failures_checkpoint_exact_debt_and_retry", "tests/test_rebuild_workflow.py::test_rebuild_cleanup_debt_stays_resumable_until_exact_settlement", "tests/test_rebuild_workflow.py::test_rebuild_cleanup_retry_rejects_forged_debt_without_payload_access", "tests/test_rebuild_workflow.py::test_rebuild_cleanup_retry_preserves_changed_current_ownership", "tests/test_rebuild_workflow.py::test_rebuild_cleanup_debt_fences_forward_methods_and_resume_settles_exact_receipts"),
     "A-MIGR06": ("tests/test_rebuild_workflow.py::test_projection_equipped_rebuild_replays_canonical_receipt_without_preacceptance_or_duplicate_derived_work", "tests/test_handler_registration.py::test_registered_custom_handler_resolves_one_exact_directed_transformation"),
 }
 

@@ -716,6 +716,8 @@ class MaintenanceRunEvidence:
             _bounded_text(operation_id, "retired rebuild operation identifier")
             if operation_id not in receipt_operation_ids:
                 raise ValueError("retired rebuild operation lacks an exact receipt")
+        if self.state is MaintenanceEvidenceState.REBUILD_ACCEPTED and self.cleanup_debt:
+            raise ValueError("REBUILD_ACCEPTED rebuild evidence cannot retain cleanup debt")
         if self.state is MaintenanceEvidenceState.ABORTED and receipt_operation_ids:
             if self.cleanup_debt:
                 raise ValueError("ABORTED rebuild evidence cannot retain cleanup debt")

@@ -2437,10 +2437,15 @@ class OfflineMigrationService:
             )
 
     def _expect_rebuild_evidence(
-        self, state: MaintenanceEvidenceState, *, plan: MigrationPlan
+        self,
+        state: MaintenanceEvidenceState,
+        *,
+        plan: MigrationPlan,
+        evidence: MaintenanceRunEvidence | None = None,
     ) -> MaintenanceRunEvidence:
         """Revalidate source truth while allowing only this run's destination writes."""
-        evidence = self.read_evidence()
+        if evidence is None:
+            evidence = self.read_evidence()
         if evidence.state is not state or evidence.plan_digest != plan.digest:
             raise CacheBlobMigrationEvidenceMismatchError(
                 f"maintenance evidence is not ready for rebuild {state.value}",
@@ -2460,6 +2465,17 @@ class OfflineMigrationService:
                 context={"operation": "migration.rebuild_evidence", "run_id": self.run_id},
             )
         return evidence
+
+    def _require_rebuild_cleanup_settlement(
+        self, evidence: MaintenanceRunEvidence
+    ) -> None:
+        """Fence authenticated rebuild debt until explicit resume settles it."""
+        if evidence.cleanup_debt:
+            raise CacheBlobMigrationOfflineDecisionRequiredError(
+                "rebuild cleanup debt requires explicit resume settlement before "
+                "further rebuild progression",
+                context={"operation": "migration.rebuild", "run_id": self.run_id},
+            )
 
     @staticmethod
     def _rebuild_output_digest(receipts: tuple[BlobReceipt, ...]) -> str:
@@ -2893,6 +2909,8 @@ class OfflineMigrationService:
         lifecycle publisher; this coordinator never writes native payload
         bytes or authority rows directly.
         """
+        current = self.read_evidence()
+        self._require_rebuild_cleanup_settlement(current)
         source_assessments = self._revalidate_plan_source_state(
             plan,
             operation="migration.stage_rebuild",
@@ -2903,7 +2921,6 @@ class OfflineMigrationService:
             for assessment in source_assessments
             if assessment.entry.key in {entry.entry.key for entry in plan.included_entries}
         )
-        current = self.read_evidence()
         self._validate_rebuild_plan(
             plan, require_destination_revision=current.state is MaintenanceEvidenceState.PLANNED
         )
@@ -2914,7 +2931,7 @@ class OfflineMigrationService:
             )
         if current.state is MaintenanceEvidenceState.PLANNED:
             evidence = self._expect_rebuild_evidence(
-                MaintenanceEvidenceState.PLANNED, plan=plan
+                MaintenanceEvidenceState.PLANNED, plan=plan, evidence=current
             )
             evidence = self._write_evidence(
                 self._new_evidence(
@@ -2928,7 +2945,7 @@ class OfflineMigrationService:
             )
         elif current.state is MaintenanceEvidenceState.REBUILDING:
             evidence = self._expect_rebuild_evidence(
-                MaintenanceEvidenceState.REBUILDING, plan=plan
+                MaintenanceEvidenceState.REBUILDING, plan=plan, evidence=current
             )
         else:
             raise CacheBlobMigrationEvidenceMismatchError(
@@ -3004,6 +3021,8 @@ class OfflineMigrationService:
 
     def verify_rebuild(self, plan: MigrationPlan) -> MigrationStepResult:
         """Verify the exact included destination set before explicit acceptance."""
+        current = self.read_evidence()
+        self._require_rebuild_cleanup_settlement(current)
         source_assessments = self._revalidate_plan_source_state(
             plan,
             operation="migration.verify_rebuild",
@@ -3015,10 +3034,9 @@ class OfflineMigrationService:
             if assessment.entry.key in {entry.entry.key for entry in plan.included_entries}
         )
         self._validate_rebuild_plan(plan)
-        current = self.read_evidence()
         if current.state is MaintenanceEvidenceState.REBUILD_STAGED:
             evidence = self._expect_rebuild_evidence(
-                MaintenanceEvidenceState.REBUILD_STAGED, plan=plan
+                MaintenanceEvidenceState.REBUILD_STAGED, plan=plan, evidence=current
             )
             evidence = self._write_evidence(
                 self._new_evidence(
@@ -3035,7 +3053,7 @@ class OfflineMigrationService:
             )
         elif current.state is MaintenanceEvidenceState.REBUILD_VERIFYING:
             evidence = self._expect_rebuild_evidence(
-                MaintenanceEvidenceState.REBUILD_VERIFYING, plan=plan
+                MaintenanceEvidenceState.REBUILD_VERIFYING, plan=plan, evidence=current
             )
         else:
             raise CacheBlobMigrationEvidenceMismatchError(
@@ -3115,6 +3133,8 @@ class OfflineMigrationService:
         lifecycle authority.  This evidence checkpoint is corroborative
         offline maintenance state, never a second visibility authority.
         """
+        current = self.read_evidence()
+        self._require_rebuild_cleanup_settlement(current)
         source_assessments = self._revalidate_plan_source_state(
             plan,
             operation="migration.accept_rebuild",
@@ -3122,7 +3142,7 @@ class OfflineMigrationService:
         )
         self._validate_rebuild_plan(plan)
         evidence = self._expect_rebuild_evidence(
-            MaintenanceEvidenceState.REBUILD_VERIFIED, plan=plan
+            MaintenanceEvidenceState.REBUILD_VERIFIED, plan=plan, evidence=current
         )
         self._validate_rebuild_receipts(
             plan,
@@ -4334,6 +4354,15 @@ class OfflineMigrationService:
         if plan.plan_kind is MigrationPlanKind.REBUILD:
             self._validate_rebuild_plan(plan)
             if evidence.cleanup_debt:
+                if evidence.state not in {
+                    MaintenanceEvidenceState.REBUILDING,
+                    MaintenanceEvidenceState.REBUILD_VERIFYING,
+                }:
+                    raise CacheBlobMigrationOfflineDecisionRequiredError(
+                        "rebuild cleanup debt may be settled only by explicit resume "
+                        "from rebuilding or rebuild_verifying evidence",
+                        context={"operation": "migration.resume", "run_id": self.run_id},
+                    )
                 return self._settle_rebuild_cleanup_debt(plan, evidence)
             if evidence.state is MaintenanceEvidenceState.REBUILDING:
                 self._validate_rebuild_receipts(plan, evidence, require_complete=False)

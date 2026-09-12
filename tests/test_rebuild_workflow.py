@@ -905,11 +905,7 @@ def test_rebuild_cleanup_debt_fences_forward_methods_and_resume_settles_exact_re
         plan = service.create_rebuild_plan(service.inspect())
         service.confirm_rebuild(plan, confirmation=service.rebuild_confirmation(plan))
         original_stage_entry = service._stage_rebuild_entry
-        original_delete = destination.delete
         original_get_entry_info = destination.get_entry_info
-        original_open_entry = destination.open_entry
-        original_delete_migration_payload = destination.delete_migration_payload
-        original_revalidate = service._revalidate_plan_source_state
 
         def stage_then_fail(rebuild_plan, assessment, entry_ordinal):
             if entry_ordinal == 1:
@@ -930,6 +926,12 @@ def test_rebuild_cleanup_debt_fences_forward_methods_and_resume_settles_exact_re
         assert evidence.cleanup_debt == (service._rebuild_cleanup_debt(receipt),)
         original_entry = original_get_entry_info("first")
         assert original_entry is not None
+        original_entry_identity = (
+            original_entry.generation,
+            original_entry.locator,
+            original_entry.expectation,
+        )
+        original_authority_identity = service._destination_authority.identity_snapshot()
         original_source = (source.get("first"), source.get("second"))
 
         participant_accesses: list[str] = []
@@ -987,30 +989,86 @@ def test_rebuild_cleanup_debt_fences_forward_methods_and_resume_settles_exact_re
                 operation(plan)
 
             assert service.evidence_path.read_bytes() == original_bytes
-            assert original_get_entry_info("first") == original_entry
+            current_entry = original_get_entry_info("first")
+            assert current_entry is not None
+            assert (
+                current_entry.generation,
+                current_entry.locator,
+                current_entry.expectation,
+            ) == original_entry_identity
+            assert service._destination_authority.identity_snapshot() == original_authority_identity
             assert (source.get("first"), source.get("second")) == original_source
             assert participant_accesses == []
 
-        monkeypatch.setattr(destination, "delete", original_delete)
-        monkeypatch.setattr(destination, "get_entry_info", original_get_entry_info)
-        monkeypatch.setattr(destination, "open_entry", original_open_entry)
-        monkeypatch.setattr(
-            destination,
-            "delete_migration_payload",
-            original_delete_migration_payload,
-        )
-        monkeypatch.setattr(service, "_revalidate_plan_source_state", original_revalidate)
-        write_authenticated_debt(MaintenanceEvidenceState.REBUILDING)
-        resumed = service.resume(
-            plan, run_id=service.run_id, evidence_path=service.evidence_path
-        )
+        settlement_source = _store(tmp_path / "settlement-source", provider)
+        settlement_destination = _store(tmp_path / "settlement-destination", provider)
+        try:
+            settlement_source.put_entry({"value": "first"}, key="first")
+            settlement_source.put_entry({"value": "second"}, key="second")
+            settlement_service = _service(
+                settlement_source,
+                settlement_destination,
+                tmp_path / "settlement-maintenance",
+                run_id="rebuild-settlement-run",
+            )
+            settlement_plan = settlement_service.create_rebuild_plan(
+                settlement_service.inspect()
+            )
+            settlement_service.confirm_rebuild(
+                settlement_plan,
+                confirmation=settlement_service.rebuild_confirmation(settlement_plan),
+            )
+            settlement_stage_entry = settlement_service._stage_rebuild_entry
+            settlement_delete = settlement_destination.delete
 
-        settled = service.read_evidence()
-        assert resumed.state is MaintenanceEvidenceState.ABORTED
-        assert settled.cleanup_debt == ()
-        assert settled.retired_rebuild_operation_ids == (receipt.operation_id,)
-        assert original_get_entry_info("first") is None
-        assert (source.get("first"), source.get("second")) == original_source
+            def settlement_stage_then_fail(rebuild_plan, assessment, entry_ordinal):
+                if entry_ordinal == 1:
+                    raise OSError("rebuild staging failed")
+                return settlement_stage_entry(rebuild_plan, assessment, entry_ordinal)
+
+            with monkeypatch.context() as settlement_patch:
+                settlement_patch.setattr(
+                    settlement_service,
+                    "_stage_rebuild_entry",
+                    settlement_stage_then_fail,
+                )
+                settlement_patch.setattr(
+                    settlement_destination,
+                    "delete",
+                    fail_cleanup,
+                )
+                with pytest.raises(OSError, match="rebuild staging failed"):
+                    settlement_service.stage_rebuild(settlement_plan)
+
+                settlement_evidence = settlement_service.read_evidence()
+                settlement_receipt = settlement_evidence.rebuild_receipt_batches[0].receipts[0]
+                assert settlement_evidence.state is MaintenanceEvidenceState.REBUILDING
+                assert settlement_evidence.cleanup_debt == (
+                    settlement_service._rebuild_cleanup_debt(settlement_receipt),
+                )
+                settlement_patch.setattr(
+                    settlement_destination,
+                    "delete",
+                    settlement_delete,
+                )
+                resumed = settlement_service.resume(
+                    settlement_plan,
+                    run_id=settlement_service.run_id,
+                    evidence_path=settlement_service.evidence_path,
+                )
+
+            settled = settlement_service.read_evidence()
+            assert resumed.state is MaintenanceEvidenceState.ABORTED
+            assert settled.cleanup_debt == ()
+            assert settled.retired_rebuild_operation_ids == (
+                settlement_receipt.operation_id,
+            )
+            assert settlement_destination.get_entry_info("first") is None
+            assert settlement_source.get("first") == {"value": "first"}
+            assert settlement_source.get("second") == {"value": "second"}
+        finally:
+            settlement_source.close()
+            settlement_destination.close()
     finally:
         source.close()
         destination.close()
