@@ -433,7 +433,7 @@ Plans:
 
 **Accepted recovery/progress limit (checker override, 2026-09-10):** A crash after immutable payload publication but before its authority checkpoint may leave an invisible, unattributed orphan. It is never visible, never automatically adopted, and guaranteed exact cleanup is outside Phase 7. Integrity and authority visibility remain guaranteed while perfect orphan reclamation is not; resume/abort guarantees apply only to effects durably attributed in authority-owned evidence. This is an ADR 0001 topology-specific recovery/progress limit, not failed atomicity. Phase 7 adds no pre-publication maintenance intent, extra journal/lifecycle state, coordination mechanism, or production obstore adoption.
 
-**Plans**: 23/23 plans executed; 22/23 executed. Plan 07-23 closes the remaining verified rebuild cleanup-debt fence and fixed-verifier gap before independent re-verification.
+**Plans**: 23/24 plans executed. Plan 07-24 closes the sole remaining exact-verifier binding gap before independent re-verification.
 
 Plans:
 
@@ -519,6 +519,10 @@ Plans:
 **Wave 19** *(gap closure; blocked on the verified Plan 07-22 baseline)*
 
 - [x] 07-23-PLAN.md — Fence authentic rebuild cleanup debt before direct progression or terminal-state effects and bind the invariant to the fixed verifier.
+
+**Wave 20** *(gap closure; blocked on the verified Plan 07-23 implementation)*
+
+- [ ] 07-24-PLAN.md — Bind the forward-fence/resume regression to the existing Plan 21 terminal-state threat and make the fixed verifier fail closed on either missing selector.
 
 ### Phase 8: Production Gates and Performance Stabilization
 
