@@ -21,10 +21,10 @@ milestone_name: milestone
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-09-06)
+See: .planning/PROJECT.md (updated 2026-09-11)
 
 **Core value:** Applications can store and retrieve data reliably through one backend-neutral lifecycle, with caching policy layered above storage without compromising integrity or cleanup correctness.
-**Current focus:** Phase 07 — Explicit Migration and Rebuild Cutover
+**Current focus:** Phase 08 — Production Gates and Performance Stabilization
 
 ## Current Position
 
@@ -33,25 +33,20 @@ Plan: Not started
 Status: Ready to plan
 Last activity: 2026-09-11 — Phase 07 complete, transitioned to Phase 8
 
-Phase 05 closed with 9/9 canonical plans summarized, 9/9 verified must-haves,
-19/19 Nyquist-covered tasks, and 43/43 canonical security threats closed
-(`threats_open: 0`). BACK-05 and its five real-service threats moved intact to
-Phase 8; sanitized `UNAVAILABLE` evidence does not create a release support
-claim.
+Phase 07 closed with 24/24 plans summarized and an independent 9/9 must-have
+verification pass. Its final gap binds the terminal rebuild-debt threat to the
+exact forward-fence/resume regression; the scoped code review, contract tests,
+quick verifier, Ruff gate, and deterministic non-live suite all passed.
 
-Phase 04 closed with 14/14 plans summarized, a clean final code review,
-18/18 verified must-haves, 29/29 Nyquist-covered tasks, and 64/64 plan-time
-security threats resolved or explicitly accepted (`threats_open: 0`). The
-canonical milestone count excludes superseded Plans 03-19 and 05-10, whose
-`status: superseded` frontmatter is the machine-readable retirement record.
+Migration is now an explicit stopped-worker maintenance workflow with bounded,
+authenticated authority evidence. Ordinary opens do not upgrade, unexplained
+payloads remain invisible and unadopted, and Phase 07 did not add a second
+lifecycle authority or claim cross-resource ACID.
 
-The user explicitly bypassed GSD execute/review/checker. The older
-03-VERIFICATION.md remains historical gaps_found evidence, not the current
-disposition or an instruction to re-execute closed plans. This completion is
-direct primary-agent qualification, not an independent GSD verifier verdict.
-Windows remains UNAVAILABLE/NOT_QUALIFIED; Phase 999.1 is unchanged.
-
-Progress: [██████░░░░] 5 of 8 phases complete
+Roadmap progress: [█████████░] 7 of 8 phases complete. The generated disk
+counter remains 6 because Phase 03 was directly qualified after a deliberately
+superseded plan; its canonical 24/24 roadmap disposition controls and must not
+be reopened merely to repair that counter.
 
 ## Roadmap Evolution
 
@@ -65,12 +60,9 @@ Progress: [██████░░░░] 5 of 8 phases complete
 - PROJECT.md now describes the delivered baseline; REQUIREMENTS.md records STOR-03 through STOR-07 as complete only in the qualified local scope, leaving full BACK/CACH/MIGR/QUAL acceptance pending. CONTEXT.md distinguishes catalog attributes from derived metadata outcomes.
 
 Phase numbering, order, dependencies, requirement ownership, and milestone scope
-are unchanged. This was a documentation alignment, not another implementation or
-qualification run. Phase 4 context and eight initial checker-approved plans were
-created on 2026-09-07. Verification then found finite public
-catalog/composition/projection gaps, and five additive checker-approved gap plans
-(04-09 through 04-13) were prepared on 2026-09-08. Phases 5–8 still have no plans
-or phase directories.
+are unchanged. Phases 4 through 7 subsequently completed the catalog,
+supported-topology, cache-policy, and explicit maintenance work. Phase 8 is the
+only remaining milestone phase and is intentionally unplanned pending discussion.
 GSD's raw disk count still includes superseded 03-19 and may call Phase 3 partial;
 the canonical 24/24 disposition and direct qualification ledger remain controlling.
 Do not fabricate a 03-19 completion or reopen the closed gaps to repair that count.
@@ -88,7 +80,10 @@ delivers explicit offline migration/rebuild tooling for future released versions
 *Updated after each plan completion*
 **Per-Plan Metrics:**
 
-Phase 03 rows in this historical table include superseded attempts and do not define current completion. Authoritative milestone progress is 46 of 54 currently planned canonical plans: Phase 1 has 15 complete, Phase 2 has 7 complete, Phase 3 has 24 complete, and Phase 4 has 8 planned. The last five Phase 3 plans were implemented directly in one bounded pass. Phases 5–8 remain unplanned. Plan 03-19 is excluded.
+Phase 03 rows in this historical table include superseded attempts and do not
+define current completion. The roadmap records Phases 1 through 7 complete and
+Phase 8 unplanned. The raw GSD disk counter reports 104/105 because it still sees
+the deliberately superseded Phase 03 plan; do not fabricate its completion.
 
 | Plan | Duration | Tasks | Files |
 |------|----------|-------|-------|
@@ -200,6 +195,9 @@ Recent decisions affecting current work:
 - V1 supports same-backend migration plus an explicit rebuild for incompatible or cross-backend data.
 - Direct `BlobStore` integrity failures are typed exceptions; `UnifiedCache` may translate them into separately recorded misses.
 - AWS S3 semantics are authoritative; compatible services are supported only where explicitly verified.
+- [Phase 07]: Migration and rebuild are explicit stopped-worker maintenance operations; ordinary opens validate and never upgrade implicitly.
+- [Phase 07]: Each release supports its current and immediately previous released layout; older releases advance through declared steps.
+- [Phase 07]: Recovery uses bounded authenticated authority evidence and exact receipts; unexplained payloads remain invisible and are never adopted.
 - [Phase 01]: CacheReason uses stable lower-snake-case string values in typed error contexts.
 - [Phase 01]: SQL cache classes remain importable without optional dependencies; construction reports actionable guidance.
 - [Phase 01]: CacheStorageConfig preserves authored paths; storage boundaries resolve them at runtime.
@@ -426,16 +424,13 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 
 ### Pending Todos
 
-- Execute Phase 4's eight checker-approved plans, beginning with Wave 0 catalog and composition contracts.
-- Apply ADR 0001 and the direct implementation guide; the user approved both 03-22/24 compatibility checkpoints with “proceed.”
-- Do not restart closed 03-21 through 03-25 gaps or an automated race-fix loop from historical review/verification artifacts.
+- Apply ADR 0001 and the Phase 7 maintenance boundaries during Phase 8 qualification; a failing contention probe does not authorize another coordination mechanism.
+- Keep live PostgreSQL/AWS S3, native Windows, supported-Python, packaging, coverage, and performance evidence in Phase 8.
 
 ### Blockers/Concerns
 
-- Historical Phase 1 compatibility fixtures remain evidence but do not define a supported runtime read window after the pre-production reset; Phase 7 will define the source-version window for future released formats.
-- Phase 3 planning must derive tombstone retention and orphan grace defaults from fault/crash testing.
 - Phase 8 performance and coverage thresholds must be finalized from measured baselines rather than estimates.
-- Phase 06 verification pending: default uv lacks pandas, so fixed CACH-07 SqlCache regression and the full pytest suite cannot collect; PostgreSQL/S3 BACK-05 and native-Windows evidence remain unqualified.
+- PostgreSQL/AWS S3 BACK-05, native Windows, supported-Python, and packaging evidence remain unqualified until Phase 8 runs their non-substitutable gates.
 
 ### Roadmap Evolution
 
