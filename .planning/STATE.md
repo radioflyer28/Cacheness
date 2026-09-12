@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 07
 current_phase_name: Explicit Migration and Rebuild Cutover
 status: executing
-stopped_at: Completed 07-21-PLAN.md
-last_updated: "2026-09-11T23:52:09.358Z"
+stopped_at: Completed 07-22-PLAN.md
+last_updated: "2026-09-12T00:13:04.122Z"
 last_activity: 2026-09-11
 last_activity_desc: Phase 07 execution started
-state_head: 446c71182fe2048b97444c100656ecc87046c834
+state_head: 502933452f8c8efe9f844317b2e64abb99014f97
 progress:
   total_phases: 8
   completed_phases: 5
   total_plans: 103
-  completed_plans: 101
+  completed_plans: 102
 milestone_name: milestone
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-09-06)
 ## Current Position
 
 Phase: 07 (Explicit Migration and Rebuild Cutover) — EXECUTING
-Plan: 3 of 22
+Plan: 4 of 22
 Status: Ready to execute
 Last activity: 2026-09-11 — Phase 07 execution started
 
@@ -184,6 +184,7 @@ Phase 03 rows in this historical table include superseded attempts and do not de
 | Phase 07 P19 | 20min | 2 tasks | 2 files |
 | Phase 07 P20 | 12min | 2 tasks | 3 files |
 | Phase 07 P21 | 18 min | 2 tasks | 4 files |
+| Phase 07 P22 | 15 min | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -415,6 +416,8 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - [Phase 07]: Cleanup debt is retired only after an exact recorded receipt and existing authority replay corroborate deletion or absence.
 - [Phase 07]: A later logical-key owner is preserved; settlement addresses only the recorded immutable locator.
 - [Phase 07]: Terminal ABORTED rebuild evidence requires empty debt and retirement of every recorded receipt.
+- [Phase 07]: Phase 7 verification uses literal Plans 01-22 and a 50-gap/96-total threat oracle with AST-validated exact selectors.
+- [Phase 07]: WR-02 name= handling is deferred as a standalone handler-registration API-contract decision, not a migration claim.
 
 ### Pending Todos
 
@@ -445,6 +448,6 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 
 ## Session Continuity
 
-Last session: 2026-09-11T23:52:09.217Z
-Stopped at: Completed 07-21-PLAN.md
+Last session: 2026-09-12T00:13:03.971Z
+Stopped at: Completed 07-22-PLAN.md
 Resume file: None

@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 4
+open_count: 5
 waived_count: 0
 fixed_count: 37
-total_count: 41
-last_updated: 2026-09-10T04:31:40.837Z
+total_count: 42
+last_updated: 2026-09-12T00:13:12.257Z
 ---
 
 # Broken Windows Ledger
@@ -56,6 +56,7 @@ last_updated: 2026-09-10T04:31:40.837Z
 | 39 | 06 | deviation | tests/test_phase6_lookup_contract.py |  | Migrated direct Phase 6 callers to CachePutResult.receipt.key after the approved pre-production result cutover. | fixed |  | 2026-09-09T03:02:19.682Z | 2026-09-09T03:02:36.292Z |
 | 40 | 06 | unrun-verify | tools/verify_phase6_contracts.py |  | Default uv environment lacks pandas; fixed CACH-07 SqlCache regression and full suite remain open. | open |  | 2026-09-09T04:41:46.920Z |  |
 | 41 | 07 | deviation | docs/STORAGE_INITIALIZATION.md |  | Corrected stale schema-7 and future-tooling guidance while publishing the Phase 7 runbook. | fixed |  | 2026-09-10T04:30:14.283Z | 2026-09-10T04:31:40.837Z |
+| 42 | 07 | deviation | tests/test_blob_store_concurrency.py | 312 | Direct Phase 7 non-live suite observed pre-existing clear/delete CacheBlobLifecycleConflictError; deferred to Phase 8 under ADR 0001. | open |  | 2026-09-12T00:13:12.257Z |  |
 
 ````json
 [
@@ -550,6 +551,18 @@ last_updated: 2026-09-10T04:31:40.837Z
     "reason": "",
     "recorded_at": "2026-09-10T04:30:14.283Z",
     "resolved_at": "2026-09-10T04:31:40.837Z"
+  },
+  {
+    "id": 42,
+    "kind": "deviation",
+    "phase": "07",
+    "file": "tests/test_blob_store_concurrency.py",
+    "line": 312,
+    "description": "Direct Phase 7 non-live suite observed pre-existing clear/delete CacheBlobLifecycleConflictError; deferred to Phase 8 under ADR 0001.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-12T00:13:12.257Z",
+    "resolved_at": null
   }
 ]
 ````
