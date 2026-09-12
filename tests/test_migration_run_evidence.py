@@ -7,6 +7,7 @@ import hashlib
 import logging
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from cacheness.error_handling import (
@@ -211,7 +212,7 @@ def test_resume_requires_exact_run_and_evidence_then_revalidates_next_step(tmp_p
     source = _memory_store(tmp_path / "source", provider)
     destination = _memory_store(tmp_path / "destination", provider)
     try:
-        source.put_entry({"answer": 42}, key="entry")
+        source.put_entry(np.array([42]), key="entry")
         service = _service(source, destination, tmp_path / "maintenance")
         plan = service.plan(service.inspect())
         service.stage(plan)
@@ -242,7 +243,7 @@ def test_resume_refuses_mismatched_output_or_stale_source_without_adoption(tmp_p
     source = _memory_store(tmp_path / "source", provider)
     destination = _memory_store(tmp_path / "destination", provider)
     try:
-        source.put_entry({"answer": 42}, key="entry")
+        source.put_entry(np.array([42]), key="entry")
         service = _service(source, destination, tmp_path / "maintenance")
         plan = service.plan(service.inspect())
         service.stage(plan)
@@ -258,7 +259,7 @@ def test_resume_refuses_mismatched_output_or_stale_source_without_adoption(tmp_p
         assert destination.lifecycle_authority.identity_snapshot().revision == destination_revision
         assert destination.get("entry") is None
 
-        source.put_entry({"new": "source-revision"}, key="new-entry")
+        source.put_entry(np.array([99]), key="new-entry")
         with pytest.raises(CacheBlobMigrationPlanStaleError):
             restarted.resume(
                 plan, run_id=service.run_id, evidence_path=service.evidence_path
@@ -278,7 +279,7 @@ def test_execution_rereads_authenticates_and_rejects_plan_bound_manifest_or_cata
     destination = _memory_store(tmp_path / "destination", provider)
     try:
         source.put_entry(
-            {"answer": 42},
+            np.array([42]),
             key="entry",
             catalog_values={"unknown_authenticated_attribute": "preserve-me"},
         )
@@ -298,7 +299,7 @@ def test_execution_rereads_authenticates_and_rejects_plan_bound_manifest_or_cata
         destination = _memory_store(tmp_path / "drift-destination", provider)
         service = _service(source, destination, tmp_path / "drift-maintenance")
         source.put_entry(
-            {"answer": 42},
+            np.array([42]),
             key="entry",
             catalog_values={"unknown_authenticated_attribute": "before"},
         )
@@ -306,7 +307,7 @@ def test_execution_rereads_authenticates_and_rejects_plan_bound_manifest_or_cata
             service.plan(service.inspect()).to_canonical_bytes()
         )
         source.put_entry(
-            {"answer": 42},
+            np.array([42]),
             key="entry",
             catalog_values={"unknown_authenticated_attribute": "after"},
         )
@@ -329,7 +330,7 @@ def test_execution_rereads_authenticates_and_rejects_plan_bound_manifest_or_cata
         source = _memory_store(tmp_path / "forged-source", provider)
         destination = _memory_store(tmp_path / "forged-destination", provider)
         service = _service(source, destination, tmp_path / "forged-maintenance")
-        source.put_entry({"answer": 42}, key="entry")
+        source.put_entry(np.array([42]), key="entry")
         forged_plan = MigrationPlan.from_canonical_bytes(
             service.plan(service.inspect()).to_canonical_bytes()
         )

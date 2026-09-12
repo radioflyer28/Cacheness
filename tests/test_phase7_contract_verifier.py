@@ -192,6 +192,27 @@ def test_source_mutation_cannot_drop_a_fixed_test_node() -> None:
     )
 
 
+def test_source_mutation_cannot_drop_a_fixed_plan_path() -> None:
+    """The mutable execution plan tuple cannot hide a later gap plan."""
+    verifier_path = REPOSITORY_ROOT / "tools" / "verify_phase7_contracts.py"
+    source = verifier_path.read_text(encoding="utf-8")
+    original = "PHASE7_PLAN_PATHS = tuple(_PHASE7_REVIEWED_PLAN_PATHS)"
+    assert original in source
+    verifier = _load_verifier_source(
+        source.replace(
+            original,
+            "PHASE7_PLAN_PATHS = _PHASE7_REVIEWED_PLAN_PATHS[:-1]",
+            1,
+        )
+    )
+
+    assert verifier.validate_fixed_manifest(REPOSITORY_ROOT) == (
+        "Phase 7 plan inventory differs from the fixed reviewed set: "
+        "missing=['.planning/phases/07-explicit-migration-and-rebuild-cutover/"
+        "07-22-PLAN.md'], unexpected=[]",
+    )
+
+
 @pytest.mark.parametrize(
     ("source", "filename", "expected"),
     [
@@ -356,12 +377,12 @@ def test_fixed_manifest_requires_exact_path_and_test_name_selectors() -> None:
 
 
 def test_fixed_manifest_includes_every_gap_plan_threat_exactly_once() -> None:
-    """The fixed 38-row gap inventory is exact, owned, and independently checked."""
+    """The fixed 50-row gap inventory is exact, owned, and independently checked."""
     verifier = _load_verifier()
 
-    assert len(verifier.GAP_PLAN_THREAT_IDS) == 38
-    assert len(set(verifier.GAP_PLAN_THREAT_IDS)) == 38
-    assert len(verifier._DECLARED_PHASE7_THREAT_IDS) == 84
+    assert len(verifier.GAP_PLAN_THREAT_IDS) == 50
+    assert len(set(verifier.GAP_PLAN_THREAT_IDS)) == 50
+    assert len(verifier._DECLARED_PHASE7_THREAT_IDS) == 96
     assert set(verifier.GAP_PLAN_THREAT_IDS).issubset(
         verifier.SECURITY_THREAT_NODES
     )
@@ -401,10 +422,10 @@ def test_fixed_manifest_maps_current_three_gap_repairs_exactly() -> None:
         "test_rebuild_cleanup_retry_preserves_changed_current_ownership"
     )
 
-    assert verifier.PHASE7_PLAN_PATHS[-3:] == (
-        ".planning/phases/07-explicit-migration-and-rebuild-cutover/07-20-PLAN.md",
-        ".planning/phases/07-explicit-migration-and-rebuild-cutover/07-21-PLAN.md",
-        ".planning/phases/07-explicit-migration-and-rebuild-cutover/07-22-PLAN.md",
+    assert verifier.PHASE7_PLAN_PATHS == tuple(
+        ".planning/phases/07-explicit-migration-and-rebuild-cutover/"
+        f"07-{number:02d}-PLAN.md"
+        for number in range(1, 23)
     )
     assert len(verifier.GAP_PLAN_THREAT_IDS) == 50
     assert len(verifier._DECLARED_PHASE7_THREAT_IDS) == 96
@@ -430,6 +451,22 @@ def test_fixed_manifest_maps_current_three_gap_repairs_exactly() -> None:
     assert verifier.SECURITY_THREAT_NODES["T-07-21-02"] == (terminal_evidence,)
     assert verifier.SECURITY_THREAT_NODES["T-07-21-03"] == (forged_debt,)
     assert verifier.SECURITY_THREAT_NODES["T-07-21-04"] == (changed_owner,)
+    assert verifier.SECURITY_THREAT_NODES["T-07-22-01"] == (
+        "tests/test_phase7_contract_verifier.py::"
+        "test_fixed_manifest_maps_current_three_gap_repairs_exactly",
+    )
+    assert verifier.SECURITY_THREAT_NODES["T-07-22-02"] == (
+        "tests/test_phase7_contract_verifier.py::"
+        "test_fixed_manifest_includes_every_gap_plan_threat_exactly_once",
+    )
+    assert verifier.SECURITY_THREAT_NODES["T-07-22-03"] == (
+        "tests/test_phase7_contract_verifier.py::"
+        "test_main_never_renders_failed_requirement_as_pass",
+    )
+    assert verifier.SECURITY_THREAT_NODES["T-07-22-04"] == (
+        "tests/test_phase7_contract_verifier.py::"
+        "test_document_and_coverage_audits_reject_false_qualification_and_secrets",
+    )
     assert transform in verifier.MIGRATION_REQUIREMENT_NODES["MIGR-04"]
     assert s3_abort in verifier.MIGRATION_REQUIREMENT_NODES["MIGR-04"]
     assert {s3_abort, abort_count, rebuild_settlement, terminal_evidence, forged_debt, changed_owner}.issubset(
@@ -486,6 +523,32 @@ def test_fixed_manifest_rejects_removed_mapped_test_function_while_file_remains(
     ) in errors
 
 
+def test_fixed_manifest_rejects_removed_current_gap_behavior_while_file_remains(
+    tmp_path: Path,
+) -> None:
+    """A new repair's exact selector cannot be replaced by a passing module."""
+    verifier = _load_verifier()
+    root = _manifest_copy(tmp_path, verifier)
+    target = root / "tests/test_migration_cutover.py"
+    source = target.read_text(encoding="utf-8")
+    marker = (
+        "def test_same_version_different_format_uses_exact_directed_transform_"
+        "and_destination_manifest("
+    )
+    start = source.index(marker)
+    end = source.index("\ndef ", start + len(marker))
+    target.write_text(source[:start] + source[end + 1 :], encoding="utf-8")
+
+    errors = verifier.validate_fixed_manifest(root)
+
+    assert (
+        "threat mapping references missing test selector: T-07-20-01: "
+        "tests/test_migration_cutover.py::"
+        "test_same_version_different_format_uses_exact_directed_transform_"
+        "and_destination_manifest"
+    ) in errors
+
+
 def test_fixed_manifest_rejects_renamed_mapped_test_function_while_file_remains(
     tmp_path: Path,
 ) -> None:
@@ -517,40 +580,44 @@ def test_fixed_manifest_rejects_gap_threat_without_exact_selector(
     """Gap row, mapping, and selector removal each fail before pytest runs."""
     verifier = _load_verifier()
     mutated_mapping = dict(verifier.SECURITY_THREAT_NODES)
-    mutated_mapping["T-07-G12-01"] = ()
+    mutated_mapping["T-07-20-01"] = ()
     monkeypatch.setattr(verifier, "SECURITY_THREAT_NODES", mutated_mapping)
     assert (
-        "threat mapping has no executable evidence: T-07-G12-01"
+        "threat mapping has no executable evidence: T-07-20-01"
         in verifier.validate_fixed_manifest(REPOSITORY_ROOT)
     )
 
     root = _manifest_copy(tmp_path, verifier)
-    plan = root / ".planning/phases/07-explicit-migration-and-rebuild-cutover/07-12-PLAN.md"
+    plan = root / ".planning/phases/07-explicit-migration-and-rebuild-cutover/07-20-PLAN.md"
     source = plan.read_text(encoding="utf-8")
-    plan.write_text(source.replace("| T-07-G12-01 |", "| T-07-G12-X |", 1), encoding="utf-8")
+    plan.write_text(source.replace("| T-07-20-01 |", "| T-07-20-X |", 1), encoding="utf-8")
     errors = verifier.validate_gap_plan_threat_inventory(root)
     assert (
         "gap threat inventory missing: "
-        ".planning/phases/07-explicit-migration-and-rebuild-cutover/07-12-PLAN.md: "
-        "T-07-G12-01"
+        ".planning/phases/07-explicit-migration-and-rebuild-cutover/07-20-PLAN.md: "
+        "T-07-20-01"
     ) in errors
     assert (
         "gap threat inventory unexpected: "
-        ".planning/phases/07-explicit-migration-and-rebuild-cutover/07-12-PLAN.md: "
-        "T-07-G12-X"
+        ".planning/phases/07-explicit-migration-and-rebuild-cutover/07-20-PLAN.md: "
+        "T-07-20-X"
     ) in errors
 
     duplicate_root = _manifest_copy(tmp_path / "duplicate", verifier)
-    duplicate_plan = duplicate_root / ".planning/phases/07-explicit-migration-and-rebuild-cutover/07-12-PLAN.md"
+    duplicate_plan = duplicate_root / ".planning/phases/07-explicit-migration-and-rebuild-cutover/07-20-PLAN.md"
     duplicate_source = duplicate_plan.read_text(encoding="utf-8")
-    row = "| T-07-G12-01 | Tampering | Authority-owned candidate evidence | high | mitigate | Bounded authenticated receipts protect every exact ordinal/key/generation/locator/target-manifest/digest/size descriptor; shareable renderers receive only digests and resume revalidates authority-attributed outputs. |"
+    row = next(
+        line
+        for line in duplicate_source.splitlines()
+        if line.startswith("| T-07-20-01 |")
+    )
     duplicate_plan.write_text(
         duplicate_source.replace(row, f"{row}\n{row}", 1), encoding="utf-8"
     )
     assert (
         "gap threat inventory duplicate: "
-        ".planning/phases/07-explicit-migration-and-rebuild-cutover/07-12-PLAN.md: "
-        "T-07-G12-01"
+        ".planning/phases/07-explicit-migration-and-rebuild-cutover/07-20-PLAN.md: "
+        "T-07-20-01"
     ) in verifier.validate_gap_plan_threat_inventory(duplicate_root)
 
 

@@ -8,6 +8,8 @@ import os
 from pathlib import Path
 import subprocess
 
+import numpy as np
+
 from cacheness.storage import BackendRef, BlobStore, StoreTopology
 import cacheness.storage as storage
 
@@ -155,7 +157,7 @@ def test_documented_public_workflow_uses_one_model_and_offline_fencing(tmp_path:
     source = _memory_store(tmp_path / "source", provider)
     destination = _memory_store(tmp_path / "destination", provider)
     try:
-        source.put_entry({"answer": 42}, key="example")
+        source.put_entry(np.array([42]), key="example")
         service = storage.OfflineMigrationService(
             source=source,
             destination=destination,
@@ -184,7 +186,7 @@ def test_documented_public_workflow_uses_one_model_and_offline_fencing(tmp_path:
 
         confirmation = service.finalize_confirmation(decoded_plan)
         service.finalize(decoded_plan, confirmation=confirmation)
-        assert destination.get("example") == {"answer": 42}
+        assert np.array_equal(destination.get("example"), np.array([42]))
     finally:
         source.close()
         destination.close()
