@@ -322,7 +322,10 @@ SECURITY_THREAT_NODES = {
     "T-07-20-04": ("tests/test_migration_cutover.py::test_partial_abort_receipt_counts_only_deleted_or_proven_absent_candidates",),
     "T-07-21-01": ("tests/test_rebuild_workflow.py::test_rebuild_cleanup_debt_stays_resumable_until_exact_settlement",),
     "T-07-21-02": ("tests/test_rebuild_workflow.py::test_rebuild_evidence_rejects_terminal_aborted_cleanup_debt",),
-    "T-07-21-03": ("tests/test_rebuild_workflow.py::test_rebuild_cleanup_retry_rejects_forged_debt_without_payload_access",),
+    "T-07-21-03": (
+        "tests/test_rebuild_workflow.py::test_rebuild_cleanup_retry_rejects_forged_debt_without_payload_access",
+        "tests/test_rebuild_workflow.py::test_rebuild_cleanup_debt_fences_forward_methods_and_resume_settles_exact_receipts",
+    ),
     "T-07-21-04": ("tests/test_rebuild_workflow.py::test_rebuild_cleanup_retry_preserves_changed_current_ownership",),
     "T-07-22-01": ("tests/test_phase7_contract_verifier.py::test_fixed_manifest_maps_current_three_gap_repairs_exactly",),
     "T-07-22-02": ("tests/test_phase7_contract_verifier.py::test_fixed_manifest_includes_every_gap_plan_threat_exactly_once",),
