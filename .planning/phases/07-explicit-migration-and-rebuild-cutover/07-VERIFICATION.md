@@ -1,69 +1,41 @@
 ---
 phase: 07-explicit-migration-and-rebuild-cutover
-verified: 2026-09-11T20:37:01Z
+verified: 2026-09-12T00:32:01Z
 status: gaps_found
-score: 3/5 roadmap must-haves verified
-requirement_score: 2/4 requirements satisfied
+score: 4/5 roadmap must-haves verified
+requirement_score: 3/4 requirements satisfied
 behavior_unverified: 0
 overrides_applied: 0
 re_verification:
   previous_status: gaps_found
-  previous_score: 2/5
+  previous_score: 3/5
   gaps_closed:
-    - "Migration runs now split before mutation, checkpoint bounded authority-attributed candidate batches, and resume or abort attributed STAGING work."
-    - "Rebuild writes now use deterministic operation IDs, canonical lifecycle-authority replay, bounded exact receipts, and resumable pre-acceptance states."
-    - "Changed payload contracts now reach a concrete store-local handler transformation and publish a destination-identity manifest for the tested version-changing edge."
-    - "Shareable plans now contain digest bindings rather than raw catalog or manifest data, and execution authenticates fresh source state."
-    - "Fresh PostgreSQL initialization and mutation preflight now re-check persisted activated-offline state."
-    - "The fixed verifier now binds claims to AST-validated exact pytest selectors."
+    - "Same-numeric-version/different-format migration now uses the destination handler identity and executes the exact directed transform."
+    - "Typed S3 abort operational failures now checkpoint exact attributed debt, report truthful per-call deletion counts, and settle on explicit retry while integrity and ownership mismatches fail closed."
+    - "Rebuild cleanup debt now has an authenticated receipt-bound settlement path and reaches terminal ABORTED only after every recorded receipt is settled."
   gaps_remaining:
-    - "Same-numeric-version/different-format migration is still misclassified as an identity copy."
-    - "S3 migration abort operational failures can escape before cleanup debt is checkpointed."
-    - "Rebuild cleanup debt is written into terminal ABORTED evidence with no deterministic settlement path."
+    - "Authentic rebuild cleanup debt does not fence direct stage/verify/accept progression and can reach REBUILD_ACCEPTED; a later resume deletes an accepted entry before its evidence checkpoint fails."
   regressions: []
 gaps:
-  - truth: "Supported same-backend metadata and payload format migrations use offline copy-verify-switch semantics and produce the declared destination contract."
+  - truth: "An interrupted bounded migration or rebuild resumes idempotently for durably attributed effects without losing the only valid generation."
     status: failed
-    reason: "When source and destination payload formats differ but share the same numeric version, _configured_destination_contract() substitutes the source identity if the destination handler can read it. Inspection/staging then bypass the declared transform and preserve the old format."
+    reason: "Direct stage_rebuild(), verify_rebuild(), and accept_rebuild() preserve authentic cleanup debt instead of requiring settlement. resume() dispatches debt before validating the rebuild state, so accepted evidence with debt causes exact deletion of an accepted destination entry followed by a failed REBUILD_ACCEPTED evidence checkpoint."
     artifacts:
       - path: "src/cacheness/storage/migration.py"
-        issue: "Lines 1980-1991 use source readability plus numeric-version equality to redefine the destination identity."
-      - path: "tests/test_migration_cutover.py"
-        issue: "The transform integration test covers mcap-v1@1 -> mcap-v2@2, not differing formats with the same version."
-    missing:
-      - "Always derive the target payload format/version from the destination handler's declared current contract; use source support only as a readability decision."
-      - "Add a same-version/different-format migration test proving one exact directed transform and a destination-format manifest."
-  - truth: "Abort persists every authority-attributed candidate cleanup failure as retryable debt across supported payload participants."
-    status: failed
-    reason: "OfflineMigrationService.abort() catches OSError and ValueError, but S3 open/delete/absence-proof failures are CacheBlobBackendError, which is neither. Those failures escape before updated STAGING evidence and an AbortReceipt are written."
-    artifacts:
-      - path: "src/cacheness/storage/migration.py"
-        issue: "Lines 3943-3967 omit CacheBlobBackendError from both the snapshot and outer cleanup-failure handling."
-      - path: "src/cacheness/storage/backends/s3_backend.py"
-        issue: "S3 snapshot and exact-delete operational failures intentionally normalize to CacheBlobBackendError."
-      - path: "tests/test_migration_cutover.py"
-        issue: "Abort recovery is exercised with OSError only; no deterministic S3 participant error verifies debt checkpointing and retry."
-    missing:
-      - "Treat typed payload-participant operational failures as retryable cleanup debt while continuing to fail closed for ownership and integrity conflicts."
-      - "Add deterministic S3 snapshot/delete failure coverage proving exact debt persistence and later attributed retry settlement without listing or adoption."
-  - truth: "Durable authority-attributed rebuild cleanup debt has a deterministic exact settlement path."
-    status: failed
-    reason: "_abort_rebuild_after_failure() enters ABORTED when a receipt is merely represented by cleanup debt. ABORTED has no legal transition, rebuild resume rejects it, and no production path parses and settles rebuild debt."
-    artifacts:
-      - path: "src/cacheness/storage/migration.py"
-        issue: "Lines 2750-2780 treat debt representation as terminal coverage; resume lines 4219-4243 handle no ABORTED rebuild cleanup path."
+        issue: "The direct rebuild methods carry cleanup_debt through forward states, and resume settles debt before rejecting terminal REBUILD_ACCEPTED."
       - path: "src/cacheness/storage/migration_evidence.py"
-        issue: "ABORTED is terminal in the legal transition map."
-      - path: "tests/test_rebuild_workflow.py"
-        issue: "test_rebuild_verification_failure_cleans_only_exact_receipts_and_persists_debt asserts terminal ABORTED debt but never restores the participant and retries exact cleanup."
+        issue: "The evidence model forbids debt only in ABORTED, allowing REBUILD_ACCEPTED evidence with outstanding cleanup debt."
+      - path: "tools/verify_phase7_contracts.py"
+        issue: "MIGR-05 and Plan 21 mappings omit the direct-method debt-fence behavior, so the fixed verifier can report MIGR-05 PASS while the data-loss path exists."
     missing:
-      - "Keep rebuild failure evidence in an existing resumable cleanup condition until every exact receipt is retired, or permit a narrowly receipt-bound retry from ABORTED."
-      - "Remove debt only after exact deletion or proven absence and enter terminal ABORTED only after settlement."
-      - "Extend the failure test to retry and prove evidence plus payload state converge."
+      - "At the existing maintenance coordinator seam, reject direct stage_rebuild(), verify_rebuild(), and accept_rebuild() whenever authenticated rebuild cleanup debt exists and direct the caller to explicit resume settlement."
+      - "Permit resume settlement only from the defined nonterminal rebuild cleanup states and reject cleanup debt in REBUILD_ACCEPTED before any payload effect."
+      - "Make MaintenanceRunEvidence reject REBUILD_ACCEPTED with cleanup debt."
+      - "Add one exact regression proving all forward methods fail before payload/authority mutation, resume alone settles the exact receipts, and the fixed verifier maps that selector to MIGR-05 and the applicable decisions/threat."
 deferred:
   - truth: "Live PostgreSQL/AWS S3, Windows, supported-Python matrix, packaging, and performance qualification."
     addressed_in: "Phase 8"
-    evidence: "Phase 8 goal and BACK-05/QUAL-01 through QUAL-07 own reproducible release, real-service, platform, and operational-scale evidence."
+    evidence: "Phase 8 owns reproducible real-service, platform, packaging, and operational-scale release evidence."
 decision_coverage:
   honored: 22
   total: 22
@@ -73,9 +45,9 @@ decision_coverage:
 # Phase 7: Explicit Migration and Rebuild Cutover Verification Report
 
 **Phase Goal:** With workers stopped, users can explicitly migrate or rebuild supported versioned stores without silent mutation or losing the only valid copy of stored data; the tooling establishes future release migration discipline even though current pre-production layouts may be unsupported.
-**Verified:** 2026-09-11T20:37:01Z
+**Verified:** 2026-09-12T00:32:01Z
 **Status:** gaps_found
-**Re-verification:** Yes — after Plans 07-12 through 07-19 attempted the six prior gap closures.
+**Re-verification:** Yes — after Plans 07-20 through 07-22.
 
 ## Goal Achievement
 
@@ -83,128 +55,134 @@ decision_coverage:
 
 | # | Roadmap truth | Status | Evidence |
 |---|---|---|---|
-| 1 | Users can inspect without mutation and receive human- and machine-readable plans with counts, bytes, incompatibilities, and actions. | ✓ VERIFIED | Revision-bound authority inventory feeds one canonical `MigrationPlan`; the named inventory and confidential-plan tests passed. |
-| 2 | Supported same-backend migrations use offline copy-verify-switch, retain the prior copy, and never upgrade on ordinary open/initialize. | ✗ FAILED | The tested version-changing transform works, but direct invocation reproduced `mcap-v2@1` resolving to source identity `mcap-v1@1`; the declared transformation is bypassed when numeric versions match. |
-| 3 | Interrupted bounded migration resumes idempotently for durably attributed effects without losing the only valid generation. | ✗ FAILED | Local attributed STAGING recovery passes, but S3 `CacheBlobBackendError` can escape migration abort before debt checkpointing, and rebuild cleanup debt becomes terminal without settlement. |
-| 4 | Incompatible formats and cross-backend moves have an explicit, scoped, confirmed rebuild path. | ✓ VERIFIED | Include-all/exact-confirmation rebuild, registered source handler reads, canonical destination lifecycle replay, pre-acceptance projection suppression, and explicit acceptance are substantive and tested. |
-| 5 | The source-version window is explicit and projections remain derived rather than becoming cutover authority. | ✓ VERIFIED | Current/immediately-previous release policy and rebuild-only historical posture are explicit; projection work remains post-acceptance and cannot authorize publication. |
+| 1 | Users can inspect without mutation and receive human- and machine-readable plans with counts, bytes, incompatibilities, and actions. | ✓ VERIFIED | Previous evidence remains present and wired; the fixed exact-selector run continued to report MIGR-03 PASS. No Phase 20-22 change touched the inspection model or ordinary-open boundary. |
+| 2 | Supported same-backend migrations use offline copy-verify-switch, retain the prior copy, and never upgrade on ordinary open/initialize. | ✓ VERIFIED | `_configured_destination_contract()` now always selects the destination handler's declared format/version (`migration.py:1967-1990`). The same-version MCAP regression passed and proves one directed transform plus an authenticated `mcap-v2@1` candidate manifest. |
+| 3 | Interrupted bounded migration can resume idempotently for durably attributed effects without losing the only valid generation. | ✗ FAILED | Migration abort and immediate rebuild-debt resume now work, but an independently reproduced public-method sequence reaches `REBUILD_ACCEPTED` with debt; `resume()` deletes the accepted `first` entry and then raises an evidence-transition error, leaving accepted evidence with the entry absent. |
+| 4 | Incompatible formats and cross-backend moves have an explicit, scoped, confirmed rebuild path. | ✓ VERIFIED | The distinct include-all/exact-confirmation handler-backed rebuild remains present and wired. The new gap concerns recovery ordering after authentic debt, not absence of the explicit rebuild path. |
+| 5 | The source-version window is explicit and projections remain derived rather than becoming cutover authority. | ✓ VERIFIED | The current/immediately-previous release policy, rebuild-only historical posture, and post-acceptance derived projections remain unchanged and covered by the fixed selectors. |
 
-**Score:** 3/5 truths verified (0 present-but-behavior-unverified).
+**Score:** 4/5 truths verified (0 present-but-behavior-unverified).
 
-The accepted post-publication/pre-authority-checkpoint invisible orphan is not a gap. The failures above concern already attributed effects or incorrect destination-contract selection and can be fixed within the existing stopped-worker, single-authority design.
+The accepted post-publication/pre-authority-checkpoint invisible orphan remains outside guaranteed cleanup and is not a gap. The blocker uses already authenticated, authority-attributed receipts and is repairable inside the existing coordinator/evidence seam without new coordination or stronger cross-resource ACID.
+
+## Previous Gap Closure
+
+| Previous blocker | Implementation evidence | Behavioral evidence | Status |
+|---|---|---|---|
+| Same-version/different-format target collapsed to identity | Destination identity is unconditionally `(handler.payload_format, handler.payload_format_version)` at `migration.py:1967-1990`. | `test_same_version_different_format_uses_exact_directed_transform_and_destination_manifest` passed. | ✓ CLOSED |
+| Typed S3 abort errors escaped before debt checkpoint | Abort imports and narrowly handles `CacheBlobBackendError` alongside `OSError`; exact debt and per-call completion accounting remain authority-attributed. | S3 snapshot/delete retry, truthful accounting, and fail-closed ownership tests passed. | ✓ CLOSED |
+| Rebuild cleanup debt had no settlement path | `_settle_rebuild_cleanup_debt()` validates debt against authenticated receipts and authority replay, deletes/proves exact absence, checkpoints progress, and writes terminal ABORTED only after full retirement (`migration.py:2813-2885`). | Settlement, terminal-ABORTED rejection, forged-debt, and changed-owner tests passed. | ✓ CLOSED, but forward-method fencing is incomplete |
 
 ## Requirements Coverage
 
-| Requirement | Status | Evidence / blocking issue |
+| Requirement | Status | Evidence / blocker |
 |---|---|---|
-| MIGR-03 | ✓ SATISFIED | Bounded non-mutating inventory and one confidential canonical plan model produce both machine and human output. |
-| MIGR-04 | ✗ BLOCKED | Same-version/different-format payload migration can silently become an identity copy; S3 abort does not reliably checkpoint typed operational cleanup failures. |
-| MIGR-05 | ✗ BLOCKED | Rebuild cleanup debt has no deterministic settlement route after terminal ABORTED, and S3 migration abort can lose the retry checkpoint for attributed work. |
-| MIGR-06 | ✓ SATISFIED | A distinct explicit, confirmed rebuild path exists for incompatible/cross-backend cases and uses registered handlers plus destination BlobStore lifecycle. |
+| MIGR-03 | ✓ SATISFIED | Non-mutating bounded inventory and one canonical human/machine plan remain implemented and exactly mapped. |
+| MIGR-04 | ✓ SATISFIED | Same-version/different-format migrations now select the declared destination identity and execute one exact handler-owned transform; ordinary opens remain validation-only. |
+| MIGR-05 | ✗ BLOCKED | Authentic rebuild cleanup debt can progress to acceptance, after which resume deletes an accepted entry before failing its evidence checkpoint. This violates safe deterministic recovery and the no-loss phase goal. |
+| MIGR-06 | ✓ SATISFIED | A distinct explicit, scoped, confirmed rebuild through registered source handlers and destination BlobStore exists. |
 
-**Coverage:** 2/4 requirements satisfied. No Phase 7 requirement is orphaned; all four IDs appear in plan frontmatter and REQUIREMENTS.md.
+**Coverage:** 3/4 requirements satisfied. All four Phase 7 requirement IDs are claimed by plans and mapped in REQUIREMENTS.md; none is orphaned.
 
 ## Required Artifacts
 
 | Artifact | Expected | Status | Details |
 |---|---|---|---|
-| `src/cacheness/storage/migration_authority.py` | Bounded candidate descriptors and receipts | ✓ VERIFIED | Exists, substantive, and used by migration staging/verification. The former 256-entry whole-store cap is gone. |
-| `src/cacheness/storage/migration_evidence.py` | Authenticated bounded continuation, rebuild receipts, and cleanup debt | ⚠ PARTIAL | Receipt/debt fields are substantive, but terminal ABORTED cannot settle rebuild debt. |
-| `src/cacheness/storage/migration.py` | Explicit migration/rebuild coordinator | ✗ PARTIAL | Core workflows are wired, but destination selection and two cleanup paths violate required contracts. |
-| Memory/SQLite/PostgreSQL lifecycle authorities | Canonical publication and exact replay | ✓ VERIFIED | Candidate batches, exact mutation replay, and post-load PostgreSQL worker fences are implemented through the existing authority seam. |
-| `src/cacheness/handlers.py` | Store-local handler resolution and concrete transforms | ⚠ PARTIAL | Directed transform resolution is wired; the migration coordinator can incorrectly classify a changed same-version format as exact-copy. The optional registration alias remains inconsistent. |
-| `docs/STORAGE_MIGRATION.md` and public exports | One explicit operator surface and accurate bounded guarantees | ✓ VERIFIED | Public Python workflow, non-claims, confidentiality boundary, and Phase 8 ownership are present. |
-| `tools/verify_phase7_contracts.py` | Exact executable evidence manifest | ✓ VERIFIED | Uses AST-validated `path::test_name` selectors and an exact threat inventory; its current mapping nonetheless omits the three newly identified behaviors. |
+| `src/cacheness/storage/migration.py` | Exact destination selection and deterministic migration/rebuild recovery | ⚠ PARTIAL | Destination selection, S3 abort debt, exact rebuild settlement, and truthful counts are substantive and wired. Forward rebuild methods preserve debt through `REBUILD_STAGED`, `REBUILD_VERIFIED`, and `REBUILD_ACCEPTED`; resume performs cleanup before terminal-state rejection. |
+| `src/cacheness/storage/migration_evidence.py` | Authenticated bounded evidence with legal terminal invariants | ⚠ PARTIAL | ABORTED debt is rejected at lines 719-725, but REBUILD_ACCEPTED debt is allowed. |
+| `src/cacheness/storage/memory_lifecycle_authority.py` | Stable operation replay for exact cleanup ownership | ✓ VERIFIED | Promoted mutation replay retains a copied `EntrySnapshot`, preventing later key owners from rewriting historical operation evidence. |
+| `tests/test_migration_cutover.py` | Destination transform and migration-abort regressions | ✓ VERIFIED | The exact same-version transform, partial-count, and fail-closed ownership tests are active and passed. |
+| `tests/test_migration_remote_contract.py` | Deterministic S3 abort debt/retry contract | ✓ VERIFIED | The Moto-backed snapshot and delete failures checkpoint debt, avoid listing, and settle on retry; the exact test passed. |
+| `tests/test_rebuild_workflow.py` | Receipt-bound rebuild cleanup recovery | ⚠ PARTIAL | Existing tests prove immediate `resume()` settlement and forged/changed-owner refusal, but none attempts forward methods while debt exists. |
+| `tools/verify_phase7_contracts.py` | Exact fail-closed Phase 7 evidence manifest | ✗ PARTIAL | It maps the three planned repairs exactly but omits the direct-method debt-fence invariant; it reports MIGR-05 PASS despite the reproduced loss path. |
+
+The artifact verifier reported 10/10 Plan 20-22 artifacts present/substantive and 10/10 declared key links pattern-wired. Behavioral tracing supersedes those syntactic results for the incomplete rebuild recovery link.
 
 ## Key Link Verification
 
 | From | To | Via | Status | Details |
 |---|---|---|---|---|
-| Authority raw inventory | Canonical plan/report | Revision-bound authenticated assessments | ✓ WIRED | Real authority pages feed plan entries and renderings. |
-| Configured destination handler | Compatibility edge and transform | `_configured_destination_contract` then transform resolver | ✗ BROKEN | Source readability can redefine a same-version destination format as source identity. |
-| Attributed migration candidates | S3 cleanup debt | `abort` snapshot/delete exception normalization | ✗ BROKEN | `CacheBlobBackendError` is outside the caught exception types. |
-| Rebuild receipts | Exact cleanup settlement | `_abort_rebuild_after_failure` plus `resume` | ✗ NOT WIRED | Debt is recorded, but no callable path retires it after ABORTED. |
-| Digest-only plan records | Authenticated live source state | Execution-time inventory/manifest reread | ✓ WIRED | Catalog/manifest drift is checked before candidate mutation. |
-| Persisted PostgreSQL publication state | Ordinary worker admission | Post-open `require_ordinary_worker_access` | ✓ WIRED | Both initialization and direct mutation preflight use the canonical fence. |
-| Fixed claim maps | Exact pytest functions | AST selector validation and deterministic pytest union | ✓ WIRED | Removed/renamed mapped functions fail closed. |
+| Destination handler | Candidate manifest | Declared current format/version then exact directed transform | ✓ WIRED | Equal numeric versions no longer collapse distinct formats. |
+| S3 participant failure | Migration cleanup debt | Narrow typed operational-error normalization and exact authority attribution | ✓ WIRED | Both snapshot and delete failure/retry cases pass without listing/adoption. |
+| Rebuild receipts | Cleanup settlement | Authenticated receipt validation plus existing authority operation replay | ✓ WIRED | Immediate explicit resume settles exact effects and preserves changed current owners. |
+| Rebuild cleanup debt | Forward rebuild methods | Debt guard before stage/verify/accept | ✗ NOT WIRED | Each method carries debt forward rather than refusing progression. |
+| Rebuild cleanup debt | Terminal-state validation | State validation before participant deletion | ✗ BROKEN | `resume()` checks debt first at `migration.py:4334-4337`; accepted evidence can trigger deletion before the checkpoint rejects the transition. |
+| Exact fixed verifier | Direct-method debt fence | Exact regression selector in MIGR-05/decision/threat maps | ✗ NOT WIRED | The current map covers immediate settlement only, allowing a false green. |
 
 ## Data-Flow Trace
 
 | Flow | Source | Result | Status |
 |---|---|---|---|
-| Inspection | Authority inventory pages | Canonical assessments, totals, plan bytes, human rendering | ✓ FLOWING |
-| Migration candidate | Authenticated source manifest/payload | Immutable candidate, bounded authority receipt, later activation | ⚠ PARTIAL — incorrect target format for same numeric version |
-| Migration abort | Authority-attributed candidate receipt | Exact participant deletion and STAGING debt | ✗ DISCONNECTED for typed S3 operational errors |
-| Rebuild cleanup | Authenticated `BlobReceipt` batches | Exact delete/proven absence and evidence convergence | ✗ DISCONNECTED after debt enters ABORTED |
-| Rebuild publication | Authenticated source handler value | Projection-free canonical BlobStore receipt, verify, accept | ✓ FLOWING |
+| Same-version format migration | Destination handler contract plus authenticated source manifest | Directed transformed bytes and destination-identity manifest | ✓ FLOWING |
+| Migration abort | Authority-attributed candidate descriptors | Exact debt, truthful completed count, explicit retry to ABORTED | ✓ FLOWING |
+| Immediate rebuild cleanup recovery | Authenticated `BlobReceipt` batches and authority replay | Exact delete/absence proof, debt retirement, terminal ABORTED | ✓ FLOWING |
+| Debt-bearing rebuild progression | Authentic REBUILDING evidence | Debt propagates through stage, verify, and accept | ✗ UNSAFE FLOW |
+| Resume after debt-bearing acceptance | REBUILD_ACCEPTED evidence with exact debt | Accepted payload is deleted; evidence update then fails | ✗ DATA LOSS / DISAGREEMENT |
 
 ## Behavioral Spot-Checks
 
 | Behavior | Command | Result | Status |
 |---|---|---|---|
-| Entry-complete inspection | Named `test_raw_inventory_pages_every_canonical_entry_without_manifest_filtering` | Passed | ✓ PASS |
-| Attributed STAGING resume/abort | Named `test_resume_and_abort_staging_use_only_authority_attributed_batches` | Passed | ✓ PASS |
-| Version-changing transform | Named `test_migration_executes_one_handler_transform_and_publishes_destination_manifest_identity` | Passed | ✓ PASS for `mcap-v1@1 -> mcap-v2@2` |
-| Same-version format target selection | Direct call with destination `mcap-v2@1` readable from source `mcap-v1@1` | Returned `('mcap-v1', 1)` | ✗ FAIL |
-| Rebuild failure cleanup | Named `test_rebuild_verification_failure_cleans_only_exact_receipts_and_persists_debt` | Passed while asserting terminal ABORTED debt | ✗ INSUFFICIENT — no settlement behavior |
-| Confidential plan binding | Named `test_machine_plan_digest_binds_sensitive_catalog_and_manifest_without_serializing_them` | Passed | ✓ PASS |
-| Fixed all-mode verifier | `uv run --isolated --all-extras --group dev --frozen python tools/verify_phase7_contracts.py --all` | Exit 0; MIGR-03 through MIGR-06 reported PASS | ⚠ MISLEADING PASS — exact mappings do not include the three failing behaviors |
+| Planned gap repairs | Eight exact Plan 20-21 selectors in one isolated frozen pytest invocation | 11 passed (parametrization included) | ✓ PASS |
+| Fixed-manifest mappings and false-PASS renderer | Two exact verifier self-tests | 2 passed | ✓ PASS, but scope incomplete |
+| Direct-method rebuild-debt sequence | Independent Python reproduction using the public stage/verify/accept/resume methods and existing store fixtures | Reached `REBUILD_ACCEPTED` with one debt item; resume raised `CacheBlobMigrationEvidenceMismatchError`; `destination.get("first")` became `None`; evidence stayed `REBUILD_ACCEPTED` | ✗ FAIL |
 
 ## Probe Execution
 
-No conventional `scripts/**/probe-*.sh` is declared. The phase-specific fixed verifier was rerun independently above and exited zero; its evidence incompleteness is captured as a test-quality issue rather than accepted as goal proof.
+| Probe | Command | Result | Status |
+|---|---|---|---|
+| Fixed Phase 7 verifier | `uv run --isolated --all-extras --group dev --frozen python tools/verify_phase7_contracts.py --all` | The tool rendered MIGR-03 through MIGR-06 PASS, then exited 1 because the known nondeterministic Phase 3 clear/delete test failed in its embedded non-live suite. | ⚠ NON-PASS; unrelated suite failure does not explain the Phase 7 gap, while MIGR-05's rendered PASS demonstrates the missing evidence dimension |
+
+The previously recorded direct deterministic non-live run passed 1,345 tests with 9 skips. This verification observed the already documented `test_clear_and_delete_converge_after_an_exact_snapshot` interleaving failure. Per ADR 0001 and the phase boundary, it is not reclassified as a Phase 7 migration gap and does not justify another race-coordination mechanism.
 
 ## Review Finding Adjudication
 
 | Finding | Verdict | Independent evidence |
 |---|---|---|
-| CR-01 same-version format migration | CONFIRMED BLOCKER | Production branch at `migration.py:1980-1991`; direct invocation returned the source format despite a different declared destination format. |
-| CR-02 S3 abort failure checkpoint | CONFIRMED BLOCKER | S3 snapshot/delete paths raise `CacheBlobBackendError`; it is neither `OSError` nor `ValueError`, the only types caught by migration abort. |
-| CR-03 terminal rebuild cleanup debt | CONFIRMED BLOCKER | Debt counts as terminal coverage, ABORTED has no transition, rebuild resume rejects ABORTED, and `rebuild:` debt has no settlement consumer. |
-| WR-01 partial abort deleted count | CONFIRMED WARNING | Partial abort returns `deleted_entries=len(candidates)` even when debt remains. State remains STAGING, so this is misleading accounting rather than loss of authority state. |
-| WR-02 handler registration aliases | CONFIRMED WARNING | `name=` participates in duplicate validation/logging but is not stored; lookup/list/unregister use `handler.data_type`. Phase 7's normal data-type registration path remains functional. |
+| Current CR-01: debt does not fence direct rebuild progression | CONFIRMED BLOCKER | Static trace shows debt copied at `migration.py:2995`, `3031`, `3101`, and `3144`; independent execution reached accepted-with-debt and then deleted the accepted entry before evidence failure. |
+| Current WR-01: fixed verifier omits the direct-method fence | CONFIRMED WARNING / part of blocker closure | MIGR-05 maps immediate settlement and validation selectors, but no selected test attempts stage/verify/accept while debt exists. The mapping self-test passes because it validates the incomplete reviewed set. |
+| Prior CR-01: same-version target identity | CLOSED | Production destination selection and exact behavioral test agree. |
+| Prior CR-02: typed S3 abort debt | CLOSED | Narrow exception handling and deterministic S3 retry test agree. |
+| Prior CR-03: rebuild debt settlement | CLOSED WITH NEW EDGE GAP | The settlement path works when invoked immediately; it is unsafe after forward progression because debt is not fenced. |
+| Prior WR-01: abort deletion count | CLOSED | Exact partial and replay accounting assertions pass. |
+| Prior WR-02: handler `name=` alias | DEFERRED | Explicitly recorded in `deferred-items.md`; it is unrelated to Phase 7 migration/rebuild safety. |
 
 ## Test Quality Audit
 
 | Test area | Active / skipped | Assertion strength | Verdict |
 |---|---|---|---|
-| Inspection and confidential plans | Active; no disabled requirement test found | Value + behavioral | Sufficient for MIGR-03 |
-| Migration compatibility/transform | Active | Behavioral for differing name and differing version | INSUFFICIENT: no differing-format/same-version case |
-| Migration abort recovery | Active | Behavioral for local `OSError` | INSUFFICIENT: no `CacheBlobBackendError`/deterministic S3 abort case |
-| Rebuild recovery | Active | Behavioral for response loss and state resume | INSUFFICIENT: cleanup-debt test stops at terminal ABORTED and never retries |
-| Fixed verifier self-tests | Active | Structural + subprocess | INSUFFICIENT: exact selectors are exact but the claim map itself omits these behaviors |
+| Same-version destination transform | Active; no skip marker | Behavioral: transform count, authenticated manifest identity, bytes, activation round-trip | SUFFICIENT |
+| Typed S3 abort and migration debt | Active; no skip marker | Behavioral: both failure sites, zero listing, exact debt, retry settlement | SUFFICIENT |
+| Rebuild cleanup settlement | Active; no skip marker | Behavioral only for immediate resume and altered ownership | INSUFFICIENT: omits direct progression with authentic debt |
+| Fixed verifier self-tests | Active; no skip marker | Structural and subprocess assertions | INSUFFICIENT: prove exactness of the declared map, not completeness of the missing lifecycle invariant |
 
-No requirement-linked disabled test or circular expected-value generator was found. The issue is missing behavioral dimensions, not selector syntax or disabled coverage.
+No requirement-linked disabled tests or circular expected-value generator was found. The defect is a missing behavioral dimension, not a skipped or weakly asserted implementation test.
 
 ## Anti-Patterns and Prohibitions
 
-No unreferenced `TBD`, `FIXME`, or `XXX` marker, placeholder implementation, or disabled requirement-linked test was found in the Phase 7 implementation inventory.
+No unreferenced `TBD`, `FIXME`, or `XXX`, placeholder implementation, or disabled requirement-linked test was found in the Plan 20-22 implementation inventory.
 
-The inspected code continues to honor the architectural prohibitions: no ordinary implicit migration, no second lifecycle authority, no new lock/queue/lease/sidecar, no listing-based adoption, no universal native converter, no production obstore adoption, and no Phase 8 qualification claim. The three recommended repairs require only narrower contract selection and settlement through existing evidence/authority seams.
+No new lock, queue, lease, sidecar, journal, authority, listing/adoption path, cross-resource ACID claim, production obstore adoption, or perfect invisible-orphan reclamation was introduced. The required repair is a narrow ordering/state guard at the existing maintenance coordinator and evidence boundaries.
 
 ## Decision Coverage
 
-All **22/22** trackable CONTEXT.md decisions are represented in shipped artifacts according to the non-blocking GSD decision-coverage gate. This lexical coverage signal does not override the behavioral failures in D-03, D-10, D-16, D-19, and D-21.
+All **22/22** trackable CONTEXT.md decisions are represented in shipped artifacts according to the non-blocking decision-coverage gate. Lexical coverage does not override the observed D-19/D-20/D-21 recovery failure.
 
 ## Human Verification Required
 
-None — this is an infrastructure/library phase. All acceptance criteria and current failures are deterministically verifiable.
+None — this is an infrastructure/library phase and the remaining failure is deterministically reproduced.
 
 ## Deferred Items
 
-Live PostgreSQL/AWS S3, Windows, supported Python versions, packaging, and performance remain correctly assigned to Phase 8. The accepted invisible/unattributed pre-checkpoint orphan, lack of perfect orphan reclamation, absence of obstore adoption, non-cross-resource ACID, and typed bounded contention are not reopened as gaps.
+Live PostgreSQL/AWS S3, Windows, supported Python versions, packaging, and performance remain Phase 8 work. The accepted invisible/unattributed pre-checkpoint orphan, lack of perfect orphan reclamation, non-cross-resource ACID, typed bounded contention, production obstore adoption, and the unrelated handler alias decision are not reopened as Phase 7 gaps.
 
 ## Gaps Summary
 
-Three finite blockers remain:
+One finite blocker remains. Authentic rebuild cleanup debt must fence forward rebuild progression and be settled only from permitted nonterminal recovery states. Terminal accepted evidence must reject debt, and `resume()` must reject terminal-state debt before any external deletion. The exact regression must be added to the fixed verifier so MIGR-05 cannot false-green.
 
-1. Destination payload identity must come from the destination handler even when source and destination use the same numeric version.
-2. Migration abort must turn typed S3 participant operational failures into existing exact cleanup debt and later settle it.
-3. Rebuild cleanup debt must remain recoverable until exact deletion/proven absence, reaching terminal ABORTED only after settlement.
-
-These repairs do not require a new lifecycle authority, journal, lock, queue, lease, online writer protocol, listing-based adoption, or stronger ACID guarantee.
+This repair requires no new lifecycle authority, state machine, journal, lock, queue, lease, sidecar, listing/adoption behavior, or stronger atomicity guarantee.
 
 ---
 
-_Verified: 2026-09-11T20:37:01Z_
+_Verified: 2026-09-12T00:32:01Z_
 _Verifier: the agent (gsd-verifier)_
