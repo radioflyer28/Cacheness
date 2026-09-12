@@ -1,41 +1,39 @@
 ---
 phase: 07-explicit-migration-and-rebuild-cutover
-verified: 2026-09-12T00:32:01Z
+verified: 2026-09-12T02:05:49Z
 status: gaps_found
-score: 4/5 roadmap must-haves verified
-requirement_score: 3/4 requirements satisfied
+score: 8/9 must-haves verified
+roadmap_score: 5/5 roadmap truths verified
+requirement_score: 4/4 requirements satisfied
 behavior_unverified: 0
 overrides_applied: 0
 re_verification:
   previous_status: gaps_found
-  previous_score: 3/5
+  previous_score: 4/5
   gaps_closed:
-    - "Same-numeric-version/different-format migration now uses the destination handler identity and executes the exact directed transform."
-    - "Typed S3 abort operational failures now checkpoint exact attributed debt, report truthful per-call deletion counts, and settle on explicit retry while integrity and ownership mismatches fail closed."
-    - "Rebuild cleanup debt now has an authenticated receipt-bound settlement path and reaches terminal ABORTED only after every recorded receipt is settled."
+    - "Authenticated rebuild cleanup debt now fences direct stage, verify, and accept before source, payload, authority, or evidence effects."
+    - "Resume now dispatches exact cleanup only from REBUILDING or REBUILD_VERIFYING and rejects debt in every other state before participant effects."
+    - "REBUILD_ACCEPTED evidence with cleanup debt is now invalid, while permitted explicit resume settles exact receipts to debt-free ABORTED."
   gaps_remaining:
-    - "Authentic rebuild cleanup debt does not fence direct stage/verify/accept progression and can reach REBUILD_ACCEPTED; a later resume deletes an accepted entry before its evidence checkpoint fails."
-  regressions: []
+    - "The exact forward-fence/resume regression is not mapped to the required Plan 21 terminal-state threat T-07-21-03, and the Plan 23 verifier self-test does not assert that binding."
+  regressions:
+    - "The full fixed verifier again encountered the pre-existing Phase 3 SQLite fresh-root bootstrap contention failure; the exact test also failed on one rerun. This is outside the Phase 7 migration implementation and does not justify new coordination under ADR 0001, but it keeps the aggregate probe non-green."
 gaps:
-  - truth: "An interrupted bounded migration or rebuild resumes idempotently for durably attributed effects without losing the only valid generation."
+  - truth: "The fixed verifier maps the exact forward-fence/resume regression to MIGR-05, A-MIGR05, D-16/D-19/D-20/D-21, the applicable Plan 21 terminal-state threat, and every Plan 23 threat, so the lifecycle invariant cannot false-green."
     status: failed
-    reason: "Direct stage_rebuild(), verify_rebuild(), and accept_rebuild() preserve authentic cleanup debt instead of requiring settlement. resume() dispatches debt before validating the rebuild state, so accepted evidence with debt causes exact deletion of an accepted destination entry followed by a failed REBUILD_ACCEPTED evidence checkpoint."
+    reason: "The production behavior and Plan 23 threat mappings are present, but tools/verify_phase7_contracts.py leaves T-07-21-03 mapped only to test_rebuild_cleanup_retry_rejects_forged_debt_without_payload_access. The required forward-fence/resume selector is absent, and test_fixed_manifest_maps_rebuild_cleanup_debt_fence_exactly never asserts the T-07-21-03 binding. The fixed --quick verifier therefore reports MIGR-05 and the inventory PASS despite this exact contract omission."
     artifacts:
-      - path: "src/cacheness/storage/migration.py"
-        issue: "The direct rebuild methods carry cleanup_debt through forward states, and resume settles debt before rejecting terminal REBUILD_ACCEPTED."
-      - path: "src/cacheness/storage/migration_evidence.py"
-        issue: "The evidence model forbids debt only in ABORTED, allowing REBUILD_ACCEPTED evidence with outstanding cleanup debt."
       - path: "tools/verify_phase7_contracts.py"
-        issue: "MIGR-05 and Plan 21 mappings omit the direct-method debt-fence behavior, so the fixed verifier can report MIGR-05 PASS while the data-loss path exists."
+        issue: "SECURITY_THREAT_NODES['T-07-21-03'] omits test_rebuild_cleanup_debt_fences_forward_methods_and_resume_settles_exact_receipts."
+      - path: "tests/test_phase7_contract_verifier.py"
+        issue: "The Plan 23 exact-mapping self-test asserts MIGR-05, A-MIGR05, D-16/D-19/D-20/D-21, and T-07-23-01..04, but not the explicitly required T-07-21-03 edge."
     missing:
-      - "At the existing maintenance coordinator seam, reject direct stage_rebuild(), verify_rebuild(), and accept_rebuild() whenever authenticated rebuild cleanup debt exists and direct the caller to explicit resume settlement."
-      - "Permit resume settlement only from the defined nonterminal rebuild cleanup states and reject cleanup debt in REBUILD_ACCEPTED before any payload effect."
-      - "Make MaintenanceRunEvidence reject REBUILD_ACCEPTED with cleanup debt."
-      - "Add one exact regression proving all forward methods fail before payload/authority mutation, resume alone settles the exact receipts, and the fixed verifier maps that selector to MIGR-05 and the applicable decisions/threat."
+      - "Add the exact forward-fence/resume selector to SECURITY_THREAT_NODES['T-07-21-03'] without removing the existing applicable selector."
+      - "Make test_fixed_manifest_maps_rebuild_cleanup_debt_fence_exactly assert the complete T-07-21-03 mapping so later removal fails closed."
 deferred:
   - truth: "Live PostgreSQL/AWS S3, Windows, supported-Python matrix, packaging, and performance qualification."
     addressed_in: "Phase 8"
-    evidence: "Phase 8 owns reproducible real-service, platform, packaging, and operational-scale release evidence."
+    evidence: "Phase 8 goal is reproducible release evidence across supported installations, Python versions, backends, failures, and operational scale."
 decision_coverage:
   honored: 22
   total: 22
@@ -45,144 +43,127 @@ decision_coverage:
 # Phase 7: Explicit Migration and Rebuild Cutover Verification Report
 
 **Phase Goal:** With workers stopped, users can explicitly migrate or rebuild supported versioned stores without silent mutation or losing the only valid copy of stored data; the tooling establishes future release migration discipline even though current pre-production layouts may be unsupported.
-**Verified:** 2026-09-12T00:32:01Z
+**Verified:** 2026-09-12T02:05:49Z
 **Status:** gaps_found
-**Re-verification:** Yes — after Plans 07-20 through 07-22.
+**Re-verification:** Yes — after Plan 07-23.
 
 ## Goal Achievement
 
-### Observable Truths
+### Observable Roadmap Truths
 
 | # | Roadmap truth | Status | Evidence |
 |---|---|---|---|
-| 1 | Users can inspect without mutation and receive human- and machine-readable plans with counts, bytes, incompatibilities, and actions. | ✓ VERIFIED | Previous evidence remains present and wired; the fixed exact-selector run continued to report MIGR-03 PASS. No Phase 20-22 change touched the inspection model or ordinary-open boundary. |
-| 2 | Supported same-backend migrations use offline copy-verify-switch, retain the prior copy, and never upgrade on ordinary open/initialize. | ✓ VERIFIED | `_configured_destination_contract()` now always selects the destination handler's declared format/version (`migration.py:1967-1990`). The same-version MCAP regression passed and proves one directed transform plus an authenticated `mcap-v2@1` candidate manifest. |
-| 3 | Interrupted bounded migration can resume idempotently for durably attributed effects without losing the only valid generation. | ✗ FAILED | Migration abort and immediate rebuild-debt resume now work, but an independently reproduced public-method sequence reaches `REBUILD_ACCEPTED` with debt; `resume()` deletes the accepted `first` entry and then raises an evidence-transition error, leaving accepted evidence with the entry absent. |
-| 4 | Incompatible formats and cross-backend moves have an explicit, scoped, confirmed rebuild path. | ✓ VERIFIED | The distinct include-all/exact-confirmation handler-backed rebuild remains present and wired. The new gap concerns recovery ordering after authentic debt, not absence of the explicit rebuild path. |
-| 5 | The source-version window is explicit and projections remain derived rather than becoming cutover authority. | ✓ VERIFIED | The current/immediately-previous release policy, rebuild-only historical posture, and post-acceptance derived projections remain unchanged and covered by the fixed selectors. |
+| 1 | Users can inspect without mutation and receive human- and machine-readable plans with counts, bytes, incompatibilities, and actions. | ✓ VERIFIED | The previous implementation remains present; Plan 23 does not touch inspection. The independently run fixed `--quick` verifier executed the exact MIGR-03 contract and reported PASS. |
+| 2 | Supported same-backend migrations use offline copy-verify-switch, retain the prior copy, and never upgrade on ordinary open/initialize. | ✓ VERIFIED | The previous directed-transform and ordinary-open evidence remains wired. Plan 23 changes only rebuild cleanup-debt fencing, and the fixed `--quick` verifier reported MIGR-04 PASS. |
+| 3 | Interrupted bounded migration or rebuild resumes idempotently for durably attributed effects without losing the only valid generation. | ✓ VERIFIED | `stage_rebuild()`, `verify_rebuild()`, and `accept_rebuild()` read authenticated evidence then call `_require_rebuild_cleanup_settlement()` before source revalidation or participant/authority/evidence effects (`migration.py:2912-2917`, `3024-3029`, `3135-3141`). `resume()` permits settlement only in `REBUILDING`/`REBUILD_VERIFYING` before calling `_settle_rebuild_cleanup_debt()` (`migration.py:4352-4368`). The exact behavioral test passed. |
+| 4 | Incompatible formats and cross-backend moves have an explicit, scoped, confirmed rebuild path. | ✓ VERIFIED | The prior registered-handler/destination-BlobStore rebuild path remains present and was not altered except for the debt fence. The fixed `--quick` verifier reported MIGR-06 PASS. |
+| 5 | The source-version window is explicit and projections remain derived rather than becoming cutover authority. | ✓ VERIFIED | The release-window and projection-separation implementation remains unchanged; the fixed exact contract inventory passed. |
 
-**Score:** 4/5 truths verified (0 present-but-behavior-unverified).
+**Roadmap score:** 5/5 truths verified.
 
-The accepted post-publication/pre-authority-checkpoint invisible orphan remains outside guaranteed cleanup and is not a gap. The blocker uses already authenticated, authority-attributed receipts and is repairable inside the existing coordinator/evidence seam without new coordination or stronger cross-resource ACID.
+### Plan 07-23 Gap-Closure Truths
 
-## Previous Gap Closure
-
-| Previous blocker | Implementation evidence | Behavioral evidence | Status |
+| # | Truth | Status | Evidence |
 |---|---|---|---|
-| Same-version/different-format target collapsed to identity | Destination identity is unconditionally `(handler.payload_format, handler.payload_format_version)` at `migration.py:1967-1990`. | `test_same_version_different_format_uses_exact_directed_transform_and_destination_manifest` passed. | ✓ CLOSED |
-| Typed S3 abort errors escaped before debt checkpoint | Abort imports and narrowly handles `CacheBlobBackendError` alongside `OSError`; exact debt and per-call completion accounting remain authority-attributed. | S3 snapshot/delete retry, truthful accounting, and fail-closed ownership tests passed. | ✓ CLOSED |
-| Rebuild cleanup debt had no settlement path | `_settle_rebuild_cleanup_debt()` validates debt against authenticated receipts and authority replay, deletes/proves exact absence, checkpoints progress, and writes terminal ABORTED only after full retirement (`migration.py:2813-2885`). | Settlement, terminal-ABORTED rejection, forged-debt, and changed-owner tests passed. | ✓ CLOSED, but forward-method fencing is incomplete |
+| 1 | Authentic debt fences direct stage/verify/accept before effects and directs the caller to explicit resume. | ✓ VERIFIED | One private guard is called immediately after the one evidence read in all three public methods. The exact multi-step regression snapshots evidence bytes, authority identity, destination identity, source values, and participant calls; it passed. |
+| 2 | Resume dispatches cleanup only from the two defined nonterminal states and rejects terminal/other debt before payload effects. | ✓ VERIFIED | State classification precedes `_settle_rebuild_cleanup_debt()`. The same exact regression exercises rejected forward states and permitted explicit settlement; it passed. |
+| 3 | Accepted evidence cannot carry debt, while defined-state exact debt remains idempotently settleable. | ✓ VERIFIED | `MaintenanceRunEvidence.__post_init__()` rejects `REBUILD_ACCEPTED` plus debt (`migration_evidence.py:719-720`). Construction and canonical-load regression passed; permitted settlement reaches debt-free `ABORTED`. |
+| 4 | The fixed verifier owns every exact required requirement/decision/assumption/threat binding. | ✗ FAILED | MIGR-05, A-MIGR05, D-16/D-19/D-20/D-21, and Plan 23 threats include the new selector, but `T-07-21-03` does not. The self-test omits that assertion, and the fixed quick verifier still reports PASS. |
 
-## Requirements Coverage
-
-| Requirement | Status | Evidence / blocker |
-|---|---|---|
-| MIGR-03 | ✓ SATISFIED | Non-mutating bounded inventory and one canonical human/machine plan remain implemented and exactly mapped. |
-| MIGR-04 | ✓ SATISFIED | Same-version/different-format migrations now select the declared destination identity and execute one exact handler-owned transform; ordinary opens remain validation-only. |
-| MIGR-05 | ✗ BLOCKED | Authentic rebuild cleanup debt can progress to acceptance, after which resume deletes an accepted entry before failing its evidence checkpoint. This violates safe deterministic recovery and the no-loss phase goal. |
-| MIGR-06 | ✓ SATISFIED | A distinct explicit, scoped, confirmed rebuild through registered source handlers and destination BlobStore exists. |
-
-**Coverage:** 3/4 requirements satisfied. All four Phase 7 requirement IDs are claimed by plans and mapped in REQUIREMENTS.md; none is orphaned.
+**Combined score:** 8/9 must-haves verified (0 present-but-behavior-unverified).
 
 ## Required Artifacts
 
 | Artifact | Expected | Status | Details |
 |---|---|---|---|
-| `src/cacheness/storage/migration.py` | Exact destination selection and deterministic migration/rebuild recovery | ⚠ PARTIAL | Destination selection, S3 abort debt, exact rebuild settlement, and truthful counts are substantive and wired. Forward rebuild methods preserve debt through `REBUILD_STAGED`, `REBUILD_VERIFIED`, and `REBUILD_ACCEPTED`; resume performs cleanup before terminal-state rejection. |
-| `src/cacheness/storage/migration_evidence.py` | Authenticated bounded evidence with legal terminal invariants | ⚠ PARTIAL | ABORTED debt is rejected at lines 719-725, but REBUILD_ACCEPTED debt is allowed. |
-| `src/cacheness/storage/memory_lifecycle_authority.py` | Stable operation replay for exact cleanup ownership | ✓ VERIFIED | Promoted mutation replay retains a copied `EntrySnapshot`, preventing later key owners from rewriting historical operation evidence. |
-| `tests/test_migration_cutover.py` | Destination transform and migration-abort regressions | ✓ VERIFIED | The exact same-version transform, partial-count, and fail-closed ownership tests are active and passed. |
-| `tests/test_migration_remote_contract.py` | Deterministic S3 abort debt/retry contract | ✓ VERIFIED | The Moto-backed snapshot and delete failures checkpoint debt, avoid listing, and settle on retry; the exact test passed. |
-| `tests/test_rebuild_workflow.py` | Receipt-bound rebuild cleanup recovery | ⚠ PARTIAL | Existing tests prove immediate `resume()` settlement and forged/changed-owner refusal, but none attempts forward methods while debt exists. |
-| `tools/verify_phase7_contracts.py` | Exact fail-closed Phase 7 evidence manifest | ✗ PARTIAL | It maps the three planned repairs exactly but omits the direct-method debt-fence invariant; it reports MIGR-05 PASS despite the reproduced loss path. |
+| `src/cacheness/storage/migration.py` | Existing coordinator reordered around one private debt guard and state-limited resume settlement | ✓ VERIFIED | Substantive and wired. The guard precedes forward work; resume validates state before exact receipt-bound settlement. No new authority or coordination mechanism was added. |
+| `src/cacheness/storage/migration_evidence.py` | Fail-closed accepted-state cleanup-debt invariant | ✓ VERIFIED | Substantive and wired through normal construction and canonical decoding. |
+| `tests/test_rebuild_workflow.py` | Authentic-debt forward fence, pre-effect rejection, exact settlement, and evidence regressions | ✓ VERIFIED | Both exact named tests are active and independently passed. Assertions are behavioral/value-level, not existence checks. |
+| `tools/verify_phase7_contracts.py` | Literal Plan 23 inventory and all exact requirement/decision/threat mappings | ⚠ PARTIAL | Plan 23, 54 gap threats, 100 total threats, MIGR-05, decisions, assumption, and Plan 23 threats are mapped. Required `T-07-21-03` cross-binding is absent. |
+| `tests/test_phase7_contract_verifier.py` | Adversarial exact binding self-test | ⚠ PARTIAL | The exact self-test passes but never checks `T-07-21-03`; syntactic key-link verification therefore returned a false positive. |
 
-The artifact verifier reported 10/10 Plan 20-22 artifacts present/substantive and 10/10 declared key links pattern-wired. Behavioral tracing supersedes those syntactic results for the incomplete rebuild recovery link.
+The generic artifact query reported 5/5 present/substantive. Manual Level 3 semantic tracing supersedes its pattern-only result for the two partial verifier artifacts.
 
 ## Key Link Verification
 
 | From | To | Via | Status | Details |
 |---|---|---|---|---|
-| Destination handler | Candidate manifest | Declared current format/version then exact directed transform | ✓ WIRED | Equal numeric versions no longer collapse distinct formats. |
-| S3 participant failure | Migration cleanup debt | Narrow typed operational-error normalization and exact authority attribution | ✓ WIRED | Both snapshot and delete failure/retry cases pass without listing/adoption. |
-| Rebuild receipts | Cleanup settlement | Authenticated receipt validation plus existing authority operation replay | ✓ WIRED | Immediate explicit resume settles exact effects and preserves changed current owners. |
-| Rebuild cleanup debt | Forward rebuild methods | Debt guard before stage/verify/accept | ✗ NOT WIRED | Each method carries debt forward rather than refusing progression. |
-| Rebuild cleanup debt | Terminal-state validation | State validation before participant deletion | ✗ BROKEN | `resume()` checks debt first at `migration.py:4334-4337`; accepted evidence can trigger deletion before the checkpoint rejects the transition. |
-| Exact fixed verifier | Direct-method debt fence | Exact regression selector in MIGR-05/decision/threat maps | ✗ NOT WIRED | The current map covers immediate settlement only, allowing a false green. |
+| Direct rebuild methods | Authenticated evidence model | Single read, immediate cleanup-debt guard, then state-specific validation | ✓ WIRED | Guard runs before source revalidation, destination access, authority changes, or evidence replacement. |
+| Explicit resume | Existing lifecycle authority and exact payload participant | State-limited dispatch then authenticated receipt/operation replay settlement | ✓ WIRED | Only `REBUILDING` and `REBUILD_VERIFYING` with debt can enter settlement; no listing/adoption path exists. |
+| Evidence decoder | Accepted-state invariant | `MaintenanceRunEvidence.__post_init__()` on construction/from-record | ✓ WIRED | Accepted evidence with debt fails closed. |
+| Fixed verifier | Exact Plan 23 behavior test | MIGR-05, A-MIGR05, decisions, and Plan 23 threats | ⚠ PARTIAL | Most links are exact, but the required Plan 21 `T-07-21-03` terminal-state edge is missing. |
 
 ## Data-Flow Trace
 
 | Flow | Source | Result | Status |
 |---|---|---|---|
-| Same-version format migration | Destination handler contract plus authenticated source manifest | Directed transformed bytes and destination-identity manifest | ✓ FLOWING |
-| Migration abort | Authority-attributed candidate descriptors | Exact debt, truthful completed count, explicit retry to ABORTED | ✓ FLOWING |
-| Immediate rebuild cleanup recovery | Authenticated `BlobReceipt` batches and authority replay | Exact delete/absence proof, debt retirement, terminal ABORTED | ✓ FLOWING |
-| Debt-bearing rebuild progression | Authentic REBUILDING evidence | Debt propagates through stage, verify, and accept | ✗ UNSAFE FLOW |
-| Resume after debt-bearing acceptance | REBUILD_ACCEPTED evidence with exact debt | Accepted payload is deleted; evidence update then fails | ✗ DATA LOSS / DISAGREEMENT |
+| Forward rebuild call with authentic debt | Signed `MaintenanceRunEvidence` read from the exact run path | Typed offline-decision error before participant/authority/evidence mutation | ✓ FLOWING |
+| Permitted explicit resume | Authenticated receipt batches plus canonical `read_mutation(operation_id)` replay | Exact delete/absence proof, checkpointed retirement, debt-free terminal `ABORTED` | ✓ FLOWING |
+| Accepted evidence decoding | Canonical record with `REBUILD_ACCEPTED` and nonempty debt | `ValueError` before the record can be represented | ✓ FLOWING |
+| Verifier threat evidence | Fixed selector tables | New regression reaches Plan 23 threats but not `T-07-21-03` | ✗ DISCONNECTED EDGE |
 
 ## Behavioral Spot-Checks
 
 | Behavior | Command | Result | Status |
 |---|---|---|---|
-| Planned gap repairs | Eight exact Plan 20-21 selectors in one isolated frozen pytest invocation | 11 passed (parametrization included) | ✓ PASS |
-| Fixed-manifest mappings and false-PASS renderer | Two exact verifier self-tests | 2 passed | ✓ PASS, but scope incomplete |
-| Direct-method rebuild-debt sequence | Independent Python reproduction using the public stage/verify/accept/resume methods and existing store fixtures | Reached `REBUILD_ACCEPTED` with one debt item; resume raised `CacheBlobMigrationEvidenceMismatchError`; `destination.get("first")` became `None`; evidence stayed `REBUILD_ACCEPTED` | ✗ FAIL |
+| Forward methods fence debt and explicit resume settles exact receipts | Exact named `pytest` selector for `test_rebuild_cleanup_debt_fences_forward_methods_and_resume_settles_exact_receipts` | 1 passed | ✓ PASS |
+| Accepted evidence rejects cleanup debt | Exact named `pytest` selector for `test_rebuild_evidence_rejects_accepted_cleanup_debt` | 1 passed | ✓ PASS |
+| Plan 23 exact verifier mapping self-test | Exact named `pytest` selector for `test_fixed_manifest_maps_rebuild_cleanup_debt_fence_exactly` | 1 passed, despite omitting the promised `T-07-21-03` assertion | ✗ INSUFFICIENT CONTRACT |
+| Scoped lint | `ruff check` on the five Plan 23 source/test files | All checks passed | ✓ PASS |
 
 ## Probe Execution
 
 | Probe | Command | Result | Status |
 |---|---|---|---|
-| Fixed Phase 7 verifier | `uv run --isolated --all-extras --group dev --frozen python tools/verify_phase7_contracts.py --all` | The tool rendered MIGR-03 through MIGR-06 PASS, then exited 1 because the known nondeterministic Phase 3 clear/delete test failed in its embedded non-live suite. | ⚠ NON-PASS; unrelated suite failure does not explain the Phase 7 gap, while MIGR-05's rendered PASS demonstrates the missing evidence dimension |
+| Fixed Phase 7 quick verifier | `uv run --isolated --all-extras --group dev --frozen python tools/verify_phase7_contracts.py --quick` | MIGR-03 through MIGR-06 and fixed inventory reported PASS | ⚠ FALSE-GREEN for the omitted `T-07-21-03` edge |
+| Fixed Phase 7 full verifier | Same command with `--all` | Phase 7 requirement nodes reported PASS; aggregate exited 1 on `test_fresh_root_bootstrap_converges_through_sqlite` | ✗ NON-PASS |
+| Exact unrelated failing selector | Exact Phase 3 SQLite bootstrap test | Failed again with one contender receiving `CacheBlobMigrationRequiredError` | ⚠ PRE-EXISTING PHASE 3 / OUTSIDE PHASE 7 |
 
-The previously recorded direct deterministic non-live run passed 1,345 tests with 9 skips. This verification observed the already documented `test_clear_and_delete_converge_after_an_exact_snapshot` interleaving failure. Per ADR 0001 and the phase boundary, it is not reclassified as a Phase 7 migration gap and does not justify another race-coordination mechanism.
+The aggregate failure is the already documented Phase 3 fresh-root contention test. It is not caused by Plan 23 and is not converted into a new Phase 7 lifecycle gap or a demand for another lock/queue/sidecar under ADR 0001. It remains visible because the full probe is not green.
 
-## Review Finding Adjudication
+## Requirements Coverage
 
-| Finding | Verdict | Independent evidence |
-|---|---|---|
-| Current CR-01: debt does not fence direct rebuild progression | CONFIRMED BLOCKER | Static trace shows debt copied at `migration.py:2995`, `3031`, `3101`, and `3144`; independent execution reached accepted-with-debt and then deleted the accepted entry before evidence failure. |
-| Current WR-01: fixed verifier omits the direct-method fence | CONFIRMED WARNING / part of blocker closure | MIGR-05 maps immediate settlement and validation selectors, but no selected test attempts stage/verify/accept while debt exists. The mapping self-test passes because it validates the incomplete reviewed set. |
-| Prior CR-01: same-version target identity | CLOSED | Production destination selection and exact behavioral test agree. |
-| Prior CR-02: typed S3 abort debt | CLOSED | Narrow exception handling and deterministic S3 retry test agree. |
-| Prior CR-03: rebuild debt settlement | CLOSED WITH NEW EDGE GAP | The settlement path works when invoked immediately; it is unsafe after forward progression because debt is not fenced. |
-| Prior WR-01: abort deletion count | CLOSED | Exact partial and replay accounting assertions pass. |
-| Prior WR-02: handler `name=` alias | DEFERRED | Explicitly recorded in `deferred-items.md`; it is unrelated to Phase 7 migration/rebuild safety. |
+| Requirement | Source plans | Description | Status | Evidence |
+|---|---|---|---|---|
+| MIGR-03 | Phase 7 plans | Non-mutating inventory and human/machine plans | ✓ SATISFIED | Previous verified implementation; exact fixed quick contract passed. |
+| MIGR-04 | Phase 7 plans | Explicit offline same-backend copy-verify-switch with no implicit upgrade | ✓ SATISFIED | Previous verified implementation; exact fixed quick contract passed. |
+| MIGR-05 | Phase 7 plans including 07-23 | Safe resume from explicit evidence without loss or adoption | ✓ SATISFIED | The remaining behavioral loss path is closed and its exact behavioral tests pass. The blocker is the plan-required fixed-verifier cross-binding, not production behavior. |
+| MIGR-06 | Phase 7 plans | Explicit confirmed rebuild path | ✓ SATISFIED | Previous verified rebuild path remains present; exact fixed quick contract passed. |
+
+All four Phase 7 requirements are mapped to this phase and claimed by plans; none is orphaned.
 
 ## Test Quality Audit
 
-| Test area | Active / skipped | Assertion strength | Verdict |
-|---|---|---|---|
-| Same-version destination transform | Active; no skip marker | Behavioral: transform count, authenticated manifest identity, bytes, activation round-trip | SUFFICIENT |
-| Typed S3 abort and migration debt | Active; no skip marker | Behavioral: both failure sites, zero listing, exact debt, retry settlement | SUFFICIENT |
-| Rebuild cleanup settlement | Active; no skip marker | Behavioral only for immediate resume and altered ownership | INSUFFICIENT: omits direct progression with authentic debt |
-| Fixed verifier self-tests | Active; no skip marker | Structural and subprocess assertions | INSUFFICIENT: prove exactness of the declared map, not completeness of the missing lifecycle invariant |
+| Test file | Linked requirement | Active / skipped | Circular | Strongest assertion | Verdict |
+|---|---|---|---|---|---|
+| `tests/test_rebuild_workflow.py` | MIGR-05 | Active; 0 skipped markers in linked tests | No | Behavioral: authentic failure/debt creation, pre-effect state snapshots, exact settlement, terminal evidence rejection | SUFFICIENT |
+| `tests/test_phase7_contract_verifier.py` | MIGR-05 evidence manifest | Active; 0 skipped markers | No | Structural mapping equality and adversarial source mutation | INSUFFICIENT for the promised `T-07-21-03` binding |
 
-No requirement-linked disabled tests or circular expected-value generator was found. The defect is a missing behavioral dimension, not a skipped or weakly asserted implementation test.
+The verifier tests write isolated mutated copies to prove fail-closed manifest validation; they do not generate expected values from the system under test and are not circular. No requirement-linked disabled test was found.
 
 ## Anti-Patterns and Prohibitions
 
-No unreferenced `TBD`, `FIXME`, or `XXX`, placeholder implementation, or disabled requirement-linked test was found in the Plan 20-22 implementation inventory.
+No unreferenced `TBD`, `FIXME`, or `XXX`, placeholder implementation, or disabled requirement-linked test appears in the five Plan 23 files. Scoped Ruff passes.
 
-No new lock, queue, lease, sidecar, journal, authority, listing/adoption path, cross-resource ACID claim, production obstore adoption, or perfect invisible-orphan reclamation was introduced. The required repair is a narrow ordering/state guard at the existing maintenance coordinator and evidence boundaries.
+The production diff adds one private guard only. It adds no lifecycle state, persistence field, schema, lock, queue, lease, journal, sidecar, listing/adoption source, online-worker protocol, cross-resource ACID claim, production obstore integration, or live/platform/performance qualification claim. Ordinary store operations remain outside this explicit maintenance path.
 
 ## Decision Coverage
 
-All **22/22** trackable CONTEXT.md decisions are represented in shipped artifacts according to the non-blocking decision-coverage gate. Lexical coverage does not override the observed D-19/D-20/D-21 recovery failure.
+All **22/22** trackable `07-CONTEXT.md` decisions are represented in shipped artifacts according to the non-blocking decision-coverage gate. This lexical coverage does not repair the missing exact `T-07-21-03` verifier edge.
 
 ## Human Verification Required
 
-None — this is an infrastructure/library phase and the remaining failure is deterministically reproduced.
+None — this is an infrastructure/library phase, and both the repaired behavior and the remaining verifier-binding defect are deterministically testable.
 
 ## Deferred Items
 
-Live PostgreSQL/AWS S3, Windows, supported Python versions, packaging, and performance remain Phase 8 work. The accepted invisible/unattributed pre-checkpoint orphan, lack of perfect orphan reclamation, non-cross-resource ACID, typed bounded contention, production obstore adoption, and the unrelated handler alias decision are not reopened as Phase 7 gaps.
+Live PostgreSQL/AWS S3, Windows, supported Python versions, packaging, and performance qualification are explicitly Phase 8 work. ADR 0001's accepted invisible/unattributed pre-checkpoint orphan, non-cross-resource ACID, and topology-specific bounded progress remain accepted limits rather than Phase 7 gaps.
 
 ## Gaps Summary
 
-One finite blocker remains. Authentic rebuild cleanup debt must fence forward rebuild progression and be settled only from permitted nonterminal recovery states. Terminal accepted evidence must reject debt, and `resume()` must reject terminal-state debt before any external deletion. The exact regression must be added to the fixed verifier so MIGR-05 cannot false-green.
-
-This repair requires no new lifecycle authority, state machine, journal, lock, queue, lease, sidecar, listing/adoption behavior, or stronger atomicity guarantee.
+The prior data-loss path is closed in production code with strong behavioral evidence. One small but blocking plan-contract gap remains: bind the exact forward-fence/resume selector to `T-07-21-03` and make the Plan 23 self-test assert that edge. This requires only two narrow verifier/test edits and no lifecycle or coordination change.
 
 ---
 
-_Verified: 2026-09-12T00:32:01Z_
+_Verified: 2026-09-12T02:05:49Z_
 _Verifier: the agent (gsd-verifier)_
