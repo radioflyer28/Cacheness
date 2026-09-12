@@ -53,10 +53,10 @@ Phase 3 completion below is scoped to the qualified initialized local SQLite/fil
 
 - [x] **MIGR-01**: The pre-refactor public surface was characterized before ownership changes. This corpus is historical evidence, not a requirement to retain every pre-production API after the 2026-09-07 compatibility reset.
 - [x] **MIGR-02**: Stored metadata schemas and payload formats have explicit, independently versioned identifiers.
-- [ ] **MIGR-03**: Migration begins with a non-mutating inventory and produces both human-readable and machine-readable plans.
-- [ ] **MIGR-04**: Supported same-backend format and schema migrations use explicit offline resumable copy-verify-switch semantics with workers stopped; ordinary opens and initialize do not silently upgrade schemas.
+- [x] **MIGR-03**: Migration begins with a non-mutating inventory and produces both human-readable and machine-readable plans.
+- [x] **MIGR-04**: Supported same-backend format and schema migrations use explicit offline resumable copy-verify-switch semantics with workers stopped; ordinary opens and initialize do not silently upgrade schemas.
 - [x] **MIGR-05**: Interrupted offline migrations resume safely from explicit maintenance evidence without losing the only valid copy of an entry or adopting unexplained incomplete catalogs. Preserve signing material; derived-index reconstruction is not another canonical cutover authority.
-- [ ] **MIGR-06**: Incompatible formats and cross-backend moves have an explicit, confirmed rebuild path rather than implicit deletion or universal physical migration.
+- [x] **MIGR-06**: Incompatible formats and cross-backend moves have an explicit, confirmed rebuild path rather than implicit deletion or universal physical migration.
 - [x] **MIGR-07**: Unknown future formats fail explicitly rather than being guessed, rewritten, or silently deleted.
 
 ### Delivery Confidence
@@ -137,10 +137,10 @@ topology.
 | SECU-08 | Phase 2 | Complete |
 | MIGR-01 | Phase 1 | Complete |
 | MIGR-02 | Phase 2 | Complete |
-| MIGR-03 | Phase 7 | Gaps Found |
-| MIGR-04 | Phase 7 | Gaps Found |
+| MIGR-03 | Phase 7 | Complete |
+| MIGR-04 | Phase 7 | Complete |
 | MIGR-05 | Phase 7 | Complete |
-| MIGR-06 | Phase 7 | Gaps Found |
+| MIGR-06 | Phase 7 | Complete |
 | MIGR-07 | Phase 2 | Complete |
 | QUAL-01 | Phase 8 | Pending |
 | QUAL-02 | Phase 8 | Pending |
