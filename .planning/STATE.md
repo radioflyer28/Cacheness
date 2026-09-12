@@ -1,16 +1,16 @@
 ---
 gsd_state_version: 1.0
 milestone: v1.0
-current_phase: 8
-current_phase_name: Production Gates and Performance Stabilization
-status: planning
-stopped_at: Phase 07 complete, ready to plan Phase 8
-last_updated: "2026-09-12T03:10:48.571Z"
-last_activity: 2026-09-11
-last_activity_desc: Phase 07 complete, transitioned to Phase 8
-state_head: 4a90f57e26c5383c77e15e18fa4244a4e975ced1
+current_phase: 07.1
+current_phase_name: Obstore Payload Participant Unification
+status: Ready to discuss
+stopped_at: Phase 07.1 context gathered
+last_updated: "2026-09-12T17:03:12.200Z"
+last_activity: 2026-09-12
+last_activity_desc: Phase 07.1 inserted before Phase 8
+state_head: 7a7b8c68150f4b8b28b1b19d7c15e01b84c08c6a
 progress:
-  total_phases: 8
+  total_phases: 9
   completed_phases: 6
   total_plans: 105
   completed_plans: 104
@@ -24,14 +24,14 @@ milestone_name: milestone
 See: .planning/PROJECT.md (updated 2026-09-11)
 
 **Core value:** Applications can store and retrieve data reliably through one backend-neutral lifecycle, with caching policy layered above storage without compromising integrity or cleanup correctness.
-**Current focus:** Phase 08 — Production Gates and Performance Stabilization
+**Current focus:** Phase 07.1 — Obstore Payload Participant Unification
 
 ## Current Position
 
-Phase: 8 — Production Gates and Performance Stabilization
+Phase: 07.1 — Obstore Payload Participant Unification
 Plan: Not started
-Status: Ready to plan
-Last activity: 2026-09-11 — Phase 07 complete, transitioned to Phase 8
+Status: Ready to discuss
+Last activity: 2026-09-12 — Phase 07.1 inserted before Phase 8
 
 Phase 07 closed with 24/24 plans summarized and an independent 9/9 must-have
 verification pass. Its final gap binds the terminal rebuild-debt threat to the
@@ -43,7 +43,7 @@ authenticated authority evidence. Ordinary opens do not upgrade, unexplained
 payloads remain invisible and unadopted, and Phase 07 did not add a second
 lifecycle authority or claim cross-resource ACID.
 
-Roadmap progress: [█████████░] 7 of 8 phases complete. The generated disk
+Roadmap progress: [████████░░] 7 of 9 phases complete. The generated disk counter remains 6 because Phase 03 was directly qualified after a deliberately superseded plan; its canonical 24/24 roadmap disposition controls and must not be reopened merely to repair that counter.
 counter remains 6 because Phase 03 was directly qualified after a deliberately
 superseded plan; its canonical 24/24 roadmap disposition controls and must not
 be reopened merely to repair that counter.
@@ -435,6 +435,8 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 ### Roadmap Evolution
 
 - Phase 5 edited: Moved BACK-05 non-substitutable PostgreSQL/Amazon-S3 real-service qualification gate intact to Phase 8; Phase 5 retains the candidate implementation, deterministic contracts, frozen live suites, fail-closed runner, and truthful UNAVAILABLE evidence without a release support claim.
+- Phase 07.1 inserted after Phase 7: Obstore Payload Participant Unification (URGENT)
+- Phase 8 edited: edited fields: depends_on
 
 ## Deferred Items
 
@@ -448,6 +450,6 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 
 ## Session Continuity
 
-Last session: 2026-09-12T02:57:34.149Z
-Stopped at: Phase 07 complete, ready to plan Phase 8
-Resume file: None
+Last session: 2026-09-12T17:03:11.992Z
+Stopped at: Phase 07.1 context gathered
+Resume file: .planning/phases/07.1-obstore-payload-participant-unification/07.1-CONTEXT.md
