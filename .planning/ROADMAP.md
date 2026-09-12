@@ -433,7 +433,7 @@ Plans:
 
 **Accepted recovery/progress limit (checker override, 2026-09-10):** A crash after immutable payload publication but before its authority checkpoint may leave an invisible, unattributed orphan. It is never visible, never automatically adopted, and guaranteed exact cleanup is outside Phase 7. Integrity and authority visibility remain guaranteed while perfect orphan reclamation is not; resume/abort guarantees apply only to effects durably attributed in authority-owned evidence. This is an ADR 0001 topology-specific recovery/progress limit, not failed atomicity. Phase 7 adds no pre-publication maintenance intent, extra journal/lifecycle state, coordination mechanism, or production obstore adoption.
 
-**Plans**: 23 plans; 22/23 executed. Plan 07-23 closes the remaining verified rebuild cleanup-debt fence and fixed-verifier gap before independent re-verification.
+**Plans**: 23/23 plans executed; 22/23 executed. Plan 07-23 closes the remaining verified rebuild cleanup-debt fence and fixed-verifier gap before independent re-verification.
 
 Plans:
 
@@ -518,7 +518,7 @@ Plans:
 
 **Wave 19** *(gap closure; blocked on the verified Plan 07-22 baseline)*
 
-- [ ] 07-23-PLAN.md — Fence authentic rebuild cleanup debt before direct progression or terminal-state effects and bind the invariant to the fixed verifier.
+- [x] 07-23-PLAN.md — Fence authentic rebuild cleanup debt before direct progression or terminal-state effects and bind the invariant to the fixed verifier.
 
 ### Phase 8: Production Gates and Performance Stabilization
 
@@ -546,7 +546,7 @@ Plans:
 | 4. Metadata Composition and Topology Contracts | 14/14 | Complete    | 2026-09-08 |
 | 5. Payload Backends and Supported Topology Qualification | 9/9 | Complete    | 2026-09-08 |
 | 6. UnifiedCache Policy Composition | 11/11 | Complete    | 2026-09-09 |
-| 7. Explicit Migration and Rebuild Cutover | 22/22 | In Progress|  |
+| 7. Explicit Migration and Rebuild Cutover | 23/23 | In Progress|  |
 | 8. Production Gates and Performance Stabilization | 0/TBD | Not started | - |
 
 ## Backlog

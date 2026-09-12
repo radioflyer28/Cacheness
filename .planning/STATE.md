@@ -3,17 +3,17 @@ gsd_state_version: 1.0
 milestone: v1.0
 current_phase: 07
 current_phase_name: Explicit Migration and Rebuild Cutover
-status: planned
-stopped_at: Ready to execute 07-23-PLAN.md
-last_updated: "2026-09-12T01:05:37.345Z"
+status: executing
+stopped_at: Completed 07-23-PLAN.md
+last_updated: "2026-09-12T01:50:09.417Z"
 last_activity: 2026-09-11
-last_activity_desc: Phase 07 gap plan 07-23 ready to execute
-state_head: 160511fe67060c29c4dc759b5ecacab23ae78928
+last_activity_desc: Phase 07 execution started
+state_head: 1645a6af31840daf33272595420ce5639db86ba7
 progress:
   total_phases: 8
   completed_phases: 5
   total_plans: 104
-  completed_plans: 102
+  completed_plans: 103
 milestone_name: milestone
 ---
 
@@ -28,10 +28,10 @@ See: .planning/PROJECT.md (updated 2026-09-06)
 
 ## Current Position
 
-Phase: 07 (Explicit Migration and Rebuild Cutover) — READY TO EXECUTE
-Plan: 22 of 23
+Phase: 07 (Explicit Migration and Rebuild Cutover) — EXECUTING
+Plan: 2 of 23
 Status: Ready to execute
-Last activity: 2026-09-11 — Phase 07 gap plan 07-23 ready to execute
+Last activity: 2026-09-11 — Phase 07 execution started
 
 Phase 05 closed with 9/9 canonical plans summarized, 9/9 verified must-haves,
 19/19 Nyquist-covered tasks, and 43/43 canonical security threats closed
@@ -185,6 +185,7 @@ Phase 03 rows in this historical table include superseded attempts and do not de
 | Phase 07 P20 | 12min | 2 tasks | 3 files |
 | Phase 07 P21 | 18 min | 2 tasks | 4 files |
 | Phase 07 P22 | 15 min | 2 tasks | 6 files |
+| Phase 07 P23 | 36m | 1 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -418,6 +419,8 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - [Phase 07]: Terminal ABORTED rebuild evidence requires empty debt and retirement of every recorded receipt.
 - [Phase 07]: Phase 7 verification uses literal Plans 01-22 and a 50-gap/96-total threat oracle with AST-validated exact selectors.
 - [Phase 07]: WR-02 name= handling is deferred as a standalone handler-registration API-contract decision, not a migration claim.
+- [Phase 07]: Authenticated rebuild cleanup debt fences direct stage, verify, and accept operations; explicit resume remains the only settlement dispatcher.
+- [Phase 07]: Only REBUILDING and REBUILD_VERIFYING evidence may enter exact receipt cleanup; accepted evidence with debt is invalid at the model boundary.
 
 ### Pending Todos
 
@@ -448,6 +451,6 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 
 ## Session Continuity
 
-Last session: 2026-09-12T00:13:03.971Z
-Stopped at: Completed 07-22-PLAN.md
+Last session: 2026-09-12T01:50:09.285Z
+Stopped at: Completed 07-23-PLAN.md
 Resume file: None
