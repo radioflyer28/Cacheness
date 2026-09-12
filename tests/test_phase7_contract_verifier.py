@@ -389,6 +389,43 @@ def test_fixed_manifest_includes_every_gap_plan_threat_exactly_once() -> None:
     assert verifier.validate_gap_plan_threat_inventory(REPOSITORY_ROOT) == ()
 
 
+def test_fixed_manifest_maps_rebuild_cleanup_debt_fence_exactly() -> None:
+    """The direct rebuild-debt fence owns the final MIGR-05 evidence."""
+
+    verifier = _load_verifier()
+    forward_fence = (
+        "tests/test_rebuild_workflow.py::"
+        "test_rebuild_cleanup_debt_fences_forward_methods_and_resume_settles_exact_receipts"
+    )
+    accepted_evidence = (
+        "tests/test_rebuild_workflow.py::"
+        "test_rebuild_evidence_rejects_accepted_cleanup_debt"
+    )
+    verifier_selector = (
+        "tests/test_phase7_contract_verifier.py::"
+        "test_fixed_manifest_maps_rebuild_cleanup_debt_fence_exactly"
+    )
+
+    assert verifier.PHASE7_PLAN_PATHS == tuple(
+        ".planning/phases/07-explicit-migration-and-rebuild-cutover/"
+        f"07-{number:02d}-PLAN.md"
+        for number in range(1, 24)
+    )
+    assert len(verifier.GAP_PLAN_THREAT_IDS) == 54
+    assert len(verifier._DECLARED_PHASE7_THREAT_IDS) == 100
+    assert verifier.GAP_PLAN_THREAT_OWNERS[
+        ".planning/phases/07-explicit-migration-and-rebuild-cutover/07-23-PLAN.md"
+    ] == ("T-07-23-01", "T-07-23-02", "T-07-23-03", "T-07-23-04")
+    assert verifier.SECURITY_THREAT_NODES["T-07-23-01"] == (forward_fence,)
+    assert verifier.SECURITY_THREAT_NODES["T-07-23-02"] == (forward_fence,)
+    assert verifier.SECURITY_THREAT_NODES["T-07-23-03"] == (accepted_evidence,)
+    assert verifier.SECURITY_THREAT_NODES["T-07-23-04"] == (verifier_selector,)
+    assert forward_fence in verifier.MIGRATION_REQUIREMENT_NODES["MIGR-05"]
+    for decision in ("D-16", "D-19", "D-20", "D-21"):
+        assert forward_fence in verifier.DECISION_NODES[decision]
+    assert forward_fence in verifier.FLAGGED_ASSUMPTION_NODES["A-MIGR05"]
+
+
 def test_fixed_manifest_maps_current_three_gap_repairs_exactly() -> None:
     """The latest repair set cannot be satisfied by adjacent whole-file tests."""
     verifier = _load_verifier()

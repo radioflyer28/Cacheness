@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from cacheness.error_handling import (
+    CacheBlobMigrationOfflineDecisionRequiredError,
     CacheBlobMigrationEvidenceMismatchError,
     CacheBlobMigrationPlanStaleError,
     CacheBlobPayloadTamperedError,
@@ -21,7 +22,10 @@ from cacheness.storage.migration import (
     OfflineMigrationService,
     RebuildExclusion,
 )
-from cacheness.storage.migration_evidence import MaintenanceEvidenceState
+from cacheness.storage.migration_evidence import (
+    MaintenanceEvidenceState,
+    MaintenanceRunEvidence,
+)
 from cacheness.storage.projections import ProjectionController
 
 
@@ -880,6 +884,172 @@ def test_rebuild_cleanup_retry_preserves_changed_current_ownership(
         assert destination.get("first") == {"value": "new-owner"}
         assert source.get("first") == {"value": "first"}
         assert source.get("second") == {"value": "second"}
+    finally:
+        source.close()
+        destination.close()
+
+
+def test_rebuild_cleanup_debt_fences_forward_methods_and_resume_settles_exact_receipts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only explicit resume may settle authentic nonterminal rebuild debt."""
+
+    provider = _SharedMemoryKeyProvider()
+    source = _store(tmp_path / "source", provider)
+    destination = _store(tmp_path / "destination", provider)
+    try:
+        source.put_entry({"value": "first"}, key="first")
+        source.put_entry({"value": "second"}, key="second")
+        service = _service(source, destination, tmp_path / "maintenance")
+        plan = service.create_rebuild_plan(service.inspect())
+        service.confirm_rebuild(plan, confirmation=service.rebuild_confirmation(plan))
+        original_stage_entry = service._stage_rebuild_entry
+        original_delete = destination.delete
+        original_get_entry_info = destination.get_entry_info
+        original_open_entry = destination.open_entry
+        original_delete_migration_payload = destination.delete_migration_payload
+        original_revalidate = service._revalidate_plan_source_state
+
+        def stage_then_fail(rebuild_plan, assessment, entry_ordinal):
+            if entry_ordinal == 1:
+                raise OSError("rebuild staging failed")
+            return original_stage_entry(rebuild_plan, assessment, entry_ordinal)
+
+        def fail_cleanup(*_args, **_kwargs):
+            raise OSError("cleanup participant unavailable")
+
+        monkeypatch.setattr(service, "_stage_rebuild_entry", stage_then_fail)
+        monkeypatch.setattr(destination, "delete", fail_cleanup)
+        with pytest.raises(OSError, match="rebuild staging failed"):
+            service.stage_rebuild(plan)
+
+        evidence = service.read_evidence()
+        receipt = evidence.rebuild_receipt_batches[0].receipts[0]
+        assert evidence.state is MaintenanceEvidenceState.REBUILDING
+        assert evidence.cleanup_debt == (service._rebuild_cleanup_debt(receipt),)
+        original_entry = original_get_entry_info("first")
+        assert original_entry is not None
+        original_source = (source.get("first"), source.get("second"))
+
+        participant_accesses: list[str] = []
+
+        def unexpected_participant_access(*_args, **_kwargs):
+            participant_accesses.append("payload")
+            raise AssertionError("forward methods must fence debt before payload access")
+
+        def unexpected_revalidation(*_args, **_kwargs):
+            participant_accesses.append("revalidation")
+            raise AssertionError("forward methods must fence debt before revalidation")
+
+        monkeypatch.setattr(
+            service, "_revalidate_plan_source_state", unexpected_revalidation
+        )
+        monkeypatch.setattr(destination, "get_entry_info", unexpected_participant_access)
+        monkeypatch.setattr(destination, "open_entry", unexpected_participant_access)
+        monkeypatch.setattr(destination, "delete", unexpected_participant_access)
+        monkeypatch.setattr(
+            destination, "delete_migration_payload", unexpected_participant_access
+        )
+
+        def write_authenticated_debt(state: MaintenanceEvidenceState) -> None:
+            nonlocal evidence
+            evidence = service._write_evidence(
+                service._new_evidence(
+                    state=state,
+                    plan_digest=plan.digest,
+                    source_identity=plan.source_identity,
+                    destination_identity=plan.destination_identity,
+                    completed_steps=evidence.completed_steps,
+                    authority_receipts=evidence.authority_receipts,
+                    cleanup_debt=evidence.cleanup_debt,
+                    **service._rebuild_progress(evidence),
+                    completed_output_digests=evidence.completed_output_digests,
+                )
+            )
+
+        for state, operation in (
+            (MaintenanceEvidenceState.REBUILDING, service.stage_rebuild),
+            (MaintenanceEvidenceState.REBUILD_STAGED, service.verify_rebuild),
+            (MaintenanceEvidenceState.REBUILD_VERIFIED, service.accept_rebuild),
+        ):
+            if evidence.state is not state:
+                if state is MaintenanceEvidenceState.REBUILD_VERIFIED:
+                    write_authenticated_debt(MaintenanceEvidenceState.REBUILD_VERIFYING)
+                write_authenticated_debt(state)
+            original_bytes = service.evidence_path.read_bytes()
+            participant_accesses.clear()
+
+            with pytest.raises(
+                CacheBlobMigrationOfflineDecisionRequiredError,
+                match="resume",
+            ):
+                operation(plan)
+
+            assert service.evidence_path.read_bytes() == original_bytes
+            assert original_get_entry_info("first") == original_entry
+            assert (source.get("first"), source.get("second")) == original_source
+            assert participant_accesses == []
+
+        monkeypatch.setattr(destination, "delete", original_delete)
+        monkeypatch.setattr(destination, "get_entry_info", original_get_entry_info)
+        monkeypatch.setattr(destination, "open_entry", original_open_entry)
+        monkeypatch.setattr(
+            destination,
+            "delete_migration_payload",
+            original_delete_migration_payload,
+        )
+        monkeypatch.setattr(service, "_revalidate_plan_source_state", original_revalidate)
+        write_authenticated_debt(MaintenanceEvidenceState.REBUILDING)
+        resumed = service.resume(
+            plan, run_id=service.run_id, evidence_path=service.evidence_path
+        )
+
+        settled = service.read_evidence()
+        assert resumed.state is MaintenanceEvidenceState.ABORTED
+        assert settled.cleanup_debt == ()
+        assert settled.retired_rebuild_operation_ids == (receipt.operation_id,)
+        assert original_get_entry_info("first") is None
+        assert (source.get("first"), source.get("second")) == original_source
+    finally:
+        source.close()
+        destination.close()
+
+
+def test_rebuild_evidence_rejects_accepted_cleanup_debt(tmp_path: Path) -> None:
+    """Accepted rebuild evidence cannot retain an authenticated cleanup receipt."""
+
+    provider = _SharedMemoryKeyProvider()
+    source = _store(tmp_path / "source", provider)
+    destination = _store(tmp_path / "destination", provider)
+    try:
+        source.put_entry({"value": "entry"}, key="entry")
+        service = _service(source, destination, tmp_path / "maintenance")
+        plan = service.create_rebuild_plan(service.inspect())
+        service.confirm_rebuild(plan, confirmation=service.rebuild_confirmation(plan))
+        service.stage_rebuild(plan)
+        evidence = service.read_evidence()
+        receipt = evidence.rebuild_receipt_batches[0].receipts[0]
+        cleanup_debt = (service._rebuild_cleanup_debt(receipt),)
+
+        with pytest.raises(ValueError, match="REBUILD_ACCEPTED rebuild evidence"):
+            service._new_evidence(
+                state=MaintenanceEvidenceState.REBUILD_ACCEPTED,
+                plan_digest=plan.digest,
+                source_identity=plan.source_identity,
+                destination_identity=plan.destination_identity,
+                completed_steps=evidence.completed_steps,
+                authority_receipts=evidence.authority_receipts,
+                cleanup_debt=cleanup_debt,
+                **service._rebuild_progress(evidence),
+                completed_output_digests=evidence.completed_output_digests,
+            )
+
+        record = evidence.to_record()
+        record["state"] = MaintenanceEvidenceState.REBUILD_ACCEPTED.value
+        record["cleanup_debt"] = list(cleanup_debt)
+        with pytest.raises(ValueError, match="REBUILD_ACCEPTED rebuild evidence"):
+            MaintenanceRunEvidence.from_record(record)
     finally:
         source.close()
         destination.close()
