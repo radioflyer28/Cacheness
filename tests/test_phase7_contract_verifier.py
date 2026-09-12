@@ -393,6 +393,10 @@ def test_fixed_manifest_maps_rebuild_cleanup_debt_fence_exactly() -> None:
     """The direct rebuild-debt fence owns the final MIGR-05 evidence."""
 
     verifier = _load_verifier()
+    forged_debt = (
+        "tests/test_rebuild_workflow.py::"
+        "test_rebuild_cleanup_retry_rejects_forged_debt_without_payload_access"
+    )
     forward_fence = (
         "tests/test_rebuild_workflow.py::"
         "test_rebuild_cleanup_debt_fences_forward_methods_and_resume_settles_exact_receipts"
@@ -420,6 +424,10 @@ def test_fixed_manifest_maps_rebuild_cleanup_debt_fence_exactly() -> None:
     assert verifier.SECURITY_THREAT_NODES["T-07-23-02"] == (forward_fence,)
     assert verifier.SECURITY_THREAT_NODES["T-07-23-03"] == (accepted_evidence,)
     assert verifier.SECURITY_THREAT_NODES["T-07-23-04"] == (verifier_selector,)
+    assert verifier.SECURITY_THREAT_NODES["T-07-21-03"] == (
+        forged_debt,
+        forward_fence,
+    )
     assert forward_fence in verifier.MIGRATION_REQUIREMENT_NODES["MIGR-05"]
     for decision in ("D-16", "D-19", "D-20", "D-21"):
         assert forward_fence in verifier.DECISION_NODES[decision]
@@ -454,6 +462,10 @@ def test_fixed_manifest_maps_current_three_gap_repairs_exactly() -> None:
         "tests/test_rebuild_workflow.py::"
         "test_rebuild_cleanup_retry_rejects_forged_debt_without_payload_access"
     )
+    forward_fence = (
+        "tests/test_rebuild_workflow.py::"
+        "test_rebuild_cleanup_debt_fences_forward_methods_and_resume_settles_exact_receipts"
+    )
     changed_owner = (
         "tests/test_rebuild_workflow.py::"
         "test_rebuild_cleanup_retry_preserves_changed_current_ownership"
@@ -486,7 +498,10 @@ def test_fixed_manifest_maps_current_three_gap_repairs_exactly() -> None:
     assert verifier.SECURITY_THREAT_NODES["T-07-20-04"] == (abort_count,)
     assert verifier.SECURITY_THREAT_NODES["T-07-21-01"] == (rebuild_settlement,)
     assert verifier.SECURITY_THREAT_NODES["T-07-21-02"] == (terminal_evidence,)
-    assert verifier.SECURITY_THREAT_NODES["T-07-21-03"] == (forged_debt,)
+    assert verifier.SECURITY_THREAT_NODES["T-07-21-03"] == (
+        forged_debt,
+        forward_fence,
+    )
     assert verifier.SECURITY_THREAT_NODES["T-07-21-04"] == (changed_owner,)
     assert verifier.SECURITY_THREAT_NODES["T-07-22-01"] == (
         "tests/test_phase7_contract_verifier.py::"
