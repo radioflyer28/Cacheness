@@ -288,3 +288,50 @@ policy, or perfect reclamation of invisible pre-checkpoint orphans.
 - [x] nyquist_compliant: true
 
 Approval: deterministic local Phase 7 gate complete; Phase 8 owns every listed non-qualification boundary.
+
+## Current verified gap-cycle evidence — Plans 07-20 through 07-22 (2026-09-11)
+
+This dated section supersedes only the stale Plan 07-19 completion disposition:
+the prior 84-threat/70-selector report did not bind the three verifier-identified
+behaviors. Historical execution observations above remain intact. The repaired
+literal verifier now owns Plans 01–22, exactly 50 unique gap-plan threat rows,
+and exactly 96 unique Phase 7 threat IDs. It validates each literal path and
+AST-level `path::test_name` selector before pytest, so removing a current-gap
+plan row or behavior cannot be hidden by an adjacent passing module.
+
+| Command | Environment | Exit | Observed result |
+|---|---|---:|---|
+| `uv run --isolated --all-extras --group dev --frozen python tools/verify_phase7_contracts.py --quick` | isolated locked all-extras/dev | 0 | `MIGR-03` through `MIGR-06` reported `PASS`; 75 exact quick selectors cover 92 passing cases. The deterministic PostgreSQL adapter selector remains outside quick mode. |
+| `uv run --isolated --all-extras --group dev --frozen python tools/verify_phase7_contracts.py --all` | isolated locked all-extras/dev | 0 | Fixed manifest, 50-gap/96-total threat ownership, active coverage-detector comparison, 79 exact all selectors, its deterministic non-live suite, and scoped Ruff passed. Live PostgreSQL/AWS S3 modules remained NOT RUN / NOT QUALIFIED. |
+| `uv run --isolated --all-extras --group dev --frozen python -c '… fixed_pytest_nodes(False) … pytest -q …'` | isolated locked all-extras/dev | 0 | 79 exact all selectors executed 96 passing cases with zero selector skips or failures. |
+| `uv run --isolated --all-extras --group dev --frozen pytest -q --ignore=tests/integration/test_postgresql_authority.py --ignore=tests/integration/test_remote_topology.py --ignore=tests/integration/test_s3_generation.py -o log_cli=false -o addopts=` | isolated locked all-extras/dev | 1 | 1344 passed, 9 skipped, and the known unrelated `tests/test_blob_store_concurrency.py::test_clear_and_delete_converge_after_an_exact_snapshot` raised `CacheBlobLifecycleConflictError`. This direct rerun is recorded as a Phase 3 concurrency observation, not rendered as PASS, retried, or repaired in Phase 7. |
+
+| Requirement or review item | Exact current evidence | Current disposition |
+|---|---|---|
+| MIGR-03 | Existing non-mutating inspection, canonical-plan, and public-workflow selectors remain in the fixed map. | PASS (`--all`) |
+| MIGR-04 | `test_same_version_different_format_uses_exact_directed_transform_and_destination_manifest`; `test_s3_abort_typed_operational_failures_checkpoint_exact_debt_and_retry`. | PASS (`--all`) |
+| MIGR-05 | Typed S3 abort debt/retry, `test_partial_abort_receipt_counts_only_deleted_or_proven_absent_candidates`, rebuild debt settlement, terminal-evidence rejection, forged-debt refusal, and changed-current-owner preservation. | PASS (`--all`) |
+| MIGR-06 | Existing registered-handler/destination-BlobStore rebuild selectors plus exact receipt-bound settlement and changed-owner preservation. | PASS (`--all`) |
+| WR-01 | Plan 07-20's exact partial-abort receipt-count selector proves `deleted_entries` reflects only deletion or proven absence in the current call. | CLOSED (`--all`) |
+| WR-02 | The custom-handler `name=` alias behavior is unrelated to these three migration gaps and is recorded below in `deferred-items.md`. | DEFERRED — no Phase 7 completion claim |
+
+The current requirements are marked PASS only because every selector named by
+their fixed maps executed successfully in the all-mode evidence. The later
+direct full-suite failure above has no mapped current-gap selector and is kept
+as a visible non-PASS observation rather than concealed by the all-mode result.
+
+### Preserved boundaries
+
+- `07-COVERAGE.md` remains the authoritative no-external-API declaration.
+- A crash after immutable publication and before authority checkpoint may leave
+  an invisible, unattributed, unadopted orphan outside exact reclamation; this
+  accepted ADR 0001 limit is not reopened.
+- Metadata authority and filesystem/S3 payload effects are not one
+  cross-resource ACID transaction. Typed operational interruption leaves exact
+  attributed debt; integrity, receipt, ownership, and forged-evidence failures
+  remain fail closed.
+- Live PostgreSQL/Amazon-S3 services, Windows, supported-Python matrix,
+  packaging, and performance qualification remain Phase 8 work. Deterministic
+  S3/PostgreSQL adapters are not live-service qualification.
+- No production obstore adoption, handler stream cutover, managed-locator
+  exposure, or conditional-publication policy is claimed by Phase 7.
