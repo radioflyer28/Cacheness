@@ -524,10 +524,59 @@ Plans:
 
 - [x] 07-24-PLAN.md — Bind the forward-fence/resume regression to the existing Plan 21 terminal-state threat and make the fixed verifier fail closed on either missing selector.
 
+### Phase 07.1: Obstore Payload Participant Unification (INSERTED)
+
+**Goal:** Users get one obstore-backed payload participant for filesystem, memory, and S3 while BlobStore's lifecycle authority remains the sole owner of intent, visibility, reconciliation, and cleanup debt.
+**Requirements**: [STOR-01, STOR-02, STOR-03, STOR-04, STOR-05, STOR-06, STOR-07, STOR-08, BACK-01, BACK-02, BACK-03, BACK-04, BACK-06, BACK-07, CACH-01, CACH-02, CACH-03, SECU-01, SECU-03, SECU-04, SECU-05, SECU-07, SECU-08, MIGR-01, MIGR-02, MIGR-03, MIGR-04, MIGR-05, MIGR-06, MIGR-07, QUAL-01, QUAL-04, QUAL-07]
+**Depends on:** Phase 7
+**Plans:** 11 plans
+
+Plans:
+**Wave 1**
+
+- [ ] 07.1-01-PLAN.md — Human package-legitimacy gate for exact obstore 0.11.1.
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [ ] 07.1-02-PLAN.md — Pin obstore and prove the complete consumed SDK surface before production edits.
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [ ] 07.1-03-PLAN.md — Build the shared local/memory adapter and preserve guarded path handlers.
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
+- [ ] 07.1-04-PLAN.md — Qualify mocked-S3 direct publication, recovery, bounds, and D-16 configuration policy.
+
+**Wave 5** *(blocked on Wave 4 completion)*
+
+- [ ] 07.1-05-PLAN.md — Authenticate immutable-payload-bound transport evidence in the existing verification transition.
+
+**Wave 6** *(blocked on Wave 5 completion)*
+
+- [ ] 07.1-06-PLAN.md — Persist transport evidence in explicit SQLite/PostgreSQL authority schema versions.
+
+**Wave 7** *(blocked on Wave 6 completion)*
+
+- [ ] 07.1-07-PLAN.md — Expose a read-only authoritative-generation transport comparison API.
+- [ ] 07.1-08-PLAN.md — Route migration, rebuild, and reconciliation payload effects through the participant.
+
+**Wave 8** *(blocked on Wave 7 completion)*
+
+- [ ] 07.1-09-PLAN.md — Atomically cut all built-in topology factories over to obstore.
+
+**Wave 9** *(blocked on Wave 8 completion)*
+
+- [ ] 07.1-10-PLAN.md — Delete custom/boto3/multipart mechanics and update retained contract suites.
+
+**Wave 10** *(blocked on Wave 9 completion)*
+
+- [ ] 07.1-11-PLAN.md — Close packaging, documentation, fixed verification, and Phase 8 non-claim boundaries.
+
 ### Phase 8: Production Gates and Performance Stabilization
 
 **Goal**: Users can rely on reproducible release evidence across supported installations, Python versions, backends, failures, and operational scale.
-**Depends on**: Phase 7
+**Depends on**: Phase 07.1
 **Requirements**: BACK-05, QUAL-01, QUAL-02, QUAL-03, QUAL-04, QUAL-05, QUAL-06, QUAL-07
 **Success Criteria** (what must be TRUE):
 
