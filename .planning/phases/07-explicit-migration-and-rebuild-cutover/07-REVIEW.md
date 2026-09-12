@@ -1,195 +1,123 @@
 ---
 phase: 07-explicit-migration-and-rebuild-cutover
-reviewed: 2026-09-11T20:28:13Z
+reviewed: 2026-09-12T00:23:53Z
 depth: standard
-files_reviewed: 31
+files_reviewed: 8
 files_reviewed_list:
-  - docs/BACKEND_SELECTION.md
-  - docs/STORAGE_INITIALIZATION.md
-  - docs/STORAGE_MIGRATION.md
-  - src/cacheness/error_handling.py
-  - src/cacheness/handlers.py
-  - src/cacheness/interfaces.py
-  - src/cacheness/storage/__init__.py
-  - src/cacheness/storage/backends/postgresql_lifecycle_authority.py
-  - src/cacheness/storage/backends/s3_backend.py
-  - src/cacheness/storage/blob_store.py
-  - src/cacheness/storage/lifecycle.py
-  - src/cacheness/storage/lifecycle_authority.py
-  - src/cacheness/storage/memory_lifecycle_authority.py
   - src/cacheness/storage/migration.py
-  - src/cacheness/storage/migration_authority.py
   - src/cacheness/storage/migration_evidence.py
-  - src/cacheness/storage/sqlite_lifecycle_authority.py
-  - tests/contracts/test_lifecycle_authority.py
-  - tests/contracts/test_postgresql_lifecycle_authority.py
-  - tests/test_blob_store_atomic_lifecycle.py
-  - tests/test_handler_registration.py
+  - src/cacheness/storage/memory_lifecycle_authority.py
   - tests/test_migration_cutover.py
-  - tests/test_migration_inspection.py
-  - tests/test_migration_plan_contract.py
-  - tests/test_migration_public_contract.py
   - tests/test_migration_remote_contract.py
-  - tests/test_migration_run_evidence.py
-  - tests/test_phase7_contract_verifier.py
   - tests/test_rebuild_workflow.py
-  - tests/test_stored_compatibility.py
   - tools/verify_phase7_contracts.py
+  - tests/test_phase7_contract_verifier.py
 findings:
-  critical: 3
-  warning: 2
+  critical: 1
+  warning: 1
   info: 0
-  total: 5
+  total: 2
 status: issues_found
 ---
 
 # Phase 7: Code Review Report
 
-**Reviewed:** 2026-09-11T20:28:13Z
+**Reviewed:** 2026-09-12T00:23:53Z
 **Depth:** standard
-**Files Reviewed:** 31
+**Files Reviewed:** 8
 **Status:** issues_found
 
 ## Summary
 
-The reviewed Phase 7 surface still has three shipping blockers: an executable
-same-version format migration can be misclassified as an identity copy, normal
-migration abort does not persist the S3 participant's typed operational
-failures as cleanup debt, and rebuild cleanup debt is placed in a terminal
-state with no settlement path. Two public-result/handler-registration defects
-also make outcomes misleading or registrations ineffective.
+The destination-format and typed S3 abort repairs are correctly scoped, and the
+normal `resume()` rebuild-debt test converges through authenticated receipts.
+However, rebuild cleanup debt does not actually fence the other public rebuild
+methods. A caller can continue staging, verify, and accept a rebuild while old
+cleanup debt remains. A later `resume()` then deletes an accepted destination
+entry before failing to checkpoint the illegal `REBUILD_ACCEPTED -> ABORTED`
+transition. This is a demonstrated data-loss path and blocks shipment.
 
-These findings stay inside the approved ADR 0001 boundary. They do not require
-cross-resource ACID, listing-based adoption, obstore adoption, or another lock,
-queue, lease, journal, coordinator, sidecar, or authority. The accepted
-post-publication/pre-checkpoint orphan limit and Phase 8-owned live-platform,
-performance, and Python-matrix qualification are not findings.
+The review does not reopen ADR 0001's accepted invisible pre-checkpoint orphan,
+request cross-resource ACID, or recommend another lock, queue, lease, journal,
+sidecar, authority, listing/adoption mechanism, or obstore integration.
 
 ## Narrative Findings (AI reviewer)
 
 ## Critical Issues
 
-### CR-01 [BLOCKER]: A format change is silently bypassed when its numeric version is unchanged
+### CR-01 [BLOCKER]: Cleanup debt does not fence direct rebuild progression, allowing accepted data to be deleted
 
-**File:** `src/cacheness/storage/migration.py:1966-1995`
+**Files:** `src/cacheness/storage/migration.py:2929-2996`,
+`src/cacheness/storage/migration.py:3018-3102`,
+`src/cacheness/storage/migration.py:3124-3145`,
+`src/cacheness/storage/migration.py:4334-4337`, and
+`src/cacheness/storage/migration_evidence.py:719-725`
 
-**Issue:** `_configured_destination_contract()` substitutes the source
-`(payload_format, payload_format_version)` whenever the destination handler has
-the same numeric version and can read the source. A handler whose current
-native contract is `("mcap-v2", 1)` and which declares a directed edge from
-`("mcap-v1", 1)` therefore gets a target of `("mcap-v1", 1)`. Inspection and
-staging treat the entry as an identity-compatible byte copy, so the directed
-handler transformation is never called and the candidate manifest continues
-to advertise the old format. This violates D-03/D-10 and Plan 07-16's exact
-destination-contract requirement; payload format is an independently relevant
-part of the contract even when its version integer happens to match.
+**Issue:** `_abort_rebuild_after_failure()` now correctly leaves failed exact
+cleanup in nonterminal evidence, but `stage_rebuild()`, `verify_rebuild()`, and
+`accept_rebuild()` all carry `evidence.cleanup_debt` forward instead of refusing
+progress until it is settled. `MaintenanceRunEvidence` prohibits debt only in
+`ABORTED`, so it permits `REBUILD_ACCEPTED` evidence with outstanding debt.
+Meanwhile, `resume()` dispatches on `cleanup_debt` before checking the evidence
+state.
 
-**Fix:** Always derive the target identity from the destination handler's
-declared current contract. Use `supports_payload_contract()` only to decide
-whether the source is readable, never to redefine the destination.
+This is exploitable through the documented public methods without forging
+evidence. I reproduced the following sequence with the existing test fixtures:
 
-```python
-target_identity = (payload_format, payload_version)
-destination_versions = StoreVersionDimensions(
-    payload_format_version=payload_version,
-)
-```
+1. Stage entry one; fail staging entry two; fail cleanup before deleting entry one.
+2. Call `stage_rebuild(plan)` directly after restoring the participant. It reaches
+   `REBUILD_STAGED` while retaining cleanup debt.
+3. Call `verify_rebuild(plan)` and `accept_rebuild(plan)`. Both succeed while debt
+   remains, producing `REBUILD_ACCEPTED` evidence.
+4. Call `resume(...)`. It deletes the accepted `first` entry, then evidence
+   checkpointing rejects the terminal transition. The observed final state was
+   `REBUILD_ACCEPTED` with `destination.get("first") is None`.
 
-Add a migration regression with different source/target format names but the
-same version number and assert that the exact directed transform runs and the
-candidate manifest contains the destination format.
+The external delete preceding the failed checkpoint makes this a real data-loss
+and metadata/payload-disagreement bug, not a request for stronger cross-resource
+atomicity. It also violates the intended rule that cleanup debt must settle before
+terminal acceptance or abort.
 
-### CR-02 [BLOCKER]: S3 abort failures escape before cleanup debt is checkpointed
-
-**Files:** `src/cacheness/storage/migration.py:3943-3967`, `src/cacheness/storage/backends/s3_backend.py:658-815`, `src/cacheness/error_handling.py:443`
-
-**Issue:** `OfflineMigrationService.abort()` converts only `OSError` and
-`ValueError` into durable cleanup debt. The S3 participant deliberately
-normalizes failed `HEAD`, `GET`, delete, and absence-proof operations to
-`CacheBlobBackendError`, which derives from `CacheStorageError`, not
-`OSError`. An expected remote outage during either `open_snapshot()` or
-`delete_migration_payload()` consequently escapes the abort loop without the
-required debt checkpoint or typed partial `AbortReceipt`. The authority still
-attributes the candidate, so this is fixable without stronger coordination,
-but the implemented remote path does not satisfy Plan 07-12's requirement that
-bounded deletion failures persist as retryable cleanup debt.
-
-**Fix:** Catch the participant's typed operational error explicitly and record
-the existing retirement digest in the current evidence, while continuing to
-fail closed for ownership/integrity conflicts.
-
-```python
-except (OSError, ValueError, CacheBlobBackendError):
-    cleanup_debt.append(retirement)
-```
-
-Add a deterministic S3-adapter abort test that injects both snapshot and delete
-failures and verifies `STAGING` evidence contains the exact attributed debt and
-that a later retry settles it without listing or adoption.
-
-### CR-03 [BLOCKER]: Rebuild cleanup debt is called retryable but is written into an unrecoverable terminal state
-
-**Files:** `src/cacheness/storage/migration.py:2705-2780`, `src/cacheness/storage/migration.py:4219-4243`, `src/cacheness/storage/migration_evidence.py:225-235`, `tests/test_rebuild_workflow.py:577-625`
-
-**Issue:** `_abort_rebuild_after_failure()` records exact receipt-backed debt
-and then unconditionally checkpoints `ABORTED` once every receipt is either
-retired or merely represented by debt. `ABORTED` has no legal transition, and
-the rebuild branch of `resume()` rejects it. No other reviewed path parses or
-settles `rebuild:<operation_id>:<key>:<generation>:<locator>` debt. The existing
-test labels the debt retryable while asserting the terminal state, but never
-proves a retry. As a result, an operationally failed exact delete can leave a
-destination entry present forever with evidence that cannot be advanced or
-cleared. This contradicts ADR 0001's durable cleanup-debt invariant and Plan
-07-15's promised retryable receipt-bound cleanup.
-
-**Fix:** Reuse the existing authenticated rebuild receipts and authority as the
-only inputs to an explicit retry path. Keep the run in an existing resumable
-rebuild cleanup condition while debt remains (or permit only the narrow
-receipt-bound retry from `ABORTED`), remove a debt item only after exact
-deletion/proven absence, and enter terminal `ABORTED` only after every item is
-settled. Do not add another intent layer or coordination mechanism. Extend the
-failure test to restore the participant, retry exact cleanup, and prove both
-the payload state and authenticated evidence converge.
+**Fix:** Add one narrow debt guard at the existing maintenance coordinator seam.
+Reject direct `stage_rebuild()`, `verify_rebuild()`, and `accept_rebuild()` calls
+whenever authenticated rebuild cleanup debt exists, directing the caller to the
+explicit receipt-bound `resume()` settlement path. In `resume()`, allow debt
+settlement only from the defined nonterminal rebuild cleanup states and reject
+debt in `REBUILD_ACCEPTED`. Strengthen `MaintenanceRunEvidence.__post_init__()` so
+`REBUILD_ACCEPTED` cannot contain cleanup debt. No new state machine or lifecycle
+authority is required.
 
 ## Warnings
 
-### WR-01 [WARNING]: Partial abort receipts report failed candidates as deleted
+### WR-01 [WARNING]: The fixed verifier can report MIGR-05 PASS without exercising the direct-method debt fence
 
-**File:** `src/cacheness/storage/migration.py:3940-3989`
+**Files:** `tools/verify_phase7_contracts.py:146-159` and
+`tests/test_phase7_contract_verifier.py:371-455`
 
-**Issue:** When any candidate deletion fails, `abort()` correctly returns a
-nonterminal `STAGING` receipt but sets `deleted_entries=len(candidates)`.
-Candidates represented by `cleanup_debt` were not deleted (and may still be
-present), so the public field overstates completed cleanup. Operator automation
-can interpret a partial failure as full physical retirement even though the
-receipt's state says otherwise.
+**Issue:** The new MIGR-05 selector set proves the happy `resume()` settlement,
+terminal-ABORTED validation, forged-debt rejection, and changed-owner handling,
+but no selected test attempts `stage_rebuild()`, `verify_rebuild()`, or
+`accept_rebuild()` while cleanup debt exists. Consequently the all-mode verifier
+can pass even though CR-01 permits accepted evidence to retain debt and later lose
+an accepted payload. The manifest self-test checks that named selectors exist and
+are mapped; it does not cover this missing behavioral dimension.
 
-**Fix:** Track the number of candidates actually deleted or proven absent and
-return that count. If callers also need attempted/pending counts, expose them
-as separate explicit fields rather than folding them into `deleted_entries`.
-Add assertions for the count in the existing partial-abort failure test.
+**Fix:** Add an exact regression that creates authentic cleanup debt before the
+external delete, asserts all forward rebuild methods fail before any payload or
+authority mutation, and asserts `resume()` alone settles the debt. Map that exact
+selector to MIGR-05, D-19/D-21, A-MIGR05, and the applicable Plan 21 threat row so
+the verifier cannot render PASS if the fence regresses.
 
-### WR-02 [WARNING]: The documented custom handler name is discarded after duplicate validation
+## Review Evidence
 
-**File:** `src/cacheness/handlers.py:1551-1591`
-
-**Issue:** `register_handler(..., name=...)` checks the supplied name against
-existing handlers, but stores only the handler object. Lookup, listing, and
-unregistration continue to use `handler.data_type`. Supplying a unique name can
-therefore bypass the duplicate-`data_type` check, after which the new handler is
-unreachable by that name and type-based payload resolution selects whichever
-duplicate appears first. This is particularly hazardous for store-local custom
-format/migration handlers because the registration appears successful while
-the intended serializer or transformation edge is not the one resolved.
-
-**Fix:** Either remove the unsupported `name` parameter from the public API and
-always reject duplicate `data_type`, or persist a registration record containing
-the alias and use it consistently in duplicate checks, lookup, listing, and
-unregistration. Add tests for alias lookup/removal and for duplicate data types
-registered under different aliases.
+- The 12 focused Phase 7 repair tests passed.
+- Scoped Ruff passed for all eight reviewed files.
+- A separate fixture-based reproduction demonstrated the CR-01 sequence and
+  ended with `REBUILD_ACCEPTED` evidence while the accepted `first` entry was
+  absent after the failed resume checkpoint.
 
 ---
 
-_Reviewed: 2026-09-11T20:28:13Z_
+_Reviewed: 2026-09-12T00:23:53Z_
 _Reviewer: the agent (gsd-code-reviewer)_
 _Depth: standard_
