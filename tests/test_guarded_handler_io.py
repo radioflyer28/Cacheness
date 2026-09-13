@@ -73,7 +73,7 @@ def test_stage_rejects_non_regular_or_unsafe_native_handler_artifacts(
     guarded = GuardedHandlerIO(managed_root)
     try:
         with pytest.raises(CacheUnsafePathError):
-            with guarded.stage(_UnsafePathHandler(), b"native", config=None):
-                pass
+            with guarded.stage(_UnsafePathHandler(), b"native", config=None) as staged:
+                _ = staged.suffix
     finally:
         guarded.close()

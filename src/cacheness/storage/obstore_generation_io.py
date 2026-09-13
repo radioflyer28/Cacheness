@@ -9,13 +9,25 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
+import hashlib
 from pathlib import Path, PurePosixPath
 import re
 from typing import Any
 
-from obstore.exceptions import AlreadyExistsError, NotFoundError
+from obstore.exceptions import (
+    AlreadyExistsError,
+    BaseError as ObstoreError,
+    GenericError,
+    NotFoundError,
+    PreconditionError,
+)
 
-from cacheness.error_handling import CacheBlobBackendError, CacheReason, CacheUnsafePathError
+from cacheness.error_handling import (
+    CacheBlobBackendError,
+    CacheBlobLifecycleConflictError,
+    CacheReason,
+    CacheUnsafePathError,
+)
 from cacheness.interfaces import GuardedReadSnapshot, GuardedWriteResult
 
 from .guarded_handler_io import GuardedHandlerIO, GuardedStagedArtifact
@@ -114,9 +126,16 @@ class ObstoreGenerationIO:
                     mode="create",
                     use_multipart=False,
                 )
-            except AlreadyExistsError as error:
+            except (AlreadyExistsError, PreconditionError) as error:
                 raise FileExistsError("Immutable generation already exists") from error
-            except (OSError, TypeError, ValueError) as error:
+            except (OSError, GenericError) as error:
+                result = self._settle_ambiguous_publication(
+                    staged,
+                    locator_text,
+                    byte_size,
+                    error,
+                )
+            except (ObstoreError, TypeError, ValueError) as error:
                 raise CacheBlobBackendError(
                     "Obstore immutable generation publication failed",
                     context={"operation": "obstore.publish", "stage": "put"},
@@ -139,7 +158,7 @@ class ObstoreGenerationIO:
             result = self._store.get(locator_text)
         except (NotFoundError, FileNotFoundError) as error:
             raise FileNotFoundError("Obstore generation is absent") from error
-        except (OSError, TypeError, ValueError) as error:
+        except (ObstoreError, OSError, TypeError, ValueError) as error:
             raise CacheBlobBackendError(
                 "Obstore generation read request failed",
                 context={"operation": "obstore.snapshot", "stage": "get"},
@@ -183,7 +202,7 @@ class ObstoreGenerationIO:
                 yield sink.finish()
         except CacheBlobBackendError:
             raise
-        except (OSError, TypeError, ValueError) as error:
+        except (ObstoreError, OSError, TypeError, ValueError) as error:
             raise CacheBlobBackendError(
                 "Obstore generation snapshot copy failed",
                 context={"operation": "obstore.snapshot", "stage": "stream"},
@@ -197,7 +216,7 @@ class ObstoreGenerationIO:
             self._store.delete([locator_text])
         except (NotFoundError, FileNotFoundError):
             return
-        except (OSError, TypeError, ValueError) as error:
+        except (ObstoreError, OSError, TypeError, ValueError) as error:
             raise CacheBlobBackendError(
                 "Obstore generation deletion failed",
                 context={"operation": "obstore.delete", "stage": "delete"},
@@ -206,7 +225,7 @@ class ObstoreGenerationIO:
             self._store.head(locator_text)
         except (NotFoundError, FileNotFoundError):
             return
-        except (OSError, TypeError, ValueError) as error:
+        except (ObstoreError, OSError, TypeError, ValueError) as error:
             raise CacheBlobBackendError(
                 "Obstore deletion absence proof failed",
                 context={"operation": "obstore.delete", "stage": "head"},
@@ -215,6 +234,123 @@ class ObstoreGenerationIO:
             "Obstore generation remains present after deletion acknowledgement",
             context={"operation": "obstore.delete", "stage": "head"},
         )
+
+    def _settle_ambiguous_publication(
+        self,
+        staged: GuardedStagedArtifact,
+        locator: str,
+        expected_size: int,
+        publication_error: BaseException,
+    ) -> dict[str, Any]:
+        """Accept only one exact matching object after a lost create response.
+
+        A successful exact observation never promotes anything by itself: the
+        lifecycle still independently snapshots, hashes, and promotes the
+        prepared generation. This narrow transport recovery only decides
+        whether the immutable create effect completed.
+        """
+
+        expected_digest = self._staged_digest(staged, expected_size)
+        try:
+            metadata = self._store.head(locator)
+        except (NotFoundError, FileNotFoundError):
+            raise CacheBlobBackendError(
+                "Ambiguous immutable publication remained absent",
+                context={"operation": "obstore.publish", "stage": "head"},
+            ) from publication_error
+        except (ObstoreError, OSError, TypeError, ValueError):
+            raise CacheBlobBackendError(
+                "Ambiguous immutable publication could not be observed",
+                context={"operation": "obstore.publish", "stage": "head"},
+            ) from publication_error
+        if (
+            not isinstance(metadata, Mapping)
+            or type(metadata.get("size")) is not int
+            or metadata["size"] != expected_size
+        ):
+            raise CacheBlobLifecycleConflictError(
+                "Ambiguous immutable publication disagrees with staged size"
+            ) from publication_error
+
+        observed_digest, observed_size = self._exact_object_identity(locator)
+        if (observed_digest, observed_size) != (expected_digest, expected_size):
+            raise CacheBlobLifecycleConflictError(
+                "Ambiguous immutable publication disagrees with staged identity"
+            ) from publication_error
+        return dict(metadata)
+
+    @staticmethod
+    def _staged_digest(staged: GuardedStagedArtifact, expected_size: int) -> str:
+        """Hash a second retained-descriptor view without reopening its pathname."""
+
+        digest = hashlib.sha256()
+        with staged.open() as (source, observed_size):
+            if observed_size != expected_size:
+                raise CacheBlobLifecycleConflictError(
+                    "Staged generation size changed during publication recovery"
+                )
+            while chunk := source.read(64 * 1024):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def _exact_object_identity(self, locator: str) -> tuple[str, int]:
+        """Read and hash one bounded exact object without consulting a listing."""
+
+        try:
+            result = self._store.get(locator)
+        except (NotFoundError, FileNotFoundError) as error:
+            raise CacheBlobBackendError(
+                "Ambiguous immutable publication became absent during observation",
+                context={"operation": "obstore.publish", "stage": "get"},
+            ) from error
+        except (ObstoreError, OSError, TypeError, ValueError) as error:
+            raise CacheBlobBackendError(
+                "Ambiguous immutable publication could not be read",
+                context={"operation": "obstore.publish", "stage": "get"},
+            ) from error
+
+        metadata = getattr(result, "meta", None)
+        if not isinstance(metadata, Mapping) or type(metadata.get("size")) is not int:
+            raise CacheBlobBackendError(
+                "Ambiguous immutable publication lacks a valid byte size",
+                context={"operation": "obstore.publish", "stage": "get"},
+            )
+        declared_size = metadata["size"]
+        if declared_size < 0 or declared_size > self.max_download_bytes:
+            raise CacheBlobBackendError(
+                "Ambiguous immutable publication exceeds configured download bound",
+                context={"operation": "obstore.publish", "stage": "size"},
+            )
+
+        digest = hashlib.sha256()
+        observed_size = 0
+        try:
+            for chunk in result.stream(min_chunk_size=1):
+                if not isinstance(chunk, bytes):
+                    raise CacheBlobBackendError(
+                        "Obstore generation stream yielded non-bytes",
+                        context={"operation": "obstore.publish", "stage": "stream"},
+                    )
+                observed_size += len(chunk)
+                if observed_size > declared_size or observed_size > self.max_download_bytes:
+                    raise CacheBlobBackendError(
+                        "Ambiguous immutable publication exceeded its declared bound",
+                        context={"operation": "obstore.publish", "stage": "stream"},
+                    )
+                digest.update(chunk)
+        except CacheBlobBackendError:
+            raise
+        except (ObstoreError, OSError, TypeError, ValueError) as error:
+            raise CacheBlobBackendError(
+                "Ambiguous immutable publication stream failed",
+                context={"operation": "obstore.publish", "stage": "stream"},
+            ) from error
+        if observed_size != declared_size:
+            raise CacheBlobBackendError(
+                "Ambiguous immutable publication stream disagrees with exact size",
+                context={"operation": "obstore.publish", "stage": "stream"},
+            )
+        return digest.hexdigest(), observed_size
 
     def close(self) -> None:
         """Release the guarded handler resources exactly once."""

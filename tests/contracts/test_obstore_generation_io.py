@@ -272,15 +272,21 @@ def test_local_and_memory_share_exact_immutable_generation_contract(
         provider.close()
 
 
+@pytest.mark.parametrize("store_name", ("local", "memory"))
 def test_accepted_then_lost_create_response_is_settled_by_exact_identity(
-    tmp_path: Path,
+    tmp_path: Path, store_name: str
 ) -> None:
     """A matching exact object completes safely without using list discovery."""
 
-    wrapped = _AcceptedThenRaisedStore(MemoryStore())
+    base_store = (
+        LocalStore(tmp_path / "objects", mkdir=True)
+        if store_name == "local"
+        else MemoryStore()
+    )
+    wrapped = _AcceptedThenRaisedStore(base_store)
     handler_root = tmp_path / "handler-root"
     handler_root.mkdir()
-    provider = _provider(wrapped, handler_root, identity="memory")
+    provider = _provider(wrapped, handler_root, identity=store_name)
     locator = Path("generations") / "response-loss" / "matching.mcap"
 
     try:
@@ -296,15 +302,21 @@ def test_accepted_then_lost_create_response_is_settled_by_exact_identity(
         provider.close()
 
 
+@pytest.mark.parametrize("store_name", ("local", "memory"))
 def test_accepted_then_lost_create_response_rejects_mismatched_identity(
-    tmp_path: Path,
+    tmp_path: Path, store_name: str
 ) -> None:
     """Ambiguity with different bytes is conflict, never an inferred success."""
 
-    wrapped = _MismatchedThenRaisedStore(MemoryStore())
+    base_store = (
+        LocalStore(tmp_path / "objects", mkdir=True)
+        if store_name == "local"
+        else MemoryStore()
+    )
+    wrapped = _MismatchedThenRaisedStore(base_store)
     handler_root = tmp_path / "handler-root"
     handler_root.mkdir()
-    provider = _provider(wrapped, handler_root, identity="memory")
+    provider = _provider(wrapped, handler_root, identity=store_name)
     locator = Path("generations") / "response-loss" / "mismatch.mcap"
 
     try:
@@ -363,7 +375,8 @@ def test_hostile_locator_is_rejected_before_any_obstore_call(
     provider = _provider(wrapped, handler_root, identity="memory")
     try:
         with pytest.raises(CacheUnsafePathError):
-            provider.open_snapshot(locator, {})
+            with provider.open_snapshot(locator, {}):
+                pass
         assert wrapped.calls == []
         assert wrapped.list_calls == 0
     finally:
