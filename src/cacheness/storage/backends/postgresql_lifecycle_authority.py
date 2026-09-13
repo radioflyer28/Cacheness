@@ -77,10 +77,10 @@ except ImportError:  # pragma: no cover - exercised by optional-dependency users
     sql = None
 
 
-POSTGRESQL_AUTHORITY_SCHEMA_VERSION = 4
-"""First-release PostgreSQL authority layout; development schema 3 is unsupported."""
+POSTGRESQL_AUTHORITY_SCHEMA_VERSION = 5
+"""Current PostgreSQL authority layout; development schema 4 is unsupported."""
 
-POSTGRESQL_AUTHORITY_CAPABILITY = "postgresql-lifecycle-authority-v4"
+POSTGRESQL_AUTHORITY_CAPABILITY = "postgresql-lifecycle-authority-v5"
 """Persisted authority capability marker, independent of payload formats."""
 
 SCHEMA_VERSION = POSTGRESQL_AUTHORITY_SCHEMA_VERSION
@@ -148,6 +148,7 @@ class _MutationRow:
     spec: MutationSpec
     verified_digest: str | None
     verified_size: int | None
+    transport_evidence: bytes | None
     state: str
 
 
@@ -509,13 +510,15 @@ class PostgresqlLifecycleAuthority:
                 )
             if cursor is None or cursor.last_key is None:
                 statement = sql.SQL(
-                    "SELECT key, generation, locator, manifest, manifest_digest, lineage, revision "
+                    "SELECT key, generation, locator, manifest, manifest_digest, lineage, revision, "
+                    "transport_evidence "
                     "FROM {} ORDER BY key, generation LIMIT %s"
                 ).format(self._table("entries"))
                 parameters: tuple[Any, ...] = (effective_limit + 1,)
             else:
                 statement = sql.SQL(
-                    "SELECT key, generation, locator, manifest, manifest_digest, lineage, revision "
+                    "SELECT key, generation, locator, manifest, manifest_digest, lineage, revision, "
+                    "transport_evidence "
                     "FROM {} WHERE key > %s OR (key = %s AND generation > %s) "
                     "ORDER BY key, generation LIMIT %s"
                 ).format(self._table("entries"))
@@ -751,9 +754,23 @@ class PostgresqlLifecycleAuthority:
                         for entry in entries[len(stored) :]:
                             cursor.execute(
                                 sql.SQL(
+                                    "SELECT transport_evidence FROM {} WHERE key = %s "
+                                    "AND generation = %s AND locator = %s "
+                                    "AND manifest_digest = %s"
+                                ).format(self._table("entries")),
+                                (
+                                    entry.key,
+                                    entry.generation,
+                                    entry.locator,
+                                    entry.manifest_digest,
+                                ),
+                            )
+                            evidence_row = cursor.fetchone()
+                            cursor.execute(
+                                sql.SQL(
                                     "INSERT INTO {} (run_id, selection, key, generation, locator, manifest, "
-                                    "manifest_digest, lineage, entry_revision) "
-                                    "VALUES (%s, 'candidate', %s, %s, %s, %s, %s, 0, %s)"
+                                    "manifest_digest, lineage, entry_revision, transport_evidence) "
+                                    "VALUES (%s, 'candidate', %s, %s, %s, %s, %s, 0, %s, %s)"
                                 ).format(self._table("migration_store_entries")),
                                 (
                                     receipt.run_id,
@@ -763,6 +780,7 @@ class PostgresqlLifecycleAuthority:
                                     entry.manifest,
                                     entry.manifest_digest,
                                     receipt.source_revision,
+                                    None if evidence_row is None else evidence_row[0],
                                 ),
                             )
                         cursor.execute(
@@ -784,9 +802,22 @@ class PostgresqlLifecycleAuthority:
             for entry in entries:
                 cursor.execute(
                     sql.SQL(
+                        "SELECT transport_evidence FROM {} WHERE key = %s "
+                        "AND generation = %s AND locator = %s AND manifest_digest = %s"
+                    ).format(self._table("entries")),
+                    (
+                        entry.key,
+                        entry.generation,
+                        entry.locator,
+                        entry.manifest_digest,
+                    ),
+                )
+                evidence_row = cursor.fetchone()
+                cursor.execute(
+                    sql.SQL(
                         "INSERT INTO {} (run_id, selection, key, generation, locator, manifest, "
-                        "manifest_digest, lineage, entry_revision) "
-                        "VALUES (%s, 'candidate', %s, %s, %s, %s, %s, 0, %s)"
+                        "manifest_digest, lineage, entry_revision, transport_evidence) "
+                        "VALUES (%s, 'candidate', %s, %s, %s, %s, %s, 0, %s, %s)"
                     ).format(self._table("migration_store_entries")),
                     (
                         receipt.run_id,
@@ -796,6 +827,7 @@ class PostgresqlLifecycleAuthority:
                         entry.manifest,
                         entry.manifest_digest,
                         receipt.source_revision,
+                        None if evidence_row is None else evidence_row[0],
                     ),
                 )
             cursor.execute(
@@ -836,12 +868,14 @@ class PostgresqlLifecycleAuthority:
                 return ()
             cursor.execute(
                 sql.SQL(
-                    "SELECT key, generation, locator, manifest, manifest_digest "
+                    "SELECT key, generation, locator, manifest, manifest_digest, transport_evidence "
                     "FROM {} WHERE run_id = %s AND selection = 'candidate' ORDER BY key"
                 ).format(self._table("migration_store_entries")),
                 (run_id,),
             )
-            return self._candidate_entries_from_rows(cursor.fetchall())
+            return self._candidate_entries_from_rows(
+                [row[:5] for row in cursor.fetchall()]
+            )
 
         return self._read_only("candidate_entries_for_run", read)
 
@@ -870,12 +904,13 @@ class PostgresqlLifecycleAuthority:
                 )
             cursor.execute(
                 sql.SQL(
-                    "SELECT key, generation, locator, manifest, manifest_digest "
+                    "SELECT key, generation, locator, manifest, manifest_digest, transport_evidence "
                     "FROM {} WHERE run_id = %s AND selection = 'candidate' ORDER BY key"
                 ).format(self._table("migration_store_entries")),
                 (receipt.run_id,),
             )
-            if self._candidate_entries_from_rows(cursor.fetchall()) != entries:
+            candidate_rows = cursor.fetchall()
+            if self._candidate_entries_from_rows([row[:5] for row in candidate_rows]) != entries:
                 raise CacheBlobLifecycleConflictError(
                     "Migration candidate entries changed before discard"
                 )
@@ -970,13 +1005,15 @@ class PostgresqlLifecycleAuthority:
                 ).format(self._table("migration_store_entries")),
                 (receipt.run_id,),
             )
-            if self._candidate_entries_from_rows(cursor.fetchall()) != entries:
+            candidate_rows = cursor.fetchall()
+            if self._candidate_entries_from_rows([row[:5] for row in candidate_rows]) != entries:
                 raise CacheBlobLifecycleConflictError(
                     "Recorded migration candidate differs from verified external receipt"
                 )
             cursor.execute(
                 sql.SQL(
-                    "SELECT key, generation, locator, manifest, manifest_digest, lineage, revision "
+                    "SELECT key, generation, locator, manifest, manifest_digest, lineage, revision, "
+                    "transport_evidence "
                     "FROM {} ORDER BY key"
                 ).format(self._table("entries"))
             )
@@ -985,12 +1022,13 @@ class PostgresqlLifecycleAuthority:
                 cursor.execute(
                     sql.SQL(
                         "INSERT INTO {} (run_id, selection, key, generation, locator, manifest, "
-                        "manifest_digest, lineage, entry_revision) "
-                        "VALUES (%s, 'prior', %s, %s, %s, %s, %s, %s, %s)"
+                        "manifest_digest, lineage, entry_revision, transport_evidence) "
+                        "VALUES (%s, 'prior', %s, %s, %s, %s, %s, %s, %s, %s)"
                     ).format(self._table("migration_store_entries")),
                     (receipt.run_id, *prior),
                 )
             next_revision = state_row[0] + 1
+            candidate_evidence = {row[0]: row[5] for row in candidate_rows}
             cursor.execute(sql.SQL("DELETE FROM {}").format(self._table("entries")))
             for candidate in entries:
                 cursor.execute(
@@ -1011,7 +1049,8 @@ class PostgresqlLifecycleAuthority:
                 cursor.execute(
                     sql.SQL(
                         "INSERT INTO {} (key, generation, locator, manifest, manifest_digest, "
-                        "lineage, revision) VALUES (%s, %s, %s, %s, %s, %s, %s)"
+                        "lineage, revision, transport_evidence) "
+                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)"
                     ).format(self._table("entries")),
                     (
                         candidate.key,
@@ -1021,6 +1060,7 @@ class PostgresqlLifecycleAuthority:
                         candidate.manifest_digest,
                         lineage,
                         next_revision,
+                        candidate_evidence[candidate.key],
                     ),
                 )
             cursor.execute(
@@ -1131,7 +1171,8 @@ class PostgresqlLifecycleAuthority:
                 )
             cursor.execute(
                 sql.SQL(
-                    "SELECT key, generation, locator, manifest, manifest_digest, lineage "
+                    "SELECT key, generation, locator, manifest, manifest_digest, lineage, "
+                    "transport_evidence "
                     "FROM {} WHERE run_id = %s AND selection = 'prior' ORDER BY key"
                 ).format(self._table("migration_store_entries")),
                 (run_id,),
@@ -1150,9 +1191,10 @@ class PostgresqlLifecycleAuthority:
                 cursor.execute(
                     sql.SQL(
                         "INSERT INTO {} (key, generation, locator, manifest, manifest_digest, "
-                        "lineage, revision) VALUES (%s, %s, %s, %s, %s, %s, %s)"
+                        "lineage, revision, transport_evidence) "
+                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)"
                     ).format(self._table("entries")),
-                    (*prior, next_revision),
+                    (*prior[:6], next_revision, prior[6]),
                 )
             cursor.execute(
                 sql.SQL(
@@ -1242,7 +1284,7 @@ class PostgresqlLifecycleAuthority:
                 "CREATE TABLE IF NOT EXISTS {} ("
                 "key TEXT PRIMARY KEY, generation TEXT NOT NULL, locator TEXT NOT NULL, "
                 "manifest BYTEA NOT NULL, manifest_digest TEXT NOT NULL, lineage BIGINT NOT NULL, "
-                "revision BIGINT NOT NULL)"
+                "revision BIGINT NOT NULL, transport_evidence BYTEA)"
             ).format(self._table("entries"))
         )
         cursor.execute(
@@ -1252,7 +1294,8 @@ class PostgresqlLifecycleAuthority:
                 "key TEXT NOT NULL, generation TEXT NOT NULL, "
                 "locator TEXT NOT NULL, expected_lineage BIGINT, expected_revision BIGINT, "
                 "expected_generation TEXT, expected_manifest_digest TEXT, manifest BYTEA NOT NULL, "
-                "verified_digest TEXT, verified_size BIGINT, state TEXT NOT NULL, "
+                "verified_digest TEXT, verified_size BIGINT, transport_evidence BYTEA, "
+                "state TEXT NOT NULL, "
                 "promoted_lineage BIGINT, promoted_revision BIGINT, "
                 "CONSTRAINT mutations_operation_id_key UNIQUE (operation_id))"
             ).format(self._table("mutations"))
@@ -1279,7 +1322,8 @@ class PostgresqlLifecycleAuthority:
                 "CREATE TABLE IF NOT EXISTS {} ("
                 "run_id TEXT NOT NULL, key TEXT NOT NULL, lineage BIGINT NOT NULL, "
                 "entry_revision BIGINT NOT NULL, generation TEXT NOT NULL, locator TEXT NOT NULL, "
-                "manifest BYTEA NOT NULL, manifest_digest TEXT NOT NULL, state TEXT NOT NULL, "
+                "manifest BYTEA NOT NULL, manifest_digest TEXT NOT NULL, "
+                "transport_evidence BYTEA, state TEXT NOT NULL, "
                 "CONSTRAINT clear_targets_run_id_key_key PRIMARY KEY (run_id, key))"
             ).format(self._table("clear_targets"))
         )
@@ -1306,7 +1350,7 @@ class PostgresqlLifecycleAuthority:
                 "CHECK (selection IN ('candidate', 'prior')), key TEXT NOT NULL, "
                 "generation TEXT NOT NULL, locator TEXT NOT NULL, manifest BYTEA NOT NULL, "
                 "manifest_digest TEXT NOT NULL, lineage BIGINT NOT NULL, "
-                "entry_revision BIGINT NOT NULL, "
+                "entry_revision BIGINT NOT NULL, transport_evidence BYTEA, "
                 "CONSTRAINT migration_store_entries_run_id_selection_key_key "
                 "PRIMARY KEY (run_id, selection, key))"
             ).format(self._table("migration_store_entries"))
@@ -1354,7 +1398,8 @@ class PostgresqlLifecycleAuthority:
         def read(cursor: Any) -> EntrySnapshot | None:
             cursor.execute(
                 sql.SQL(
-                    "SELECT generation, locator, manifest, manifest_digest, lineage, revision "
+                    "SELECT generation, locator, manifest, manifest_digest, lineage, revision, "
+                    "transport_evidence "
                     "FROM {} WHERE key = %s"
                 ).format(self._table("entries")),
                 (key,),
@@ -1386,7 +1431,8 @@ class PostgresqlLifecycleAuthority:
                 )
             cursor.execute(
                 sql.SQL(
-                    "SELECT generation, locator, manifest, manifest_digest, lineage, revision "
+                    "SELECT generation, locator, manifest, manifest_digest, lineage, revision, "
+                    "transport_evidence "
                     "FROM {} WHERE key = %s FOR UPDATE"
                 ).format(self._table("entries")),
                 (entry.key,),
@@ -1481,6 +1527,7 @@ class PostgresqlLifecycleAuthority:
                     stored.generation,
                     manifest_digest,
                 ),
+                transport_evidence=stored.transport_evidence,
             )
 
         return self._transaction("replace_committed_metadata", replace_metadata)
@@ -1582,14 +1629,23 @@ class PostgresqlLifecycleAuthority:
         def record(cursor: Any) -> None:
             cursor.execute(
                 sql.SQL(
-                    "UPDATE {} SET verified_digest = %s, verified_size = %s, manifest = %s "
+                    "UPDATE {} SET verified_digest = %s, verified_size = %s, manifest = %s, "
+                    "transport_evidence = %s "
                     "WHERE operation_id = %s AND state = 'prepared' AND manifest = %s "
                     "AND (verified_digest IS NULL OR "
-                    "(verified_digest = %s AND verified_size = %s)) RETURNING operation_id"
+                    "(verified_digest = %s AND verified_size = %s "
+                    "AND transport_evidence IS NOT DISTINCT FROM %s)) RETURNING operation_id"
                 ).format(self._table("mutations")),
                 (
-                    proof.digest, proof.byte_size, descriptor, prepared.operation_id,
-                    prepared.spec.manifest, proof.digest, proof.byte_size,
+                    proof.digest,
+                    proof.byte_size,
+                    descriptor,
+                    proof.transport_evidence,
+                    prepared.operation_id,
+                    prepared.spec.manifest,
+                    proof.digest,
+                    proof.byte_size,
+                    proof.transport_evidence,
                 ),
             )
             if cursor.fetchone() is None:
@@ -1605,7 +1661,7 @@ class PostgresqlLifecycleAuthority:
             sql.SQL(
                 "SELECT key, generation, locator, expected_lineage, expected_revision, "
                 "expected_generation, expected_manifest_digest, manifest, verified_digest, "
-                "verified_size, state FROM {} WHERE operation_id = %s"
+                "verified_size, transport_evidence, state FROM {} WHERE operation_id = %s"
             ).format(self._table("mutations")) + sql.SQL(suffix),
             (operation_id,),
         )
@@ -1616,7 +1672,13 @@ class PostgresqlLifecycleAuthority:
             operation_id=operation_id, key=row[0], generation=row[1], candidate_locator=row[2],
             expected=EntryExpectation(row[3], row[4], row[5], row[6]), manifest=bytes(row[7]),
         )
-        return _MutationRow(spec, row[8], row[9], row[10])
+        return _MutationRow(
+            spec,
+            row[8],
+            row[9],
+            None if row[10] is None else bytes(row[10]),
+            row[11],
+        )
 
     def read_mutation(self, operation_id: str) -> MutationReplay | None:
         """Read one exact operation replay from the existing remote authority."""
@@ -1636,6 +1698,7 @@ class PostgresqlLifecycleAuthority:
                         mutation.verified_digest,
                         mutation.verified_size,
                         mutation.spec.manifest,
+                        mutation.transport_evidence,
                     )
                 )
                 prepared = PreparedMutation(operation_id, mutation.spec)
@@ -1665,7 +1728,7 @@ class PostgresqlLifecycleAuthority:
 
     def _entry_from_row(self, row: tuple[Any, ...], *, stage: str) -> EntrySnapshot:
         """Decode one canonical row only after its bounded values corroborate."""
-        key, generation, locator, manifest, digest, lineage, revision = row
+        key, generation, locator, manifest, digest, lineage, revision, transport_evidence = row
         try:
             manifest = bytes(manifest)
         except (TypeError, ValueError) as error:
@@ -1690,6 +1753,7 @@ class PostgresqlLifecycleAuthority:
                 locator,
                 manifest,
                 EntryExpectation(lineage, revision, generation, digest),
+                None if transport_evidence is None else bytes(transport_evidence),
             )
         except (TypeError, ValueError) as error:
             raise CacheBlobBackendError(
@@ -1701,7 +1765,7 @@ class PostgresqlLifecycleAuthority:
         """Reconstruct an idempotent receipt from immutable operation evidence."""
         cursor.execute(
             sql.SQL(
-                "SELECT key, generation, locator, manifest, promoted_lineage, "
+                "SELECT key, generation, locator, manifest, transport_evidence, promoted_lineage, "
                 "promoted_revision FROM {} "
                 "WHERE operation_id = %s AND state = 'promoted'"
             ).format(self._table("mutations")),
@@ -1714,7 +1778,16 @@ class PostgresqlLifecycleAuthority:
             manifest = bytes(row[3])
             manifest_digest = hashlib.sha256(manifest).hexdigest()
             entry = self._entry_from_row(
-                (row[0], row[1], row[2], manifest, manifest_digest, row[4], row[5]),
+                (
+                    row[0],
+                    row[1],
+                    row[2],
+                    manifest,
+                    manifest_digest,
+                    row[5],
+                    row[6],
+                    row[4],
+                ),
                 stage="promote_mutation",
             )
         except (TypeError, ValueError) as error:
@@ -1820,12 +1893,13 @@ class PostgresqlLifecycleAuthority:
         digest = hashlib.sha256(mutation.spec.manifest).hexdigest()
         cursor.execute(
             sql.SQL(
-                "INSERT INTO {} (key, generation, locator, manifest, manifest_digest, lineage, revision) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s) "
+                "INSERT INTO {} (key, generation, locator, manifest, manifest_digest, lineage, revision, "
+                "transport_evidence) VALUES (%s, %s, %s, %s, %s, %s, %s, %s) "
                 "ON CONFLICT (key) DO UPDATE SET generation = EXCLUDED.generation, "
                 "locator = EXCLUDED.locator, manifest = EXCLUDED.manifest, "
                 "manifest_digest = EXCLUDED.manifest_digest, lineage = EXCLUDED.lineage, "
-                "revision = EXCLUDED.revision WHERE {}.lineage IS NOT DISTINCT FROM %s "
+                "revision = EXCLUDED.revision, "
+                "transport_evidence = EXCLUDED.transport_evidence WHERE {}.lineage IS NOT DISTINCT FROM %s "
                 "AND {}.revision IS NOT DISTINCT FROM %s AND {}.generation IS NOT DISTINCT FROM %s "
                 "AND {}.manifest_digest IS NOT DISTINCT FROM %s RETURNING generation, locator"
             ).format(
@@ -1834,7 +1908,11 @@ class PostgresqlLifecycleAuthority:
             ),
             (
                 mutation.spec.key, mutation.spec.generation, mutation.spec.candidate_locator,
-                mutation.spec.manifest, digest, next_lineage, next_revision,
+                mutation.spec.manifest,
+                digest,
+                next_lineage,
+                next_revision,
+                mutation.transport_evidence,
                 mutation.spec.expected.lineage, mutation.spec.expected.revision,
                 mutation.spec.expected.generation, mutation.spec.expected.manifest_digest,
             ),
@@ -1924,7 +2002,8 @@ class PostgresqlLifecycleAuthority:
         def list_page(cursor: Any) -> tuple[EntrySnapshot, ...]:
             cursor.execute(
                 sql.SQL(
-                    "SELECT key, generation, locator, manifest, manifest_digest, lineage, revision "
+                    "SELECT key, generation, locator, manifest, manifest_digest, lineage, revision, "
+                    "transport_evidence "
                     "FROM {} ORDER BY key, generation LIMIT %s"
                 ).format(self._table("entries")),
                 (self.lifecycle_limits.max_inventory_items + 1,),
@@ -1993,13 +2072,15 @@ class PostgresqlLifecycleAuthority:
             )
             if cursor_identity is None:
                 statement = sql.SQL(
-                    "SELECT key, generation, locator, manifest, manifest_digest, lineage, revision "
+                    "SELECT key, generation, locator, manifest, manifest_digest, lineage, revision, "
+                    "transport_evidence "
                     "FROM {} ORDER BY key, generation LIMIT %s"
                 ).format(self._table("entries"))
                 parameters: tuple[Any, ...] = (work_cap + 1,)
             else:
                 statement = sql.SQL(
-                    "SELECT key, generation, locator, manifest, manifest_digest, lineage, revision "
+                    "SELECT key, generation, locator, manifest, manifest_digest, lineage, revision, "
+                    "transport_evidence "
                     "FROM {} WHERE key > %s OR (key = %s AND generation > %s) "
                     "ORDER BY key, generation LIMIT %s"
                 ).format(self._table("entries"))
@@ -2261,7 +2342,8 @@ class PostgresqlLifecycleAuthority:
             return
         cursor.execute(
             sql.SQL(
-                "SELECT key, generation, locator, manifest, manifest_digest, lineage, revision "
+                "SELECT key, generation, locator, manifest, manifest_digest, lineage, revision, "
+                "transport_evidence "
                 "FROM {} WHERE revision <= %s AND key > %s ORDER BY key LIMIT %s"
             ).format(self._table("entries")),
             (run[0], run[1], self.lifecycle_limits.manifest_page_size + 1),
@@ -2273,7 +2355,8 @@ class PostgresqlLifecycleAuthority:
             cursor.execute(
                 sql.SQL(
                     "INSERT INTO {} (run_id, key, lineage, entry_revision, generation, locator, manifest, "
-                    "manifest_digest, state) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'pending') "
+                    "manifest_digest, transport_evidence, state) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'pending') "
                     "ON CONFLICT (run_id, key) DO NOTHING"
                 ).format(self._table("clear_targets")),
                 (
@@ -2285,6 +2368,7 @@ class PostgresqlLifecycleAuthority:
                     entry.locator,
                     entry.manifest,
                     entry.expectation.manifest_digest,
+                    entry.transport_evidence,
                 ),
             )
         capture_cursor = selected[-1][0] if selected else run[1]
@@ -2314,7 +2398,8 @@ class PostgresqlLifecycleAuthority:
                 return ()
             cursor.execute(
                 sql.SQL(
-                    "SELECT key, generation, locator, manifest, manifest_digest, lineage, entry_revision "
+                    "SELECT key, generation, locator, manifest, manifest_digest, lineage, entry_revision, "
+                    "transport_evidence "
                     "FROM {} WHERE run_id = %s AND state = 'pending' AND key > %s "
                     "ORDER BY key LIMIT %s"
                 ).format(self._table("clear_targets")),

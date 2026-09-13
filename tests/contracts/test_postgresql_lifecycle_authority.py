@@ -775,6 +775,7 @@ def test_promotion_marks_fresh_lineage_before_matching_absence() -> None:
         spec.manifest,
         payload_digest,
         len(spec.manifest),
+        None,
         "prepared",
     )
     factory = _Factory(
@@ -790,11 +791,12 @@ def test_promotion_marks_fresh_lineage_before_matching_absence() -> None:
             (1,),
             (
                 spec.key,
-                spec.generation,
-                spec.candidate_locator,
-                spec.manifest,
-                1,
-                1,
+                    spec.generation,
+                    spec.candidate_locator,
+                    spec.manifest,
+                    None,
+                    1,
+                    1,
             ),
             [],
         ]]
@@ -819,7 +821,7 @@ def test_promotion_marks_fresh_lineage_before_matching_absence() -> None:
     replay_query = next(
         statement
         for statement in statements
-        if "select key, generation, locator, manifest, promoted_lineage" in statement
+            if "select key, generation, locator, manifest, transport_evidence" in statement
         and "state = 'promoted'" in statement
     )
     assert "join" not in replay_query
@@ -879,6 +881,7 @@ def test_postgresql_read_mutation_returns_exact_prepared_and_promoted_replay() -
         spec.manifest,
         proof.digest,
         proof.byte_size,
+        None,
         "prepared",
     )
     prepared_factory = _Factory(scripts=[[None], [prepared_row]])
@@ -910,6 +913,7 @@ def test_postgresql_read_mutation_returns_exact_prepared_and_promoted_replay() -
         spec.generation,
         spec.candidate_locator,
         spec.manifest,
+        None,
         1,
         2,
     )
@@ -965,6 +969,7 @@ def test_abort_records_candidate_debt_without_payload_effects() -> None:
         spec.manifest,
         None,
         None,
+        None,
         "prepared",
     )
     factory = _Factory(scripts=[[mutation_row, (spec.operation_id,), None]])
@@ -988,11 +993,11 @@ def test_uncertain_promotion_reopens_a_fresh_lease_for_exact_operation_state() -
     payload_digest = hashlib.sha256(b"verified payload bytes").hexdigest()
     prepared_row = (
         spec.key, spec.generation, spec.candidate_locator, None, None, None, None,
-        spec.manifest, payload_digest, len(spec.manifest), "prepared",
+        spec.manifest, payload_digest, len(spec.manifest), None, "prepared",
     )
     promoted_row = prepared_row[:-1] + ("promoted",)
     promotion_receipt_row = (
-        spec.key, spec.generation, spec.candidate_locator, spec.manifest, 1, 1,
+        spec.key, spec.generation, spec.candidate_locator, spec.manifest, None, 1, 1,
     )
     factory = _Factory(
         scripts=[[
@@ -1127,18 +1132,20 @@ def test_inventory_pages_raw_rows_at_one_postgresql_revision_without_live_claims
                         "generation-a",
                         "generations/a.native",
                         first_manifest,
-                        hashlib.sha256(first_manifest).hexdigest(),
-                        1,
-                        7,
+                            hashlib.sha256(first_manifest).hexdigest(),
+                            1,
+                            7,
+                            None,
                     ),
                     (
                         "entry-b",
                         "generation-b",
                         "generations/b.native",
                         second_manifest,
-                        hashlib.sha256(second_manifest).hexdigest(),
-                        2,
-                        7,
+                            hashlib.sha256(second_manifest).hexdigest(),
+                            2,
+                            7,
+                            None,
                     ),
                 ],
             ],
