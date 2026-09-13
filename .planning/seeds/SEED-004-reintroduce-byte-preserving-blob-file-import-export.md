@@ -57,8 +57,21 @@ Required capability matrix:
 | Filesystem into BlobStore | copy/import file | move/import file, deleting the source only after committed storage success |
 | BlobStore out to filesystem | copy/export file | move/export file, deleting the exact stored generation only after a durable destination succeeds |
 
-- Transfer file bytes exactly and in bounded memory; do not parse, deserialize,
-  or reserialize merely to move a file.
+- Transfer file bytes exactly without ever materializing the whole file in
+  Python memory; do not parse, deserialize, or reserialize merely to move a
+  file. "Bounded memory" means fixed-size streaming buffers or an OS-native
+  copy path, not `read()` of the complete payload.
+- For local import/export, prefer safe OS/native file-copy facilities where
+  they preserve Cacheness's immutable-publication, containment, durability,
+  and destination-overwrite contracts. Fall back to fixed-size chunked I/O;
+  a local transfer does not justify a payload-sized Python allocation.
+- For large S3 imports, deliberately evaluate obstore multipart upload rather
+  than using obstore 0.11.1's direct conditional put, which materializes input
+  at payload scale. Preserve create-if-absent by staging a multipart temporary
+  object and conditionally copying it to the immutable generation only if the
+  design also records and reconciles the temporary object and abandoned-upload
+  cleanup obligations. Do not silently claim bounded-memory atomic publication
+  without that lifecycle work.
 - Require or otherwise unambiguously resolve a registered handler on import and
   persist its stable `data_type`, storage format, and validated native suffix so
   ordinary `get()` can later invoke the correct handler.
@@ -76,4 +89,3 @@ Required capability matrix:
   original filename handling, suffix validation, and cleanup behavior explicitly.
 - Keep object-oriented `put()` / `get()` unchanged. These helpers are a first-class
   file-transfer surface, not a second lifecycle authority or a backend escape hatch.
-
