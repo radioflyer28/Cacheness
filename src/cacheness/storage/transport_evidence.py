@@ -287,7 +287,7 @@ class PayloadTransportEvidence:
                 "version": record["version"],
             }
         )
-        return cls(
+        evidence = cls(
             schema_version=record["schema_version"],
             signature_algorithm=record["signature_algorithm"],
             store_identity=record["store_identity"],
@@ -299,6 +299,9 @@ class PayloadTransportEvidence:
             observation=observation,
             signature=record["signature"],
         )
+        if not hmac.compare_digest(evidence.canonical_bytes(), raw):
+            raise _evidence_error("Transport evidence is not canonical JSON")
+        return evidence
 
     def verify(
         self,
