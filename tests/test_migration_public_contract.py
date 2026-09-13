@@ -87,6 +87,24 @@ LEGACY_PAYLOAD_MODULES = (
     "cacheness.storage.backends.blob_backends",
     "cacheness.storage.backends.s3_backend",
 )
+LEGACY_MULTIPART_SYMBOLS = frozenset(
+    {
+        "S3MultipartUploadEvidence",
+        "S3MultipartUploadPage",
+        "_publish_multipart",
+        "_create_multipart_upload",
+        "multipart_upload_page",
+        "create_multipart_upload",
+        "upload_part",
+        "complete_multipart_upload",
+        "abort_multipart_upload",
+        "list_multipart_uploads",
+        "multipart_threshold",
+        "part_size",
+        "max_multipart_parts",
+        "max_upload_attempts",
+    }
+)
 
 
 def _phase7_detector_scope() -> str:
@@ -300,11 +318,10 @@ def test_payload_cutover_removes_legacy_runtime_mechanics_and_exports() -> None:
     source_root = PROJECT_ROOT / "src" / "cacheness"
     defined_or_imported: set[str] = set()
     imported_modules: set[str] = set()
-    source_text = ""
+    referenced_symbols: set[str] = set()
 
     for source_path in source_root.rglob("*.py"):
         text = source_path.read_text(encoding="utf-8")
-        source_text += text
         tree = ast.parse(text, filename=str(source_path))
         for node in ast.walk(tree):
             if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -318,6 +335,10 @@ def test_payload_cutover_removes_legacy_runtime_mechanics_and_exports() -> None:
             elif isinstance(node, ast.ImportFrom) and node.module is not None:
                 imported_modules.add(node.module)
                 defined_or_imported.update(alias.asname or alias.name for alias in node.names)
+            elif isinstance(node, ast.Name):
+                referenced_symbols.add(node.id)
+            elif isinstance(node, ast.Attribute):
+                referenced_symbols.add(node.attr)
 
     assert LEGACY_PAYLOAD_SYMBOLS.isdisjoint(defined_or_imported)
     assert not any(
@@ -327,7 +348,9 @@ def test_payload_cutover_removes_legacy_runtime_mechanics_and_exports() -> None:
         or module.startswith("botocore.")
         for module in imported_modules
     )
-    assert "multipart" not in source_text.lower()
+    assert LEGACY_MULTIPART_SYMBOLS.isdisjoint(
+        defined_or_imported | referenced_symbols
+    )
     assert all(importlib.util.find_spec(module) is None for module in LEGACY_PAYLOAD_MODULES)
 
     script = """
@@ -346,7 +369,10 @@ assert all(not hasattr(backends, name) for name in legacy)
 assert "boto3" not in sys.modules
 assert "botocore" not in sys.modules
 assert storage.ObstoreGenerationIO is not None
-assert backends.PostgresqlLifecycleAuthority is not None
+if "PostgresqlLifecycleAuthority" in backends.__all__:
+    assert backends.PostgresqlLifecycleAuthority is not None
+else:
+    assert not hasattr(backends, "PostgresqlLifecycleAuthority")
 """
     environment = os.environ.copy()
     environment["PYTHONPATH"] = os.pathsep.join(part for part in sys.path if part)

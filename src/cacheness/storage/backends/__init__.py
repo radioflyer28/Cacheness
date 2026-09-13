@@ -1,16 +1,18 @@
-"""Payload backends and typed store-composition exports.
+"""Current payload-participant and lifecycle-authority exports.
 
-Canonical lifecycle authority construction belongs exclusively to
-``StoreTopology``. JSON is a derived projection; PostgreSQL is exported only
-as the narrow lifecycle-authority role when its optional driver is present.
+``StoreTopology`` remains the only composition root. Payload object mechanics
+are provided by :class:`ObstoreGenerationIO`; PostgreSQL remains the optional
+narrow lifecycle-authority role. Retired byte CRUD backends deliberately have
+no compatibility import path.
 """
 
-from .blob_backends import (
-    BlobBackend,
-    FilesystemBlobBackend,
-    InMemoryBlobBackend,
-)
 from importlib.util import find_spec
+
+from ..obstore_generation_io import (
+    ObstoreGenerationIO,
+    ObstoreInventoryPage,
+    ObstoreObjectEvidence,
+)
 
 _COMPOSITION_EXPORTS = frozenset(
     {
@@ -33,11 +35,6 @@ def __getattr__(name: str):
     return getattr(composition, name)
 
 try:
-    from .s3_backend import BOTO3_AVAILABLE, S3BlobBackend
-except ImportError:
-    BOTO3_AVAILABLE = False
-
-try:
     if find_spec("psycopg") is None:
         raise ImportError
     from .postgresql_lifecycle_authority import PostgresqlLifecycleAuthority
@@ -48,9 +45,9 @@ else:
 
 
 __all__ = [
-    "BlobBackend",
-    "FilesystemBlobBackend",
-    "InMemoryBlobBackend",
+    "ObstoreGenerationIO",
+    "ObstoreInventoryPage",
+    "ObstoreObjectEvidence",
     "BackendRef",
     "BackendRole",
     "CompositionValidationError",
@@ -58,9 +55,6 @@ __all__ = [
     "StoreTopology",
     "resolve_metadata_role",
 ]
-
-if BOTO3_AVAILABLE:
-    __all__.append(S3BlobBackend.__name__)
 
 if POSTGRESQL_AVAILABLE:
     __all__.append(PostgresqlLifecycleAuthority.__name__)

@@ -146,11 +146,11 @@ from cacheness.error_handling import (
 )
 
 from .composition import BackendRef, BackendRole, RoleRegistry, StoreTopology
-
-try:
-    from .backends.s3_backend import BOTO3_AVAILABLE, S3BlobBackend
-except ImportError:
-    BOTO3_AVAILABLE = False
+from .obstore_generation_io import (
+    ObstoreGenerationIO,
+    ObstoreInventoryPage,
+    ObstoreObjectEvidence,
+)
 
 try:
     if find_spec("psycopg") is None:
@@ -168,6 +168,9 @@ __all__ = [
     "BackendRole",
     "RoleRegistry",
     "StoreTopology",
+    "ObstoreGenerationIO",
+    "ObstoreInventoryPage",
+    "ObstoreObjectEvidence",
     "BlobManifest",
     "BlobReceipt",
     "CatalogCursor",
@@ -265,9 +268,6 @@ __all__ = [
     # Security
     "CacheEntrySigner",
 ]
-
-if BOTO3_AVAILABLE:
-    __all__.append(S3BlobBackend.__name__)
 
 if POSTGRESQL_AVAILABLE:
     __all__.append(PostgresqlLifecycleAuthority.__name__)
