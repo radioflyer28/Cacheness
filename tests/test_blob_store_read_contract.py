@@ -63,19 +63,55 @@ def test_absence_is_distinct_from_a_present_none_payload(tmp_path: Path) -> None
         store.close()
 
 
-def test_metadata_update_reauthenticates_a_new_current_generation(tmp_path: Path) -> None:
-    """A metadata patch promotes an immutable descriptor without replacing payload bytes."""
+def test_metadata_update_reauthenticates_mutable_descriptor_without_payload_transition(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A metadata patch changes only signed mutable facts through the authority CAS."""
     store = _store(tmp_path / "metadata")
     try:
         receipt = store.put_entry("value", key="metadata-key", metadata={"phase": 1})
+        before = store.lifecycle_authority.read_entry(receipt.key)
+        assert before is not None
+        before_descriptor = BlobManifest.from_canonical_bytes(before.manifest)
+
+        participant = store._materialize_authority_store()
+        original_open_snapshot = participant.open_snapshot
+
+        def reject_payload_lifecycle(*_args, **_kwargs):
+            raise AssertionError("metadata-only update touched the payload participant")
+
+        monkeypatch.setattr(participant, "publish_generation", reject_payload_lifecycle)
+        monkeypatch.setattr(participant, "open_snapshot", reject_payload_lifecycle)
+        monkeypatch.setattr(participant, "delete_or_prove_absent", reject_payload_lifecycle)
+
         assert store.update_metadata(receipt.key, {"phase": 2, "label": "current"})
 
         committed = store.lifecycle_authority.read_entry(receipt.key)
         assert committed is not None
         descriptor = BlobManifest.from_canonical_bytes(committed.manifest)
         verify_current_manifest(descriptor, store._authority_manifest_key())
-        assert descriptor.generation != receipt.generation
+        assert committed.manifest != before.manifest
+        assert committed.expectation != before.expectation
+        assert (
+            committed.generation,
+            committed.locator,
+            descriptor.generation,
+            descriptor.locator,
+            descriptor.digest,
+            descriptor.byte_size,
+            committed.transport_evidence,
+        ) == (
+            before.generation,
+            before.locator,
+            before_descriptor.generation,
+            before_descriptor.locator,
+            before_descriptor.digest,
+            before_descriptor.byte_size,
+            before.transport_evidence,
+        )
+        assert descriptor.generation == receipt.generation
         assert descriptor.user_metadata == {"phase": 2, "label": "current"}
+        monkeypatch.setattr(participant, "open_snapshot", original_open_snapshot)
         assert store.get(receipt.key) == "value"
     finally:
         store.close()
