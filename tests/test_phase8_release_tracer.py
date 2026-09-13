@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 import subprocess
 import sys
@@ -141,12 +142,181 @@ def test_tracer_rejects_dirty_or_revision_drifted_source_after_child_run(
 def test_tracer_cli_has_no_selectable_child_suite(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The public command accepts only the deterministic mode and output path."""
+    """The public command reports unavailable external classes without a false pass."""
     runner = _load_runner()
     output = tmp_path / "deterministic.json"
     monkeypatch.setattr(runner, "current_source_identity", lambda: _clean_identity(runner))
     monkeypatch.setattr(runner, "_run_child", lambda *_args: _passing_child())
 
-    assert runner.main(["deterministic", "--output", str(output)]) == 0
+    assert runner.main(["deterministic", "--output", str(output)]) == 2
     assert output.is_file()
 
+
+def test_non_passing_terminal_states_are_truthful_but_not_qualification() -> None:
+    """Unavailable and failed evidence remain diagnostic instead of release proof."""
+    evidence = _load_evidence()
+    expected_non_qualifying = [
+        evidence_class
+        for evidence_class in evidence.EVIDENCE_CLASSES
+        if evidence_class != "deterministic"
+    ]
+
+    for status, result, claim_state in (
+        ("UNAVAILABLE", "unavailable", "UNAVAILABLE"),
+        ("NOT_QUALIFIED", "failed", "NOT_QUALIFIED"),
+    ):
+        envelope = evidence.make_envelope(
+            evidence_class="deterministic",
+            status=status,
+            revision="a" * 40,
+            source_digest="b" * 64,
+            generated_at_utc="2026-09-13T00:00:00+00:00",
+            payload={
+                "command": ["tools/verify_phase071_contracts.py", "--all"],
+                "result": result,
+                "claim_categories": {
+                    claim: claim_state for claim in evidence.CLAIM_CATEGORIES
+                },
+                "non_qualifying_classes": expected_non_qualifying,
+                "subjects": list(evidence.QUALIFIED_SUBJECTS),
+            },
+        )
+
+        assert envelope.status == status
+        assert not evidence.is_qualification_evidence(envelope, "deterministic")
+
+
+def test_evidence_rejects_terminal_state_and_claim_category_contradictions() -> None:
+    """A PASS cannot relabel a benchmark or contention result as a lifecycle claim."""
+    evidence = _load_evidence()
+    payload = {
+        "command": ["tools/verify_phase071_contracts.py", "--all"],
+        "result": "passed",
+        "claim_categories": {
+            "integrity": "EVIDENCED",
+            "recovery": "EVIDENCED",
+            "progress": "EVIDENCED",
+            "performance": "EVIDENCED",
+        },
+        "non_qualifying_classes": [
+            evidence_class
+            for evidence_class in evidence.EVIDENCE_CLASSES
+            if evidence_class != "deterministic"
+        ],
+        "subjects": list(evidence.QUALIFIED_SUBJECTS),
+    }
+
+    with pytest.raises(evidence.EvidenceValidationError, match="performance"):
+        evidence.make_envelope(
+            evidence_class="deterministic",
+            status="PASS",
+            revision="a" * 40,
+            source_digest="b" * 64,
+            payload=payload,
+        )
+
+
+def test_evidence_rejects_forged_source_digest_for_the_required_identity(
+    tmp_path: Path,
+) -> None:
+    """A digest-looking value is insufficient when it disagrees with reviewed sources."""
+    evidence = _load_evidence()
+    source = tmp_path / "source.py"
+    source.write_text("value = 1\n", encoding="utf-8")
+    envelope = evidence.make_envelope(
+        evidence_class="deterministic",
+        status="PASS",
+        revision="a" * 40,
+        source_digest="b" * 64,
+        payload={
+            "command": ["tools/verify_phase071_contracts.py", "--all"],
+            "result": "passed",
+            "claim_categories": {
+                "integrity": "EVIDENCED",
+                "recovery": "EVIDENCED",
+                "progress": "EVIDENCED",
+                "performance": "NOT_QUALIFIED",
+            },
+            "non_qualifying_classes": [
+                evidence_class
+                for evidence_class in evidence.EVIDENCE_CLASSES
+                if evidence_class != "deterministic"
+            ],
+            "subjects": list(evidence.QUALIFIED_SUBJECTS),
+        },
+    )
+
+    with pytest.raises(evidence.EvidenceValidationError, match="source digest"):
+        evidence.validate_source_identity(
+            envelope,
+            revision="a" * 40,
+            root=tmp_path,
+            paths=("source.py",),
+        )
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda value: value.update({"unexpected": "field"}),
+        lambda value: value["payload"].update({"result": "unavailable"}),
+    ],
+)
+def test_evidence_rejects_unknown_keys_and_contradictory_canonical_json(
+    tmp_path: Path, mutate
+) -> None:
+    """Untrusted envelope files have no extension keys or alternate terminal results."""
+    evidence = _load_evidence()
+    envelope = evidence.make_envelope(
+        evidence_class="deterministic",
+        status="PASS",
+        revision="a" * 40,
+        source_digest="b" * 64,
+        generated_at_utc="2026-09-13T00:00:00+00:00",
+        payload={
+            "command": ["tools/verify_phase071_contracts.py", "--all"],
+            "result": "passed",
+            "claim_categories": {
+                "integrity": "EVIDENCED",
+                "recovery": "EVIDENCED",
+                "progress": "EVIDENCED",
+                "performance": "NOT_QUALIFIED",
+            },
+            "non_qualifying_classes": [
+                evidence_class
+                for evidence_class in evidence.EVIDENCE_CLASSES
+                if evidence_class != "deterministic"
+            ],
+            "subjects": list(evidence.QUALIFIED_SUBJECTS),
+        },
+    )
+    value = envelope.to_mapping()
+    mutate(value)
+    path = tmp_path / "evidence.json"
+    path.write_text(json.dumps(value, sort_keys=True), encoding="utf-8")
+
+    with pytest.raises(evidence.EvidenceValidationError):
+        evidence.load_envelope(path)
+
+
+def test_report_names_each_unproduced_evidence_class_as_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The local command distinguishes a passing contract from absent external proof."""
+    runner = _load_runner()
+    output = tmp_path / "deterministic.json"
+    monkeypatch.setattr(runner, "current_source_identity", lambda: _clean_identity(runner))
+    monkeypatch.setattr(runner, "_run_child", lambda *_args: _passing_child())
+
+    assert runner.main(["deterministic", "--output", str(output)]) == 2
+    report = capsys.readouterr().out
+    assert "deterministic: PASS" in report
+    for evidence_class in (
+        "packaging",
+        "platform",
+        "coverage",
+        "structural",
+        "controlled_performance",
+        "live_services",
+    ):
+        assert f"{evidence_class}: UNAVAILABLE" in report
