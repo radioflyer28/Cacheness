@@ -706,7 +706,7 @@ def audit_documentation(root: Path = REPOSITORY_ROOT) -> tuple[str, ...]:
         if not path.is_file():
             errors.append(f"documentation target is absent: {relative_path}")
             continue
-        text = path.read_text(encoding="utf-8")
+        text = " ".join(path.read_text(encoding="utf-8").split())
         for term in terms:
             if term not in text:
                 errors.append(f"{relative_path} lacks required contract term: {term}")

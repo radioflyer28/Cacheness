@@ -235,6 +235,8 @@ def test_public_storage_docs_keep_the_d16_transport_boundary_explicit():
     retired_payload_apis = ("S3BlobBackend", "BlobBackend", "register_blob_backend")
 
     for relative_path, required_terms in documented.items():
-        text = (repository_root / relative_path).read_text(encoding="utf-8")
+        text = " ".join(
+            (repository_root / relative_path).read_text(encoding="utf-8").split()
+        )
         assert all(term in text for term in required_terms)
         assert all(retired not in text for retired in retired_payload_apis)
