@@ -106,6 +106,10 @@ The branch-aware deterministic measurement used the locked all-extras/dev enviro
 
 The following critical-scope aggregate is a research baseline, not the final threshold: 5,621 statements / 4,347 covered (77.33%) and 2,016 branches / 1,192 covered (59.13%). The planner should close named gaps first, rerun on the CI-controlled environment, and only then check in the gate baseline. [VERIFIED: `/tmp/cacheness-phase8-coverage.json` local measurement, 2026-09-13; `08-CONTEXT.md` D-14 and D-15]
 
+**Mandatory ordering before baseline capture:** Plan 04 must first add deterministic, named `PostgresqlLifecycleAuthority` contracts for all four highest-risk families: DB-API error classification, exact operation/proof replay, bounded inventory/reconciliation pagination, and rollback of failed transactions. Only after those selectors pass may Plan 05 measure and capture repository/critical floors. The current authority maps SQLSTATE and driver classes at the boundary, executes each semantic transition inside `connection.transaction()`, reconstructs exact persisted mutations, and applies explicit page/work caps; the existing tests cover pieces of each family but not a Phase 8-owned exhaustive selector inventory. [VERIFIED: `src/cacheness/storage/backends/postgresql_lifecycle_authority.py:247-345,1577-1695`; `tests/contracts/test_postgresql_lifecycle_authority.py:188-230,682-779,850-927,1181-1226`]
+
+Plan 04 therefore owns the test-first closure and Plan 05 owns the later measurement. The pre-gap percentages below are diagnostic context only: they are not acceptance floors and must not be copied into the checked baseline. [VERIFIED: `08-CONTEXT.md` D-14 and D-15]
+
 | Critical module | Statement | Branch | Planning implication |
 |---|---:|---:|---|
 | `src/cacheness/cache_policy.py` | 85.05% | 58.57% | Add explicit validation, continuation, and immutable-result branch tests. [VERIFIED: local coverage JSON, 2026-09-13] |
@@ -269,7 +273,11 @@ These are proposed paths, not claims about existing files. [ASSUMED] If the plan
 
 **Implementation guidance:** Adapt the schema/run name to Phase 8, add the obstore version and the Phase 8 gate/contract sources to the safe allow-list and source fingerprint, retain boto3 only in test-runner credential/cleanup tooling, and keep production S3 calls through `ObstoreGenerationIO.for_s3`. [VERIFIED: `tools/run_phase5_qualification.py:47-55,215-235`; `tests/integration/test_s3_generation.py`; `tests/test_full_suite_environment.py:98-119`]
 
-Create one aggregate release manifest that contains digests/references to deterministic, package, platform, coverage, performance, and live evidence. It must recompute relevant-source identity at release time; do not accept an artifact merely because its filename or workflow run is recent. [ASSUMED]
+Create one aggregate release manifest that contains digests/references to deterministic, package, platform, coverage, performance, and live evidence. It must recompute relevant-source identity at release time; do not accept an artifact merely because its filename or workflow run is recent. The fixed-verifier implementation should copy the Phase 5 separation between fixed local contract proof and separately sanitized live proof, and the release test should copy the Phase 3 practice of inspecting exact Git/tag/artifact state rather than trusting prose. [VERIFIED: `tools/verify_phase5_contracts.py:1-10,59-88`; `tests/test_phase3_release_evidence.py:22-94`]
+
+**Exact-SHA dispatch/collection contract:** the release operator supplies one explicit 40-character candidate SHA; the protected workflow checks out that input in detached state and proves `HEAD` equals it; the dispatcher records the resulting workflow run ID; it waits for that exact run to reach a successful terminal conclusion; and it downloads the named artifact using both run ID and artifact name. It must then validate the artifact envelope revision, relevant-source digest, terminal state, and cleanup status. A “latest run” or filename-only lookup is forbidden. `gh workflow run` supports dispatch inputs, `gh run view` exposes `databaseId`, `headSha`, status, and conclusion, `gh run watch <run-id> --exit-status` waits on the selected run, and `gh run download <run-id> -n <name>` selects a particular run artifact. [CITED: https://cli.github.com/manual/gh_workflow_run; CITED: https://cli.github.com/manual/gh_run_view; CITED: https://cli.github.com/manual/gh_run_watch; CITED: https://cli.github.com/manual/gh_run_download]
+
+**Immutable publication contract:** create the release as a draft, attach the exact sanitized aggregate and required qualifying evidence, verify the tag resolves to the candidate SHA and that the release asset set is exact, verify every API asset has state `uploaded` and a matching `sha256:` digest, then publish the draft and run `gh release verify <tag>` plus `gh release verify-asset <tag> <path>`. The final verifier must require the published release to report immutable state and must reject missing, extra, starter, digest-mismatched, or diagnostic assets. This transition is externally authorized and cannot be faked by deterministic tests. [CITED: https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases; CITED: https://docs.github.com/en/rest/releases/assets; CITED: https://docs.github.com/en/code-security/how-tos/secure-your-supply-chain/secure-your-dependencies/verify-release-integrity]
 
 ### Pattern 3: Measure → Close Gaps → Ratchet
 
@@ -533,10 +541,10 @@ The discrete values `"QUALIFIED"` and `"CLEAN"` are quoted verbatim from `_STATU
 ### Environmental/human prerequisites
 
 1. Approve `pyperf==2.10.0` after reviewing the official PSF repository/PyPI attestation; the automated legitimacy seam returned `SUS`. [VERIFIED: package-legitimacy seam, 2026-09-13; CITED: https://pypi.org/project/pyperf/]
-2. Provision and document a controlled Linux performance runner with stable CPU governor, isolated workload, local SSD/filesystem, fixed Python/uv/SQLite versions, and a durable runner label; the current machine is macOS ARM64 and is not eligible for D-20. [VERIFIED: local environment probe, 2026-09-13; `08-CONTEXT.md` D-20]
-3. Configure a protected GitHub release environment with real PostgreSQL and Amazon S3 secrets, IAM/bucket policy, explicit bucket/region, and no endpoint override. All four required qualification variables are currently unset locally. [VERIFIED: `tools/run_phase5_qualification.py:34-39,95-99`; local environment probe, 2026-09-13]
-4. Enable/approve immutable GitHub releases and attach sanitized qualification evidence before publish; repository/org settings are external to deterministic code changes. [CITED: https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases]
-5. Run the live suite against both services for the exact candidate after all relevant code/test/tool/workflow changes; no local substitute can close BACK-05. [VERIFIED: `08-CONTEXT.md` D-10 through D-12]
+2. Provision the physical machine behind the settled workflow label `cacheness-perf-linux-x64`, then record stable CPU, governor, filesystem, Python, uv, SQLite, workload-isolation, and runner-image facts in the baseline fingerprint. The current machine is macOS ARM64 and is not eligible for D-20; no controlled-runner evidence currently exists. [VERIFIED: `08-11-PLAN.md` Task 1 precondition; local environment probe, 2026-09-13; `08-CONTEXT.md` D-20]
+3. Configure the protected GitHub release environment with real PostgreSQL and Amazon S3 secrets, IAM/bucket policy, explicit bucket/region, and no endpoint override. The owning cloud/repository administrator must run the Phase 8 runner preflight before dispatch; all four required qualification variables are currently unset locally, so the present state is `UNAVAILABLE`, not evidence. [VERIFIED: `tools/run_phase5_qualification.py:34-39,95-99`; local environment probe, 2026-09-13]
+4. Enable immutable GitHub releases and give a named release operator permission to create a draft, upload assets, verify digests, and publish it. The checkpoint must inspect actual repository/organization settings and `gh auth status`; repository settings, reviewer identity, credentials, and approval are external facts and are not claimed here. [CITED: https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases]
+5. Dispatch the protected workflow for the explicit candidate SHA, record its exact run ID, wait for that run, download the named artifact by run ID, then validate the envelope before aggregation. Run the live suite against both services only after all relevant code/test/tool/workflow changes; no local substitute can close BACK-05. [VERIFIED: `08-CONTEXT.md` D-10 through D-12; CITED: https://cli.github.com/manual/gh_run_download]
 6. Capture and review the first controlled Linux performance baseline; statistical thresholds cannot be finalized from this macOS research run. [VERIFIED: `08-CONTEXT.md` D-14 and D-20]
 7. Provide/confirm GitHub-hosted macOS capacity for Python 3.11 and 3.14 boundary smoke. Native Windows remains explicitly deferred. [VERIFIED: `08-CONTEXT.md` D-06]
 
@@ -544,48 +552,58 @@ The discrete values `"QUALIFIED"` and `"CLEAN"` are quoted verbatim from `_STATU
 
 | # | Claim | Section | Risk if Wrong |
 |---|-------|---------|---------------|
-| A1 | Core/non-TensorFlow features should gate on Python 3.11-3.14 while TensorFlow qualifies separately on 3.11-3.13. | Packaging and Platform Gap | Support messaging or CI layout may need a different interpretation of “latest compatible stable.” |
-| A2 | Use 30-day retention for failed, unavailable, and scheduled diagnostic artifacts. | Standard Stack | Organization policy may mandate a shorter or longer bounded window. |
-| A3 | Name/provision a dedicated `cacheness-perf-linux-x64-v1`-class runner with stable OS/hardware configuration. | Architecture / Prerequisites | Runner availability and cost may require a different controlled identity. |
 | A4 | Start with 20 pyperf worker processes and a statistically significant 20% relative slowdown envelope, then validate noise on the controlled runner. | Controlled Relative Performance Envelope | Actual variance may require a different sample count/envelope before baseline lock. |
 | A5 | Use 4 KiB, 16 MiB, and 128 MiB object tiers and a 100k-row dataframe fixture. | Layer-Separated Workloads | Runtime or memory cost may exceed CI budgets or underrepresent real workloads. |
 | A6 | Use 10/100/1,000/10,000 entry scale tiers for structural call/memory tests. | Structural Complexity Contracts | Seeding cost may be excessive; lower tiers might still prove formulas if instrumentation is exact. |
 | A7 | Split gate code among the proposed workflow/tool/test paths. | Recommended Project Structure | Existing verifier conventions may favor fewer files; responsibilities must remain equivalent. |
-| A8 | Use GitHub Actions and immutable GitHub releases as the release system. | Standard Stack | If release publishing occurs elsewhere, evidence upload/retention integration must change. |
 | A9 | Add pyperf rather than extending the custom harness. | Standard Stack | Human legitimacy checkpoint may reject the dependency, requiring a reviewed in-repo statistics alternative. |
-| A10 | Centralize selectors/evidence schemas in Python and aggregate their digests into one exact-commit release manifest. | Architecture Patterns | Existing verifier composition may require a different implementation while preserving the same evidence boundary. |
 | A11 | Build the Ruff argv from the merge-base changed-file set union a fixed critical scope. | Ruff Scope Drift | Repository workflow conventions may provide a different safe changed-file source. |
 | A12 | Count authority reads/writes and participant head/open/delete/list separately at fixed scale tiers. | Structural Complexity Contracts | Existing spy interfaces or seeding cost may require equivalent counters/tiers. |
-| A13 | Use protected GitHub environments, off-hour schedules, action SHA pins, and no live secrets on PR jobs. | Security / CI | Repository ownership or release infrastructure may implement equivalent controls differently. |
 | A14 | Optional-group qualification should use public `BlobStore`/`UnifiedCache` round trips rather than handler-internal file calls. | Packaging Pitfall | A public route may not expose every handler format selector without a small test-only fixture seam. |
-| A15 | Use the proposed quick/per-wave/phase sampling commands and Wave 0 paths. | Validation Architecture | Planner may consolidate paths or selectors while retaining equivalent gates. |
 
-## Open Questions
+The removed assumptions (TensorFlow matrix, 30-day diagnostic retention, exact controlled-runner label, GitHub Actions/immutable release system, centralized exact-commit aggregation, protected environment, and validation layout) are settled Phase 8 design choices in Plans 01-11. Their external availability is handled by the checkpoints below; it is not assumed.
 
-1. **What exact machine is the controlled Linux runner?**
-   - What we know: D-20 requires a named controlled Linux runner; the current host is macOS ARM64. [VERIFIED: `08-CONTEXT.md` D-20; local environment probe, 2026-09-13]
-   - What's unclear: CPU model, runner ownership, filesystem, noise isolation, and persistence are external facts.
-   - Recommendation: provision one dedicated self-hosted x86-64 Linux runner and record an immutable environment fingerprint in every baseline. [ASSUMED]
+## Open Questions — RESOLVED FOR PLANNING
 
-2. **How is “latest compatible stable” communicated for TensorFlow?**
-   - What we know: core metadata is Python `>=3.11`; CPython 3.14 is stable; TensorFlow 2.21.0 wheels stop at 3.13. [VERIFIED: `pyproject.toml:9,34-36`; CITED: https://devguide.python.org/versions/; CITED: https://pypi.org/project/tensorflow/]
-   - What's unclear: whether support docs promise every extra on every core-supported minor.
-   - Recommendation: qualify core/non-TensorFlow through 3.14, explicitly publish TensorFlow support through 3.13, and fail the compatibility manifest if that exception is undocumented. [ASSUMED]
+No design question remains open. The five prior questions are resolved into deterministic implementation contracts plus external execution prerequisites. A prerequisite that is absent must remain `UNAVAILABLE` or block publication; it must never be converted into a passing claim.
 
-3. **What thresholds remain after named coverage gaps are closed?**
-   - What we know: the pre-gap local baseline is total 75.29% statement / 58.82% branch and critical aggregate 77.33% / 59.13%. [VERIFIED: local coverage JSON, 2026-09-13]
-   - What's unclear: the post-gap CI-controlled rates.
-   - Recommendation: plan a measurement checkpoint after gap tests; check in those post-gap values as non-regression floors rather than inventing higher percentages now. [VERIFIED: `08-CONTEXT.md` D-14 and D-15]
+1. **RESOLVED — controlled Linux runner identity**
+   - **Settled design:** `.github/workflows/performance.yml` targets the exact logical label `cacheness-perf-linux-x64`; every baseline/evidence envelope carries the full physical fingerprint and rejects label, OS/architecture, CPU/governor, filesystem, Python/uv/SQLite, or source-SHA drift. [VERIFIED: `08-07-PLAN.md` Task 3; `08-11-PLAN.md` Task 1]
+   - **External prerequisite/owner:** a repository/infrastructure maintainer must provision and register the physical runner. No machine identity is asserted by this research.
+   - **Preflight/checkpoint:** before baseline capture, Plan 11 Task 1 verifies the exact label, Linux x86-64 identity, stable fingerprint/noise, clean worktree, and candidate SHA. If unavailable or unstable, QUAL-06 stays unqualified and there is no local/macOS fallback. [VERIFIED: `08-CONTEXT.md` D-20]
 
-4. **Are immutable releases enabled and who may approve live qualification?**
-   - What we know: immutable releases can lock tags/assets and create attestations. [CITED: https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases]
-   - What's unclear: repository/organization settings and required reviewers.
-   - Recommendation: make enabling the feature and naming reviewers a human checkpoint before release workflow activation. [ASSUMED]
+2. **RESOLVED — TensorFlow support messaging**
+   - **Settled design:** advertise and gate base/core plus installable non-TensorFlow groups on stable Python 3.11-3.14; qualify the TensorFlow extra on Python 3.11-3.13; explicitly record TensorFlow-on-3.14 as dependency-incompatible and never silently skip it. [VERIFIED: `08-02-PLAN.md` and `08-03-PLAN.md`; CITED: https://devguide.python.org/versions/; CITED: https://pypi.org/project/tensorflow/]
+   - **Owner:** Plans 02-03 own the compatibility manifest, fresh-environment wheel probes, platform workflow, and public support table.
+   - **Preflight/checkpoint:** each matrix row builds/installs from the exact lock/source in a fresh environment and either passes its representative public round trip or records a nonqualifying incompatibility. No human decision is needed unless upstream availability changes.
 
-5. **What live PostgreSQL/Amazon-S3 environment will qualify the first release?**
-   - What we know: all four local runner variables are unset and no local PostgreSQL CLI is present; AWS CLI exists but was not used to probe credentials. [VERIFIED: local environment probe, 2026-09-13]
-   - What's unclear: service endpoints/accounts, IAM permissions, bucket lifecycle policy, database privileges, and cost guardrails.
-   - Recommendation: provision a dedicated bounded qualification database/schema and bucket/prefix with the existing exact owner markers and cleanup limits, then run the protected workflow. [ASSUMED]
+3. **RESOLVED — coverage floors**
+   - **Settled design:** do not invent a threshold from the pre-gap research numbers. Plan 04 first adds named deterministic selectors, including the four PostgreSQL families (DB-API error classification, replay, bounded pagination, transactional rollback); Plan 05 then captures the actual post-gap repository-total and critical-scope statement/branch counts and rates as immutable non-regression floors. [VERIFIED: `08-CONTEXT.md` D-14 and D-15; `src/cacheness/storage/backends/postgresql_lifecycle_authority.py:247-345,1577-1695`]
+   - **Owner:** Plan 04 owns test-first gap closure; Plan 05 owns baseline capture and the read-only verifier.
+   - **Preflight/checkpoint:** the named PostgreSQL and cache/lifecycle suites must exist, collect without skip/deselection, and pass before capture. Baseline capture requires an explicit justification and review; ordinary verification cannot rewrite it. The currently measured 75.29%/58.82% total and 77.33%/59.13% critical rates remain diagnostics only.
+
+4. **RESOLVED — immutable-release approval and publication**
+   - **Settled design:** the final transition is draft release → attach exact sanitized qualifying assets → verify tag SHA, exact asset-name set, each asset state and SHA-256 digest → publish → verify immutable release and each local asset. Extra diagnostic artifacts are forbidden from the qualifying release asset set. [CITED: https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases; CITED: https://docs.github.com/en/rest/releases/assets; CITED: https://docs.github.com/en/code-security/how-tos/secure-your-supply-chain/secure-your-dependencies/verify-release-integrity]
+   - **External prerequisite/owner:** a repository administrator enables immutable releases and names an authorized release operator/reviewer. This research does not claim the setting or identity exists.
+   - **Preflight/checkpoint:** before Plan 11 Task 3, verify repository/org immutable-release policy, `gh auth status`, release permissions, exact tag-to-SHA resolution, and complete same-SHA evidence. The operator performs the irreversible publish only after the verifier passes; a final read-only verifier requires published/non-draft immutable state plus the exact assets/digests.
+
+5. **RESOLVED — live PostgreSQL/Amazon-S3 environment**
+   - **Settled design:** use a protected GitHub environment, the four existing configuration names, real PostgreSQL plus authoritative Amazon S3 with standard provider identity and no endpoint override, exact owner markers, bounded cleanup, and the frozen three-module live suite. [VERIFIED: `08-08-PLAN.md`; `tools/run_phase5_qualification.py:34-39,395-491`; `08-CONTEXT.md` D-09 through D-13]
+   - **External prerequisite/owner:** a cloud/repository administrator provisions least-privilege database/schema and bucket/prefix access and installs the protected secrets. No endpoint, account, credential, or budget is invented here.
+   - **Preflight/checkpoint:** run the Phase 8 runner’s configuration-only preflight; dispatch the explicit 40-character SHA; record and wait for its exact workflow run ID; confirm `headSha`; download the named artifact by run ID; and validate revision, relevant-source digest, `QUALIFIED`, complete frozen selection, and `CLEAN`. If any preflight, execution, or cleanup check fails, BACK-05 remains `UNAVAILABLE`/`NOT_QUALIFIED`. [CITED: https://cli.github.com/manual/gh_workflow_run; CITED: https://cli.github.com/manual/gh_run_view; CITED: https://cli.github.com/manual/gh_run_watch; CITED: https://cli.github.com/manual/gh_run_download]
+
+### Required checkpoint mechanics
+
+| Gate | Checkpoint type | Owner | Resume signal | On failure/absence |
+|---|---|---|---|---|
+| `pyperf` package legitimacy | `checkpoint:human-verify` | Maintainer | Explicit package approval or explicit rejection selecting the documented in-repo fallback | Do not install or silently continue |
+| Physical controlled runner | `checkpoint:human-action` | Repository/infrastructure maintainer | Runner registered under `cacheness-perf-linux-x64` and preflight fingerprint attached | QUAL-06 remains unavailable |
+| Protected live resources/secrets | `checkpoint:human-action` | Cloud/repository administrator | Configuration-only preflight succeeds without disclosing values | BACK-05 remains `UNAVAILABLE` |
+| Exact candidate dispatch | `checkpoint:human-verify` | Release operator | Exact candidate SHA approved; resulting run ID recorded | Do not select another/latest run |
+| Immutable release enablement/permissions | `checkpoint:human-action` | Repository administrator | Actual policy and authenticated permission preflights pass | Final release publication is blocked |
+| Irreversible draft publication | `checkpoint:human-verify` | Release operator/reviewer | Exact tag/SHA and prepublication state/assets/digests report approved | Leave draft unpublished and report the failing class |
+
+After the resume signal, deterministic automation continues and revalidates the external state. A human assertion alone does not fill any evidence class.
 
 ## Environment Availability
 
@@ -596,7 +614,7 @@ The discrete values `"QUALIFIED"` and `"CLEAN"` are quoted verbatim from `_STATU
 | uv | Locked environments/build | ✓ | 0.12.12 | None recommended. [VERIFIED: local environment probe, 2026-09-13] |
 | pytest / pytest-cov / Coverage.py | Tests/coverage | ✓ in `.venv` | 8.4.1 / 6.2.1 / 7.10.3 | Locked CI environment. [VERIFIED: local package metadata, 2026-09-13] |
 | Ruff | Lint/format | ✓ in `.venv` | 0.12.9 | Locked CI environment. [VERIFIED: local package metadata, 2026-09-13] |
-| GitHub CLI | Release operations | ✓ binary | Not probed | GitHub UI/API. [VERIFIED: local environment probe, 2026-09-13] |
+| GitHub CLI | Exact-run collection and immutable release verification | ✓ | 2.98.0; `gh release verify` and `gh release verify-asset` available | GitHub REST API, with the same exact state/digest checks. [VERIFIED: local environment probe, 2026-09-13] |
 | Docker CLI | Optional local service tests | ✓ binary | Daemon not probed | Deterministic fakes/CI service; never substitute for live release qualification. [VERIFIED: local environment probe, 2026-09-13] |
 | PostgreSQL client/service | Live qualification | ✗ locally | — | No qualifying fallback; protected real service required. [VERIFIED: local environment probe, 2026-09-13; `08-CONTEXT.md` D-11] |
 | AWS CLI | Operations support | ✓ binary | Not probed | Runner uses standard AWS credential chain; CLI itself is not proof. [VERIFIED: local environment probe, 2026-09-13] |
@@ -648,12 +666,14 @@ The full-suite command includes marked live modules and therefore must be used w
 - [ ] `.github/workflows/live_qualification.yml` — protected dispatch and off-hour schedule, short-lived diagnostics. [ASSUMED]
 - [ ] `.github/workflows/performance.yml` — controlled-runner-only benchmark gate. [ASSUMED]
 - [ ] `tools/run_phase8_qualification.py` and runner self-tests — adapt Phase 5 evidence without weakening it. [ASSUMED]
+- [ ] `tests/test_phase8_lifecycle_coverage.py` — add literal Phase 8 selectors for PostgreSQL DB-API error classification, exact replay, bounded pagination, and transactional rollback before any coverage baseline capture. [VERIFIED: `08-CONTEXT.md` D-14 and D-15; `src/cacheness/storage/backends/postgresql_lifecycle_authority.py:247-345,1577-1695`]
 - [ ] `tools/verify_phase8_coverage.py` plus checked baseline schema/self-tests — total and critical statement/branch ratchet. [ASSUMED]
 - [ ] `tests/packaging/test_wheel_matrix.py` — base plus literal per-extra independent probes. [ASSUMED]
 - [ ] `tests/performance/test_complexity_contracts.py` — call formulas and peak-memory tiers. [ASSUMED]
 - [ ] `benchmarks/phase8_benchmarks.py`, workload definitions, schema tests, and controlled baseline path. [ASSUMED]
 - [ ] `pyproject.toml` branch coverage setting and `pyperf` dev dependency after human package checkpoint. [ASSUMED]
 - [ ] Exact fixed selectors for named integrity/recovery/policy/qualification/package gaps; percentages alone are insufficient. [VERIFIED: `08-CONTEXT.md` D-15]
+- [ ] Exact-SHA workflow dispatch/run-ID wait/artifact-name download tests, and a final immutable publication verifier for exact tag SHA, published immutable state, exact asset set, upload states, and SHA-256 digests. [VERIFIED: `08-08-PLAN.md` Task 3; `08-10-PLAN.md`; `08-11-PLAN.md` Task 3; CITED: https://cli.github.com/manual/gh_run_download; CITED: https://docs.github.com/en/rest/releases/assets]
 
 ## Security Domain
 
@@ -702,6 +722,9 @@ Security enforcement is enabled at ASVS level 1 in `.planning/config.json`. [VER
 - https://docs.github.com/en/actions/tutorials/manage-your-work/schedule-issue-creation — schedule delay/drop caveat. [CITED]
 - https://docs.github.com/en/organizations/managing-organization-settings/configuring-the-retention-period-for-github-actions-artifacts-and-logs-in-your-organization — artifact retention bounds. [CITED]
 - https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases — immutable tag/asset and attestation behavior. [CITED]
+- https://docs.github.com/en/rest/releases/assets — release asset upload state and server-reported SHA-256 digest. [CITED]
+- https://docs.github.com/en/code-security/how-tos/secure-your-supply-chain/secure-your-dependencies/verify-release-integrity — immutable release and local release-asset verification commands. [CITED]
+- https://cli.github.com/manual/gh_workflow_run, https://cli.github.com/manual/gh_run_view, https://cli.github.com/manual/gh_run_watch, and https://cli.github.com/manual/gh_run_download — exact dispatch inputs, run identity/status, wait, and run-ID artifact download. [CITED]
 - https://docs.astral.sh/uv/concepts/projects/build/ — wheel build pattern. [CITED]
 - https://coverage.readthedocs.io/en/latest/commands/cmd_reporting.html — coverage reporting. [CITED]
 - https://docs.astral.sh/ruff/linter/ and https://docs.astral.sh/ruff/formatter/ — direct lint/format modes. [CITED]
@@ -710,7 +733,7 @@ Security enforcement is enabled at ASVS level 1 in `.planning/config.json`. [VER
 
 ### Tertiary (LOW confidence)
 
-- The exact controlled-runner identity, diagnostic retention, workload sizes, sample count, scale tiers, and 20% envelope are research recommendations pending user/operator validation. [ASSUMED]
+- Workload sizes, sample count, scale tiers, and the initial 20% envelope remain research recommendations to validate on the controlled runner. The logical runner label and diagnostic retention are settled; the physical runner and credentials remain external prerequisites, not assumptions. [ASSUMED]
 
 ## Metadata
 
