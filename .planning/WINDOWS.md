@@ -2,9 +2,9 @@
 schema_version: 1
 open_count: 6
 waived_count: 0
-fixed_count: 43
-total_count: 49
-last_updated: 2026-09-13T18:21:50.443Z
+fixed_count: 44
+total_count: 50
+last_updated: 2026-09-13T18:33:53.730Z
 ---
 
 # Broken Windows Ledger
@@ -64,6 +64,7 @@ last_updated: 2026-09-13T18:21:50.443Z
 | 47 | 07.1 | deviation | src/cacheness/storage/sqlite_lifecycle_authority.py |  | Durable authority adapters implement the metadata CAS required by the expanded runtime protocol. | fixed |  | 2026-09-13T17:02:22.726Z | 2026-09-13T17:02:52.758Z |
 | 48 | 07.1 | deviation | tests/test_sqlite_lifecycle_authority.py |  | Updated durable-authority test rows for the new nullable evidence column | open |  | 2026-09-13T17:31:57.763Z |  |
 | 49 | 07.1 | deviation | src/cacheness/storage/migration_authority.py |  | Candidate transport evidence required an exact authority-owned verification update before activation. | fixed |  | 2026-09-13T18:21:20.367Z | 2026-09-13T18:21:50.443Z |
+| 50 | 07.1 | deviation | tests/contracts/test_topology_lifecycle.py |  | Remote topology fake and frozen threat selectors lagged unified obstore participant contracts | fixed |  | 2026-09-13T18:33:22.474Z | 2026-09-13T18:33:53.730Z |
 
 ````json
 [
@@ -654,6 +655,18 @@ last_updated: 2026-09-13T18:21:50.443Z
     "reason": "",
     "recorded_at": "2026-09-13T18:21:20.367Z",
     "resolved_at": "2026-09-13T18:21:50.443Z"
+  },
+  {
+    "id": 50,
+    "kind": "deviation",
+    "phase": "07.1",
+    "file": "tests/contracts/test_topology_lifecycle.py",
+    "line": null,
+    "description": "Remote topology fake and frozen threat selectors lagged unified obstore participant contracts",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-09-13T18:33:22.474Z",
+    "resolved_at": "2026-09-13T18:33:53.730Z"
   }
 ]
 ````
