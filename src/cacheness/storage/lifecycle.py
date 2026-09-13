@@ -666,7 +666,7 @@ class AuthorityLifecycleEngine:
         expected: EntryExpectation | None,
         replace_values: bool,
     ) -> LifecyclePutResult | None:
-        """Promote catalog attributes against the exact current record only."""
+        """Replace catalog attributes through one exact authority-only CAS."""
         entry = self.authority.read_entry(key)
         if entry is None:
             return None
@@ -699,51 +699,25 @@ class AuthorityLifecycleEngine:
                 signature="",
             )
         )
-        prepared = self.authority.prepare_mutation(
-            MutationSpec.create(
-                operation_id=uuid4().hex,
-                key=key,
-                generation=manifest.generation,
-                candidate_locator=manifest.locator,
-                expected=entry.expectation,
-                manifest=updated.canonical_bytes(),
-            )
+        updated_bytes = updated.canonical_bytes()
+        self.store._authenticated_authority_manifest(updated_bytes)
+        promoted = self.authority.replace_committed_metadata(
+            entry,
+            expected=entry.expectation,
+            manifest=updated_bytes,
         )
-        try:
-            self._reach("catalog.intent_prepared", key=key)
-            with self.store._materialize_authority_store().open_snapshot(
-                manifest.locator, self.store._handler_metadata(manifest)
-            ) as snapshot:
-                digest, byte_size = sha256_and_size(snapshot.path)
-            if digest != manifest.digest or byte_size != manifest.byte_size:
-                raise CacheBlobPayloadTamperedError(
-                    "Authority lifecycle payload verification failed"
-                )
-            self.authority.record_verification(
-                prepared,
-                VerificationProof(
-                    digest=updated.digest,
-                    byte_size=updated.byte_size,
-                    manifest=updated.canonical_bytes(),
-                ),
-            )
-            self._reach("catalog.before_promotion", key=key)
-            promoted = self.authority.promote_mutation(prepared)
-        except Exception:
-            self._abort(prepared, candidate_persisted=False)
-            raise
         return LifecyclePutResult(
-            operation_id=prepared.operation_id,
+            operation_id=uuid4().hex,
             key=key,
             expected=entry.expectation,
-            promoted=promoted.entry,
+            promoted=promoted,
             previous=entry,
-            cleanup_debt=tuple(promoted.cleanup_debt),
+            cleanup_debt=(),
         )
 
 
     def update_metadata(self, key: str, metadata: dict[str, Any]) -> bool:
-        """Promote a new signed metadata revision without changing payload bytes."""
+        """Replace signed user metadata without touching the payload lifecycle."""
         if not isinstance(metadata, dict):
             raise CacheBlobLifecycleConflictError("BlobStore metadata patches must be dictionaries")
         entry = self.authority.read_entry(key)
@@ -759,44 +733,17 @@ class AuthorityLifecycleEngine:
         updated = self._sign(
             replace(
                 manifest,
-                generation=uuid4().hex,
                 user_metadata={**dict(manifest.user_metadata), **metadata},
                 signature="",
             )
         )
-        prepared = self.authority.prepare_mutation(
-            MutationSpec.create(
-                operation_id=uuid4().hex,
-                key=key,
-                generation=updated.generation,
-                candidate_locator=manifest.locator,
-                expected=entry.expectation,
-                manifest=updated.canonical_bytes(),
-            )
+        updated_bytes = updated.canonical_bytes()
+        self.store._authenticated_authority_manifest(updated_bytes)
+        self.authority.replace_committed_metadata(
+            entry,
+            expected=entry.expectation,
+            manifest=updated_bytes,
         )
-        try:
-            self._reach("metadata.intent_prepared", key=key)
-            with self.store._materialize_authority_store().open_snapshot(
-                manifest.locator, self.store._handler_metadata(manifest)
-            ) as snapshot:
-                digest, byte_size = sha256_and_size(snapshot.path)
-            if digest != manifest.digest or byte_size != manifest.byte_size:
-                raise CacheBlobPayloadTamperedError(
-                    "Authority lifecycle payload verification failed"
-                )
-            self.authority.record_verification(
-                prepared,
-                VerificationProof(
-                    digest=updated.digest,
-                    byte_size=updated.byte_size,
-                    manifest=updated.canonical_bytes(),
-                ),
-            )
-            self._reach("metadata.before_promotion", key=key)
-            self.authority.promote_mutation(prepared)
-        except Exception:
-            self._abort(prepared, candidate_persisted=False)
-            raise
         return True
 
     def delete(self, key: str, *, expected: EntryExpectation | None = None) -> bool:

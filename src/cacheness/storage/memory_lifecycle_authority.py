@@ -14,6 +14,7 @@ from cacheness.error_handling import (
     CacheBlobLifecycleConflictError,
     CacheBlobMigrationOfflineDecisionRequiredError,
     CacheBlobStoreClosedError,
+    CacheManifestIntegrityError,
 )
 
 from .lifecycle_authority import (
@@ -311,6 +312,82 @@ class InMemoryLifecycleAuthority:
             return self._promoted_result(prepared.operation_id)
 
         return self._transition(promote)
+
+    def replace_committed_metadata(
+        self,
+        entry: EntrySnapshot,
+        *,
+        expected: EntryExpectation,
+        manifest: bytes,
+    ) -> EntrySnapshot:
+        """Atomically replace only signed mutable descriptor fields for one entry."""
+
+        def replace_metadata() -> EntrySnapshot:
+            stored = self._entries.get(entry.key)
+            if (
+                stored is None
+                or stored != entry
+                or stored.expectation != expected
+                or self._expectation(entry.key) != expected
+            ):
+                raise CacheBlobLifecycleConflictError(
+                    "Metadata replacement expectation no longer matches authority"
+                )
+            try:
+                current_manifest = BlobManifest.from_canonical_bytes(stored.manifest)
+                replacement_manifest = BlobManifest.from_canonical_bytes(manifest)
+            except (CacheManifestIntegrityError, TypeError, ValueError) as error:
+                raise CacheBlobLifecycleConflictError(
+                    "Metadata replacement descriptor is malformed"
+                ) from error
+            if (
+                replacement_manifest.key != current_manifest.key
+                or replacement_manifest.generation != current_manifest.generation
+                or replacement_manifest.locator != current_manifest.locator
+                or replacement_manifest.digest != current_manifest.digest
+                or replacement_manifest.byte_size != current_manifest.byte_size
+                or replacement_manifest.state != current_manifest.state
+            ):
+                raise CacheBlobLifecycleConflictError(
+                    "Metadata replacement changed immutable payload identity"
+                )
+            current_record = current_manifest.to_mapping()
+            replacement_record = replacement_manifest.to_mapping()
+            for field_name in (
+                "catalog_values",
+                "catalog_presence",
+                "user_metadata",
+                "signature",
+            ):
+                current_record.pop(field_name, None)
+                replacement_record.pop(field_name, None)
+            if current_record != replacement_record:
+                raise CacheBlobLifecycleConflictError(
+                    "Metadata replacement changed immutable descriptor fields"
+                )
+            self._revision += 1
+            replacement = EntrySnapshot(
+                key=stored.key,
+                generation=stored.generation,
+                locator=stored.locator,
+                manifest=bytes(manifest),
+                expectation=EntryExpectation(
+                    lineage=stored.expectation.lineage,
+                    revision=self._revision,
+                    generation=stored.generation,
+                    manifest_digest=hashlib.sha256(manifest).hexdigest(),
+                ),
+                transport_evidence=(
+                    None
+                    if stored.transport_evidence is None
+                    else bytes(stored.transport_evidence)
+                ),
+            )
+            self._entries[stored.key] = replacement
+            self._projection_dirty = True
+            return self._copy(replacement)
+
+        return self._transition(replace_metadata)
 
     def abort_mutation(
         self, prepared: PreparedMutation, *, candidate_persisted: bool = False

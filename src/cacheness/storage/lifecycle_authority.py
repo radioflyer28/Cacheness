@@ -376,6 +376,14 @@ class LifecycleAuthority(Protocol):
 
     def promote_mutation(self, prepared: PreparedMutation) -> PromotionResult: ...
 
+    def replace_committed_metadata(
+        self,
+        entry: EntrySnapshot,
+        *,
+        expected: EntryExpectation,
+        manifest: bytes,
+    ) -> EntrySnapshot: ...
+
     def abort_mutation(
         self, prepared: PreparedMutation, *, candidate_persisted: bool = False
     ) -> None: ...

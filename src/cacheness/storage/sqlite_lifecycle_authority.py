@@ -29,6 +29,7 @@ from cacheness.error_handling import (
     CacheBlobMigrationOfflineDecisionRequiredError,
     CacheBlobMigrationRequiredError,
     CacheBlobStoreClosedError,
+    CacheManifestIntegrityError,
     CacheReason,
 )
 
@@ -1243,6 +1244,115 @@ class SqliteLifecycleAuthority:
             if connection is None:
                 return EntryExpectation.absent()
             return self._expectation(connection, key)
+
+    def replace_committed_metadata(
+        self,
+        entry: EntrySnapshot,
+        *,
+        expected: EntryExpectation,
+        manifest: bytes,
+    ) -> EntrySnapshot:
+        """Atomically replace signed mutable descriptor fields for one entry."""
+
+        def replace_metadata(connection: sqlite3.Connection) -> EntrySnapshot:
+            observed = self._expectation(connection, entry.key)
+            if not self._matches(expected, observed):
+                raise CacheBlobLifecycleConflictError(
+                    "Metadata replacement expectation no longer matches authority"
+                )
+            row = connection.execute(
+                "SELECT generation, locator, manifest, manifest_digest, lineage, revision "
+                "FROM entries WHERE key = ?",
+                (entry.key,),
+            ).fetchone()
+            if row is None:
+                raise CacheBlobLifecycleConflictError("Metadata replacement entry is absent")
+            stored = EntrySnapshot(
+                entry.key,
+                row[0],
+                row[1],
+                bytes(row[2]),
+                EntryExpectation(row[4], row[5], row[0], row[3]),
+            )
+            if stored != entry:
+                raise CacheBlobLifecycleConflictError(
+                    "Metadata replacement entry changed before comparison"
+                )
+            try:
+                current_manifest = BlobManifest.from_canonical_bytes(stored.manifest)
+                replacement_manifest = BlobManifest.from_canonical_bytes(manifest)
+            except (CacheManifestIntegrityError, TypeError, ValueError) as error:
+                raise CacheBlobLifecycleConflictError(
+                    "Metadata replacement descriptor is malformed"
+                ) from error
+            if (
+                replacement_manifest.key != current_manifest.key
+                or replacement_manifest.generation != current_manifest.generation
+                or replacement_manifest.locator != current_manifest.locator
+                or replacement_manifest.digest != current_manifest.digest
+                or replacement_manifest.byte_size != current_manifest.byte_size
+                or replacement_manifest.state != current_manifest.state
+            ):
+                raise CacheBlobLifecycleConflictError(
+                    "Metadata replacement changed immutable payload identity"
+                )
+            current_record = current_manifest.to_mapping()
+            replacement_record = replacement_manifest.to_mapping()
+            for field_name in (
+                "catalog_values",
+                "catalog_presence",
+                "user_metadata",
+                "signature",
+            ):
+                current_record.pop(field_name, None)
+                replacement_record.pop(field_name, None)
+            if current_record != replacement_record:
+                raise CacheBlobLifecycleConflictError(
+                    "Metadata replacement changed immutable descriptor fields"
+                )
+            revision = connection.execute(
+                "SELECT revision FROM authority_state WHERE singleton = 1"
+            ).fetchone()[0] + 1
+            manifest_digest = hashlib.sha256(manifest).hexdigest()
+            cursor = connection.execute(
+                "UPDATE entries SET manifest = ?, manifest_digest = ?, revision = ? "
+                "WHERE key = ? AND generation = ? AND locator = ? AND lineage = ? "
+                "AND revision = ? AND manifest_digest = ?",
+                (
+                    manifest,
+                    manifest_digest,
+                    revision,
+                    entry.key,
+                    stored.generation,
+                    stored.locator,
+                    stored.expectation.lineage,
+                    stored.expectation.revision,
+                    stored.expectation.manifest_digest,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise CacheBlobLifecycleConflictError(
+                    "Metadata replacement compare-and-swap did not apply"
+                )
+            connection.execute(
+                "UPDATE authority_state SET revision = ?, projection_dirty = 1 "
+                "WHERE singleton = 1",
+                (revision,),
+            )
+            return EntrySnapshot(
+                key=stored.key,
+                generation=stored.generation,
+                locator=stored.locator,
+                manifest=bytes(manifest),
+                expectation=EntryExpectation(
+                    stored.expectation.lineage,
+                    revision,
+                    stored.generation,
+                    manifest_digest,
+                ),
+            )
+
+        return self._transaction(replace_metadata)
 
     def prepare_mutation(self, spec: MutationSpec) -> PreparedMutation:
         # This observer is deliberately outside the mutation transaction: it
