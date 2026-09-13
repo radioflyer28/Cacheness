@@ -26,6 +26,8 @@ DETERMINISTIC_COMMAND = (
     "--all",
 )
 CHILD_TIMEOUT_SECONDS = 900
+DETERMINISTIC_FAILURE_EXIT_CODE = 1
+UNAVAILABLE_EXTERNAL_EVIDENCE_EXIT_CODE = 2
 RELEVANT_SOURCE_PATHS = (
     "pyproject.toml",
     "uv.lock",
@@ -181,9 +183,11 @@ def _write_result(
 def run_deterministic(
     *,
     output: Path,
-    run_child: Callable[[tuple[str, ...], int], subprocess.CompletedProcess[str]] = _run_child,
+    run_child: Callable[[tuple[str, ...], int], subprocess.CompletedProcess[str]] | None = None,
 ) -> int:
     """Execute only the inherited Phase 07.1 all-mode verifier for one clean SHA."""
+    if run_child is None:
+        run_child = _run_child
     before = current_source_identity()
     if before is None:
         return 1
@@ -208,13 +212,36 @@ def run_deterministic(
     return 0 if child_result == "passed" else 1
 
 
+def render_evidence_report(envelope) -> str:
+    """Render one class-by-class report without promoting absent evidence."""
+    lines = ["Phase 8 qualification evidence:"]
+    for evidence_class in phase8_evidence.EVIDENCE_CLASSES:
+        status = (
+            envelope.status
+            if evidence_class == envelope.evidence_class
+            else "UNAVAILABLE"
+        )
+        lines.append(f"{evidence_class}: {status}")
+    return "\n".join(lines)
+
+
 def main(arguments: Sequence[str] | None = None) -> int:
     """Run the fixed deterministic gate without user-controlled child selection."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("gate", choices=("deterministic",))
     parser.add_argument("--output", required=True, type=Path)
     parsed = parser.parse_args(arguments)
-    return run_deterministic(output=parsed.output)
+    exit_code = run_deterministic(output=parsed.output)
+    if not parsed.output.is_file():
+        return DETERMINISTIC_FAILURE_EXIT_CODE
+    try:
+        envelope = phase8_evidence.load_envelope(parsed.output)
+    except phase8_evidence.EvidenceValidationError:
+        return DETERMINISTIC_FAILURE_EXIT_CODE
+    print(render_evidence_report(envelope))
+    if exit_code != 0 or envelope.status != "PASS":
+        return DETERMINISTIC_FAILURE_EXIT_CODE
+    return UNAVAILABLE_EXTERNAL_EVIDENCE_EXIT_CODE
 
 
 if __name__ == "__main__":

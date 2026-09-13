@@ -12,6 +12,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 import hashlib
+import hmac
 import json
 import os
 from pathlib import Path
@@ -82,6 +83,16 @@ _RESULTS_BY_STATUS = {
         }
     ),
 }
+_CLAIM_STATES_BY_STATUS = {
+    "PASS": {
+        "integrity": "EVIDENCED",
+        "recovery": "EVIDENCED",
+        "progress": "EVIDENCED",
+        "performance": "NOT_QUALIFIED",
+    },
+    "UNAVAILABLE": dict.fromkeys(CLAIM_CATEGORIES, "UNAVAILABLE"),
+    "NOT_QUALIFIED": dict.fromkeys(CLAIM_CATEGORIES, "NOT_QUALIFIED"),
+}
 
 
 class EvidenceValidationError(ValueError):
@@ -110,6 +121,22 @@ class EvidenceEnvelope:
             "generated_at_utc": self.generated_at_utc,
             "payload": dict(self.payload),
         }
+
+
+def is_qualification_evidence(
+    envelope: EvidenceEnvelope, required_evidence_class: str
+) -> bool:
+    """Return whether one envelope can satisfy one matching required class.
+
+    This deliberately evaluates one class only.  Release tooling, not a class
+    producer, remains responsible for combining independently validated input.
+    """
+    if required_evidence_class not in EVIDENCE_CLASSES:
+        raise EvidenceValidationError("invalid required evidence_class")
+    return (
+        envelope.evidence_class == required_evidence_class
+        and envelope.status == "PASS"
+    )
 
 
 def _validate_safe_text(value: object, *, field: str) -> str:
@@ -170,6 +197,8 @@ def _validate_payload(
         raise EvidenceValidationError("terminal status contradicts payload result")
 
     claims = _validate_claim_categories(payload.get("claim_categories"))
+    if claims != _CLAIM_STATES_BY_STATUS[status]:
+        raise EvidenceValidationError("terminal status contradicts claim_categories")
     non_qualifying_classes = _validate_text_list(
         payload.get("non_qualifying_classes"), field="non_qualifying_classes"
     )
@@ -197,11 +226,8 @@ def _validate_payload(
             raise EvidenceValidationError("invalid deterministic command")
         validated["command"] = command
 
-    if status == "PASS":
-        if claims["performance"] != "NOT_QUALIFIED":
-            raise EvidenceValidationError("performance cannot be promoted by this evidence")
-        if evidence_class != "deterministic":
-            raise EvidenceValidationError("only implemented evidence producers may pass")
+    if status == "PASS" and evidence_class != "deterministic":
+        raise EvidenceValidationError("only implemented evidence producers may pass")
     return validated
 
 
@@ -275,7 +301,8 @@ def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 def load_envelope(path: Path) -> EvidenceEnvelope:
     """Read one bounded canonical JSON envelope and validate its full shape."""
     try:
-        raw = path.read_bytes()
+        with path.open("rb") as evidence_file:
+            raw = evidence_file.read(MAX_EVIDENCE_BYTES + 1)
     except OSError as error:
         raise EvidenceValidationError("evidence cannot be read") from error
     if not raw or len(raw) > MAX_EVIDENCE_BYTES:
@@ -352,3 +379,20 @@ def relevant_source_digest(root: Path, paths: Sequence[str]) -> str:
     if not seen:
         raise EvidenceValidationError("relevant source inventory is empty")
     return digest.hexdigest()
+
+
+def validate_source_identity(
+    envelope: EvidenceEnvelope,
+    *,
+    revision: str,
+    root: Path,
+    paths: Sequence[str],
+) -> None:
+    """Reject evidence that does not match one exact reviewed source identity."""
+    if not _REVISION_PATTERN.fullmatch(revision):
+        raise EvidenceValidationError("invalid required revision")
+    if not hmac.compare_digest(envelope.revision, revision):
+        raise EvidenceValidationError("evidence revision does not match required revision")
+    expected_digest = relevant_source_digest(root, paths)
+    if not hmac.compare_digest(envelope.source_digest, expected_digest):
+        raise EvidenceValidationError("evidence source digest does not match reviewed sources")
