@@ -2,9 +2,9 @@
 schema_version: 1
 open_count: 5
 waived_count: 0
-fixed_count: 38
-total_count: 43
-last_updated: 2026-09-12T01:50:58.605Z
+fixed_count: 40
+total_count: 45
+last_updated: 2026-09-13T16:38:06.612Z
 ---
 
 # Broken Windows Ledger
@@ -58,6 +58,8 @@ last_updated: 2026-09-12T01:50:58.605Z
 | 41 | 07 | deviation | docs/STORAGE_INITIALIZATION.md |  | Corrected stale schema-7 and future-tooling guidance while publishing the Phase 7 runbook. | fixed |  | 2026-09-10T04:30:14.283Z | 2026-09-10T04:31:40.837Z |
 | 42 | 07 | deviation | tests/test_blob_store_concurrency.py | 312 | Direct Phase 7 non-live suite observed pre-existing clear/delete CacheBlobLifecycleConflictError; deferred to Phase 8 under ADR 0001. | open |  | 2026-09-12T00:13:12.257Z |  |
 | 43 | 07 | deviation | tests/test_phase7_contract_verifier.py | 209 | Updated fixed-plan omission expectation after adding Plan 23 to the literal inventory. | fixed |  | 2026-09-12T01:50:07.935Z | 2026-09-12T01:50:58.605Z |
+| 44 | 07.1 | deviation | tests/contracts/test_obstore_generation_io.py |  | Private handler root creation fixed in mocked-S3 fixture before GuardedHandlerIO construction. | fixed |  | 2026-09-13T16:37:34.943Z | 2026-09-13T16:38:06.423Z |
+| 45 | 07.1 | deviation | src/cacheness/storage/obstore_generation_io.py |  | S3 prefix and malformed loopback endpoint validation added before SDK construction. | fixed |  | 2026-09-13T16:37:35.184Z | 2026-09-13T16:38:06.612Z |
 
 ````json
 [
@@ -576,6 +578,30 @@ last_updated: 2026-09-12T01:50:58.605Z
     "reason": "",
     "recorded_at": "2026-09-12T01:50:07.935Z",
     "resolved_at": "2026-09-12T01:50:58.605Z"
+  },
+  {
+    "id": 44,
+    "kind": "deviation",
+    "phase": "07.1",
+    "file": "tests/contracts/test_obstore_generation_io.py",
+    "line": null,
+    "description": "Private handler root creation fixed in mocked-S3 fixture before GuardedHandlerIO construction.",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-09-13T16:37:34.943Z",
+    "resolved_at": "2026-09-13T16:38:06.423Z"
+  },
+  {
+    "id": 45,
+    "kind": "deviation",
+    "phase": "07.1",
+    "file": "src/cacheness/storage/obstore_generation_io.py",
+    "line": null,
+    "description": "S3 prefix and malformed loopback endpoint validation added before SDK construction.",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-09-13T16:37:35.184Z",
+    "resolved_at": "2026-09-13T16:38:06.612Z"
   }
 ]
 ````

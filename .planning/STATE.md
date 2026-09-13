@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 07.1
 current_phase_name: obstore-payload-participant-unification
 status: executing
-stopped_at: Completed 07.1-03-PLAN.md
-last_updated: "2026-09-13T16:17:38.760Z"
+stopped_at: Completed 07.1-04-PLAN.md
+last_updated: "2026-09-13T16:37:39.200Z"
 last_activity: 2026-09-13
 last_activity_desc: Phase 07.1 execution started
-state_head: 4646a2beed89fb02437953fd9ad135afe4af17a6
+state_head: 74db4ff0fc71db985bdc98e6341de340608aa8dc
 progress:
   total_phases: 9
   completed_phases: 6
   total_plans: 116
-  completed_plans: 107
+  completed_plans: 108
 milestone_name: milestone
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-09-11)
 ## Current Position
 
 Phase: 07.1 (obstore-payload-participant-unification) — EXECUTING
-Plan: 4 of 11
+Plan: 5 of 11
 Status: Ready to execute
 Last activity: 2026-09-13 — Phase 07.1 execution started
 
@@ -185,6 +185,7 @@ the deliberately superseded Phase 03 plan; do not fabricate its completion.
 | Phase 07.1 P01 | 10min | 1 tasks | 1 files |
 | Phase 07.1 P02 | 33min | 2 tasks | 3 files |
 | Phase 07.1 P03 | 19min | 2 tasks | 4 files |
+| Phase 07.1 P04 | 11m 19s | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -429,6 +430,9 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - [Phase 07.1]: D-16 keeps ExpectedBucketOwner unsupported; only test-only loopback moto endpoint overrides are qualified.
 - [Phase 07.1]: Phase 07.1 Plan 03: ambiguous obstore create responses settle only from exact head plus bounded SHA-256/size evidence; AuthorityLifecycleEngine remains the visibility authority.
 - [Phase 07.1]: Phase 07.1 Plan 03: LocalStore and MemoryStore share one guarded five-method participant; custom handlers retain only private suffix-preserving Paths.
+- [Phase 07.1]: D-16 rejects expected_bucket_owner before S3Store construction; no signer, fork, boto3 production fallback, or parallel participant restores it.
+- [Phase 07.1]: S3 publication remains one direct conditional create with multipart disabled and a 128 MiB default transfer cap.
+- [Phase 07.1]: Exact head and bounded inventory observations are report-only transport evidence; AuthorityLifecycleEngine remains the only visibility authority.
 
 ### Pending Todos
 
@@ -458,6 +462,6 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 
 ## Session Continuity
 
-Last session: 2026-09-13T16:17:38.466Z
-Stopped at: Completed 07.1-03-PLAN.md
+Last session: 2026-09-13T16:37:38.807Z
+Stopped at: Completed 07.1-04-PLAN.md
 Resume file: None
