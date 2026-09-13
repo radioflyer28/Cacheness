@@ -7,10 +7,15 @@ from pathlib import Path
 import pytest
 
 from cacheness.error_handling import CacheBlobStoreClosedError
-from cacheness.storage import BlobReceipt, BlobStore
+from cacheness.storage import (
+    BlobReceipt,
+    BlobStore,
+    PayloadTransportComparisonStatus,
+)
 from cacheness.storage.composition import BackendRef, StoreTopology
 from cacheness.storage.legacy_manifest import LegacyManifestRecognitionError
 from cacheness.storage.manifest import BlobManifest, verify_current_manifest
+from cacheness.storage.transport_evidence import PayloadTransportObservation
 
 
 def _topology(root: Path) -> StoreTopology:
@@ -59,6 +64,52 @@ def test_absence_is_distinct_from_a_present_none_payload(tmp_path: Path) -> None
         assert store.exists("missing") is False
         assert store.get(receipt.key) is None
         assert store.exists(receipt.key) is True
+    finally:
+        store.close()
+
+
+def test_transport_comparison_matches_one_committed_generation_without_reading(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One exact head corroborates signed evidence without payload verification."""
+    store = _store(tmp_path / "transport-match")
+    try:
+        participant = store._materialize_authority_store()
+        publish_generation = participant.publish_generation
+        expected_observation = PayloadTransportObservation(
+            e_tag='"opaque-etag"', byte_size=5, version="version-1"
+        )
+
+        def publish_with_transport_evidence(staged, locator):
+            published = publish_generation(staged, locator)
+            published["transport_observation"] = expected_observation
+            return published
+
+        calls: list[str] = []
+
+        def observe_transport(locator: str) -> PayloadTransportObservation:
+            calls.append(locator)
+            return expected_observation
+
+        def reject_payload_read(*_args, **_kwargs):
+            raise AssertionError("transport comparison downloaded a payload")
+
+        monkeypatch.setattr(participant, "publish_generation", publish_with_transport_evidence)
+        monkeypatch.setattr(participant, "observe_transport", observe_transport, raising=False)
+        receipt = store.put_entry("value", key="transport-match")
+        monkeypatch.setattr(participant, "open_snapshot", reject_payload_read)
+
+        result = store.compare_transport_evidence(receipt.key)
+
+        assert result is not None
+        assert result.status is PayloadTransportComparisonStatus.MATCH
+        assert (result.key, result.generation, result.locator) == (
+            receipt.key,
+            receipt.generation,
+            receipt.locator,
+        )
+        assert result.canonical_payload_integrity_verified is False
+        assert calls == [receipt.locator]
     finally:
         store.close()
 
