@@ -78,6 +78,7 @@ _PLATFORM_PAYLOAD_KEYS = _COMMON_PAYLOAD_KEYS | {
     "role",
     "advisory",
     "command_profile",
+    "backlog_phase",
     "reason",
 }
 _PACKAGING_PAYLOAD_KEYS = _COMMON_PAYLOAD_KEYS | {
@@ -276,6 +277,9 @@ def _validate_platform_payload(payload: Mapping[str, object]) -> dict[str, objec
     command_profile = _validate_safe_text(
         payload.get("command_profile"), field="command_profile"
     )
+    backlog_phase = _validate_safe_text(
+        payload.get("backlog_phase"), field="backlog_phase"
+    )
     reason = _validate_safe_text(payload.get("reason"), field="reason")
     advisory = payload.get("advisory")
     if not isinstance(advisory, bool):
@@ -289,6 +293,7 @@ def _validate_platform_payload(payload: Mapping[str, object]) -> dict[str, objec
         "role": role,
         "advisory": advisory,
         "command_profile": command_profile,
+        "backlog_phase": backlog_phase,
         "reason": reason,
     }
 

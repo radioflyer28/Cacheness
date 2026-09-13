@@ -23,6 +23,9 @@ LOCAL_GATE_PATH = REPOSITORY_ROOT / "tools" / "run_phase8_local_gates.py"
 STABLE_PYTHON_MINORS = ("3.11", "3.12", "3.13", "3.14")
 ADVISORY_PYTHON_MINORS = ("3.15",)
 TENSORFLOW_COMPATIBLE_MINORS = ("3.11", "3.12", "3.13")
+MACOS_BOUNDARY_MINORS = ("3.11", "3.14")
+WINDOWS_BACKLOG_PHASE = "999.1"
+ADR_PROGRESS_OUTCOMES = ("success", "conflict", "typed_retryable")
 FEATURE_PROFILES = frozenset({"core", "non_tensorflow", "tensorflow"})
 ROW_STATUSES = frozenset({"PASS", "FAIL", "SKIPPED", "UNAVAILABLE"})
 _ROW_KEYS = frozenset(
@@ -43,6 +46,39 @@ _PLATFORM_ROLE_BY_OS = {
     "Darwin": "macos_boundary",
     "Windows": "windows_non_native",
 }
+MACOS_BOUNDARY_SMOKE_SOURCE = """
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+from cacheness.storage import BackendRef, BlobStore, StoreTopology
+
+
+def round_trip(topology, root):
+    store = BlobStore(topology, cache_dir=root)
+    store.initialize()
+    try:
+        store.put({"boundary": "smoke"}, key="boundary")
+        assert store.get("boundary") == {"boundary": "smoke"}
+    finally:
+        store.close()
+
+
+with TemporaryDirectory() as temporary:
+    root = Path(temporary)
+    round_trip(
+        StoreTopology(
+            payload=BackendRef(name="memory"), authority=BackendRef(name="memory")
+        ),
+        root / "memory",
+    )
+    round_trip(
+        StoreTopology(
+            payload=BackendRef(name="filesystem", options={"base_dir": root / "payload"}),
+            authority=BackendRef(name="sqlite", options={"root": root / "authority"}),
+        ),
+        root / "filesystem",
+    )
+"""
 
 
 def _load_evidence_module():
@@ -213,6 +249,74 @@ def aggregate_feature_rows(rows: Sequence[Mapping[str, object]]) -> dict[str, ob
     return _aggregate_required_rows(rows, feature_profile="tensorflow")
 
 
+def validate_adr_progress_outcome(outcome: str) -> str:
+    """Accept only the ADR's success/conflict/retryable progress vocabulary."""
+    if outcome not in ADR_PROGRESS_OUTCOMES:
+        raise ValueError("invalid ADR progress outcome")
+    return outcome
+
+
+def aggregate_platform_roles(rows: Sequence[Mapping[str, object]]) -> dict[str, object]:
+    """Aggregate full Linux, boundary macOS, and non-native Windows evidence."""
+    validated = [validate_row(row) for row in rows]
+    linux_rows = [
+        row
+        for row in validated
+        if row["expected_os"] == "Linux" and not row["advisory"]
+    ]
+    linux = aggregate_rows(linux_rows)
+
+    macos_slots = {
+        ("Darwin", minor, "core") for minor in MACOS_BOUNDARY_MINORS
+    }
+    macos_seen: dict[tuple[str, str, str], dict[str, object]] = {}
+    windows_rows: list[dict[str, object]] = []
+    for row in validated:
+        if row["advisory"] or row["expected_os"] == "Linux":
+            continue
+        slot = (
+            str(row["expected_os"]),
+            str(row["python_minor"]),
+            str(row["feature_profile"]),
+        )
+        if row["expected_os"] == "Darwin":
+            if slot not in macos_slots:
+                raise ValueError("macOS row is outside the boundary smoke matrix")
+            if row["actual_os"] != "Darwin" or row["actual_python_minor"] != row["python_minor"]:
+                raise ValueError("macOS boundary row has mismatched runtime identity")
+            if slot in macos_seen:
+                raise ValueError("duplicate macOS boundary row")
+            if row["command_status"] != "PASS":
+                raise ValueError("macOS boundary row did not pass")
+            macos_seen[slot] = row
+        elif row["expected_os"] == "Windows":
+            windows_rows.append(row)
+        else:
+            raise ValueError("platform row is outside the published roles")
+
+    missing_macos = macos_slots.difference(macos_seen)
+    if missing_macos:
+        raise ValueError("missing required macOS boundary rows")
+    if len(windows_rows) != 1:
+        raise ValueError("exactly one Windows nonclaim row is required")
+    windows = windows_rows[0]
+    if (
+        windows["feature_profile"] != "core"
+        or windows["python_minor"] != "3.11"
+        or windows["command_status"] != "UNAVAILABLE"
+    ):
+        raise ValueError("Windows row contradicts the Phase 8 native-evidence nonclaim")
+
+    return {
+        "status": "NOT_QUALIFIED",
+        "linux_status": linux["status"],
+        "macos_boundary_slots": ["/".join(slot) for slot in sorted(macos_slots)],
+        "windows_status": "UNAVAILABLE",
+        "windows_backlog_phase": WINDOWS_BACKLOG_PHASE,
+        "progress_outcomes": list(ADR_PROGRESS_OUTCOMES),
+    }
+
+
 def _git_revision() -> str:
     try:
         completed = subprocess.run(
@@ -268,6 +372,11 @@ def _source_is_clean() -> bool:
 
 def _command_for_linux() -> tuple[str, ...]:
     return (sys.executable, str(LOCAL_GATE_PATH), "--all")
+
+
+def macos_boundary_smoke_command() -> tuple[str, ...]:
+    """Return the fixed public topology smoke command for macOS boundaries."""
+    return (sys.executable, "-c", MACOS_BOUNDARY_SMOKE_SOURCE)
 
 
 def _run_fixed_command(command: Sequence[str], timeout: int) -> str:
@@ -329,6 +438,9 @@ def _evidence_payload(
         "role": role,
         "advisory": advisory,
         "command_profile": role,
+        "backlog_phase": (
+            WINDOWS_BACKLOG_PHASE if role == "windows_non_native" else "not_applicable"
+        ),
         "reason": reason,
     }
 
@@ -379,6 +491,18 @@ def run_platform_gate(
         raise ValueError("unsupported feature profile")
     actual_os = platform.system()
     actual_minor = current_python_minor()
+    if role == "windows_non_native":
+        _write_evidence(
+            output=output,
+            status="UNAVAILABLE",
+            result="unavailable",
+            expected_os=expected_os,
+            expected_python_minor=python_minor,
+            feature_profile=feature_profile,
+            advisory=advisory,
+            reason="native_windows_phase_999_1_required",
+        )
+        return 2
     if actual_os != expected_os or actual_minor != python_minor:
         _write_evidence(
             output=output,
@@ -415,6 +539,35 @@ def run_platform_gate(
             reason="reviewed_sources_dirty",
         )
         return 1
+    if role == "macos_boundary":
+        if python_minor not in MACOS_BOUNDARY_MINORS:
+            _write_evidence(
+                output=output,
+                status="UNAVAILABLE",
+                result="unavailable",
+                expected_os=expected_os,
+                expected_python_minor=python_minor,
+                feature_profile=feature_profile,
+                advisory=advisory,
+                reason="macos_minor_outside_boundary_smoke",
+            )
+            return 2
+        result = _run_fixed_command(macos_boundary_smoke_command(), timeout)
+        status = {
+            "passed": "PASS",
+            "unavailable": "UNAVAILABLE",
+        }.get(result, "NOT_QUALIFIED")
+        _write_evidence(
+            output=output,
+            status=status,
+            result=result,
+            expected_os=expected_os,
+            expected_python_minor=python_minor,
+            feature_profile=feature_profile,
+            advisory=advisory,
+            reason="fixed_macos_boundary_smoke_completed",
+        )
+        return {"PASS": 0, "NOT_QUALIFIED": 1, "UNAVAILABLE": 2}[status]
     if role != "linux_full":
         _write_evidence(
             output=output,
