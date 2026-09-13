@@ -41,7 +41,12 @@ from .catalog import (
     validate_catalog_mapping,
     validate_catalog_page_request,
 )
-from .composition import BackendRole, ParticipantCapabilities, StoreTopology
+from .composition import (
+    BackendRole,
+    ParticipantCapabilities,
+    PayloadTransportObservationProvider,
+    StoreTopology,
+)
 from .coordination import InstanceAdmission
 from .handlers import HandlerRegistry
 from .integrity import (
@@ -68,8 +73,14 @@ from .projections import (
     ProjectionOutcome,
 )
 from .reconciliation import ReconciliationReport, _AuthorityReconciler
-from .read_contract import BlobEntry, BlobReceipt
+from .read_contract import (
+    BlobEntry,
+    BlobReceipt,
+    PayloadTransportComparison,
+    PayloadTransportComparisonStatus,
+)
 from .sqlite_lifecycle_authority import SqliteLifecycleAuthority
+from .transport_evidence import PayloadTransportEvidence
 
 
 logger = logging.getLogger(__name__)
@@ -374,6 +385,74 @@ class BlobStore:
     def get_entry_info(self, key: str) -> BlobEntry | None:
         """Inspect authenticated metadata without reading/deserializing payloads."""
         return self.lifecycle.get_entry_info(key)
+
+    @_ordinary_admitted
+    def compare_transport_evidence(self, key: str) -> PayloadTransportComparison | None:
+        """Compare signed transport evidence with one exact participant observation.
+
+        The authority selects the committed generation before any participant
+        I/O.  A match is report-only transport corroboration and never replaces
+        the canonical SHA-256 verification performed by :meth:`get`.
+        """
+        entry = self.lifecycle_authority.read_entry(key)
+        if entry is None:
+            return None
+        manifest = self.lifecycle._entry_manifest(entry)
+        unavailable = PayloadTransportComparison(
+            key=entry.key,
+            generation=entry.generation,
+            locator=entry.locator,
+            status=PayloadTransportComparisonStatus.UNAVAILABLE,
+        )
+        if entry.transport_evidence is None:
+            return unavailable
+
+        signing_key = self._authority_manifest_key()
+        expected = PayloadTransportEvidence.from_canonical_bytes(
+            entry.transport_evidence
+        ).verify(
+            store_identity=self.lifecycle._transport_store_identity(signing_key),
+            key=manifest.key,
+            generation=manifest.generation,
+            locator=manifest.locator,
+            payload_sha256=manifest.digest,
+            payload_byte_size=manifest.byte_size,
+            signing_key=signing_key,
+        )
+        participant = self._materialize_authority_store()
+        if not isinstance(participant, PayloadTransportObservationProvider):
+            return unavailable
+        try:
+            observed = participant.observe_transport(manifest.locator)
+        except FileNotFoundError:
+            return PayloadTransportComparison(
+                key=entry.key,
+                generation=entry.generation,
+                locator=entry.locator,
+                status=PayloadTransportComparisonStatus.ABSENT,
+            )
+        except CacheBlobBackendError:
+            raise
+        except (OSError, TypeError, ValueError) as exc:
+            raise CacheBlobBackendError(
+                "Payload transport observation failed",
+                context={"operation": "transport_comparison", "key": entry.key},
+            ) from exc
+        if not isinstance(observed, type(expected)):
+            raise CacheBlobBackendError(
+                "Payload participant returned an invalid transport observation",
+                context={"operation": "transport_comparison", "key": entry.key},
+            )
+        return PayloadTransportComparison(
+            key=entry.key,
+            generation=entry.generation,
+            locator=entry.locator,
+            status=(
+                PayloadTransportComparisonStatus.MATCH
+                if observed == expected
+                else PayloadTransportComparisonStatus.MISMATCH
+            ),
+        )
 
     @_ordinary_admitted
     def put_entry(

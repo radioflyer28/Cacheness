@@ -116,6 +116,45 @@ class BlobEntry:
     def _release(self) -> None:
         self._reader = None
 
+
+class PayloadTransportComparisonStatus(str, Enum):
+    """Closed outcomes for one report-only transport observation comparison."""
+
+    MATCH = "match"
+    MISMATCH = "mismatch"
+    UNAVAILABLE = "unavailable"
+    ABSENT = "absent"
+
+
+@dataclass(frozen=True)
+class PayloadTransportComparison:
+    """Read-only corroboration for one committed immutable generation.
+
+    A ``MATCH`` compares persisted opaque transport evidence with one exact
+    participant observation.  It never verifies payload bytes and must not be
+    treated as canonical SHA-256 integrity verification.
+    """
+
+    key: str
+    generation: str
+    locator: str
+    status: PayloadTransportComparisonStatus
+    canonical_payload_integrity_verified: bool = False
+
+    def __post_init__(self) -> None:
+        if any(
+            not isinstance(value, str) or not value
+            for value in (self.key, self.generation, self.locator)
+        ):
+            raise ValueError("Payload transport comparison identity fields must be non-empty strings")
+        if not isinstance(self.status, PayloadTransportComparisonStatus):
+            raise ValueError("Payload transport comparison status must be typed")
+        if self.canonical_payload_integrity_verified is not False:
+            raise ValueError(
+                "Payload transport comparison cannot claim canonical payload integrity"
+            )
+
+
 class CacheReadFailureCategory(str, Enum):
     """Closed direct-read failure categories available to future cache policy."""
 

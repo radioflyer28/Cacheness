@@ -410,6 +410,16 @@ class ObstoreGenerationIO:
             ) from error
         return self._object_evidence(locator_text, metadata, operation="obstore.head")
 
+    def observe_transport(self, locator: str) -> PayloadTransportObservation:
+        """Return one exact opaque observation without downloading payload bytes."""
+
+        evidence = self.head_generation(locator)
+        return PayloadTransportObservation(
+            e_tag=evidence.e_tag,
+            byte_size=evidence.byte_size,
+            version=evidence.version,
+        )
+
     def inventory_page(
         self,
         continuation: str | None = None,

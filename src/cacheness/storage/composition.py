@@ -18,6 +18,7 @@ from .backends.blob_backends import FilesystemBlobBackend, InMemoryBlobBackend
 from .lifecycle_authority import LifecycleAuthority
 from .memory_lifecycle_authority import InMemoryLifecycleAuthority
 from .sqlite_lifecycle_authority import SqliteLifecycleAuthority
+from .transport_evidence import PayloadTransportObservation
 
 
 class CompositionValidationError(ValueError):
@@ -246,6 +247,19 @@ class PayloadGenerationIOProvider(Protocol):
 
     def materialize_handler_io(self) -> object:
         """Return the participant-rooted guarded generation-I/O primitive."""
+        ...
+
+
+@runtime_checkable
+class PayloadTransportObservationProvider(Protocol):
+    """Optionally observe one validated immutable locator without lifecycle authority.
+
+    The observation is untrusted transport metadata only.  It cannot select a
+    generation, mutate authority state, or replace canonical payload hashing.
+    """
+
+    def observe_transport(self, locator: str) -> PayloadTransportObservation:
+        """Return one exact bounded observation for the supplied locator."""
         ...
 
 
@@ -1108,6 +1122,7 @@ __all__ = [
     "MetadataRole",
     "Ownership",
     "PayloadGenerationIOProvider",
+    "PayloadTransportObservationProvider",
     "ParticipantCapabilities",
     "ProjectionRole",
     "ProjectionSink",

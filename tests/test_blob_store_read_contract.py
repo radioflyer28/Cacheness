@@ -7,14 +7,11 @@ from pathlib import Path
 import pytest
 
 from cacheness.error_handling import CacheBlobStoreClosedError
-from cacheness.storage import (
-    BlobReceipt,
-    BlobStore,
-    PayloadTransportComparisonStatus,
-)
+from cacheness.storage import BlobReceipt, BlobStore
 from cacheness.storage.composition import BackendRef, StoreTopology
 from cacheness.storage.legacy_manifest import LegacyManifestRecognitionError
 from cacheness.storage.manifest import BlobManifest, verify_current_manifest
+from cacheness.storage.read_contract import PayloadTransportComparisonStatus
 from cacheness.storage.transport_evidence import PayloadTransportObservation
 
 
@@ -76,12 +73,16 @@ def test_transport_comparison_matches_one_committed_generation_without_reading(
     try:
         participant = store._materialize_authority_store()
         publish_generation = participant.publish_generation
-        expected_observation = PayloadTransportObservation(
-            e_tag='"opaque-etag"', byte_size=5, version="version-1"
-        )
+        expected_observation: PayloadTransportObservation | None = None
 
         def publish_with_transport_evidence(staged, locator):
+            nonlocal expected_observation
             published = publish_generation(staged, locator)
+            expected_observation = PayloadTransportObservation(
+                e_tag='"opaque-etag"',
+                byte_size=published["file_size"],
+                version="version-1",
+            )
             published["transport_observation"] = expected_observation
             return published
 
@@ -89,6 +90,7 @@ def test_transport_comparison_matches_one_committed_generation_without_reading(
 
         def observe_transport(locator: str) -> PayloadTransportObservation:
             calls.append(locator)
+            assert expected_observation is not None
             return expected_observation
 
         def reject_payload_read(*_args, **_kwargs):
