@@ -211,15 +211,17 @@ def _aggregate_required_rows(
             str(row["python_minor"]),
             str(row["feature_profile"]),
         )
-        if row["advisory"]:
-            if row["python_minor"] in STABLE_PYTHON_MINORS:
-                raise ValueError("stable row cannot be advisory")
-            advisory_rows += 1
-            continue
         if row["feature_profile"] == "tensorflow" and (
             row["python_minor"] not in TENSORFLOW_COMPATIBLE_MINORS
         ):
             raise ValueError("TensorFlow row is not compatible with this Python minor")
+        if row["advisory"]:
+            if row["python_minor"] in STABLE_PYTHON_MINORS:
+                raise ValueError("stable row cannot be advisory")
+            if row["python_minor"] not in ADVISORY_PYTHON_MINORS:
+                raise ValueError("row is outside the published advisory matrix")
+            advisory_rows += 1
+            continue
         if slot not in required_set:
             raise ValueError("row is outside the published qualification matrix")
         if slot in seen:
