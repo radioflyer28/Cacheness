@@ -2,9 +2,9 @@
 schema_version: 1
 open_count: 6
 waived_count: 0
-fixed_count: 42
-total_count: 48
-last_updated: 2026-09-13T17:31:57.763Z
+fixed_count: 43
+total_count: 49
+last_updated: 2026-09-13T18:21:50.443Z
 ---
 
 # Broken Windows Ledger
@@ -63,6 +63,7 @@ last_updated: 2026-09-13T17:31:57.763Z
 | 46 | 07.1 | deviation | src/cacheness/storage/obstore_generation_io.py |  | Mocked-S3 PutResult lacks size; exact HEAD corroborates it before signed transport evidence. | fixed |  | 2026-09-13T17:02:22.540Z | 2026-09-13T17:02:52.564Z |
 | 47 | 07.1 | deviation | src/cacheness/storage/sqlite_lifecycle_authority.py |  | Durable authority adapters implement the metadata CAS required by the expanded runtime protocol. | fixed |  | 2026-09-13T17:02:22.726Z | 2026-09-13T17:02:52.758Z |
 | 48 | 07.1 | deviation | tests/test_sqlite_lifecycle_authority.py |  | Updated durable-authority test rows for the new nullable evidence column | open |  | 2026-09-13T17:31:57.763Z |  |
+| 49 | 07.1 | deviation | src/cacheness/storage/migration_authority.py |  | Candidate transport evidence required an exact authority-owned verification update before activation. | fixed |  | 2026-09-13T18:21:20.367Z | 2026-09-13T18:21:50.443Z |
 
 ````json
 [
@@ -641,6 +642,18 @@ last_updated: 2026-09-13T17:31:57.763Z
     "reason": "",
     "recorded_at": "2026-09-13T17:31:57.763Z",
     "resolved_at": null
+  },
+  {
+    "id": 49,
+    "kind": "deviation",
+    "phase": "07.1",
+    "file": "src/cacheness/storage/migration_authority.py",
+    "line": null,
+    "description": "Candidate transport evidence required an exact authority-owned verification update before activation.",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-09-13T18:21:20.367Z",
+    "resolved_at": "2026-09-13T18:21:50.443Z"
   }
 ]
 ````

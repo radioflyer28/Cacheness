@@ -529,7 +529,7 @@ Plans:
 **Goal:** Users get one obstore-backed payload participant for filesystem, memory, and S3 while BlobStore's lifecycle authority remains the sole owner of intent, visibility, reconciliation, and cleanup debt.
 **Requirements**: [STOR-01, STOR-02, STOR-03, STOR-04, STOR-05, STOR-06, STOR-07, STOR-08, BACK-01, BACK-02, BACK-03, BACK-04, BACK-06, BACK-07, CACH-01, CACH-02, CACH-03, SECU-01, SECU-03, SECU-04, SECU-05, SECU-07, SECU-08, MIGR-01, MIGR-02, MIGR-03, MIGR-04, MIGR-05, MIGR-06, MIGR-07, QUAL-01, QUAL-04, QUAL-07]
 **Depends on:** Phase 7
-**Plans:** 7/11 plans executed
+**Plans:** 8/11 plans executed
 
 Plans:
 **Wave 1**
@@ -559,7 +559,7 @@ Plans:
 **Wave 7** *(blocked on Wave 6 completion)*
 
 - [x] 07.1-07-PLAN.md — Expose a read-only authoritative-generation transport comparison API.
-- [ ] 07.1-08-PLAN.md — Route migration, rebuild, and reconciliation payload effects through the participant.
+- [x] 07.1-08-PLAN.md — Route migration, rebuild, and reconciliation payload effects through the participant.
 
 **Wave 8** *(blocked on Wave 7 completion)*
 

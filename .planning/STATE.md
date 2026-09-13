@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 07.1
 current_phase_name: obstore-payload-participant-unification
 status: executing
-stopped_at: Completed 07.1-07-PLAN.md
-last_updated: "2026-09-13T17:53:41.259Z"
+stopped_at: Completed 07.1-08-PLAN.md
+last_updated: "2026-09-13T18:21:14.230Z"
 last_activity: 2026-09-13
 last_activity_desc: Phase 07.1 execution started
-state_head: 982879cf5a9f9343edad7e058c98a97b3ebd6e7d
+state_head: c8eb01c6e1486d965c2052c00eb2c440f797a726
 progress:
   total_phases: 9
   completed_phases: 6
   total_plans: 116
-  completed_plans: 111
+  completed_plans: 112
 milestone_name: milestone
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-09-11)
 ## Current Position
 
 Phase: 07.1 (obstore-payload-participant-unification) — EXECUTING
-Plan: 8 of 11
+Plan: 9 of 11
 Status: Ready to execute
 Last activity: 2026-09-13 — Phase 07.1 execution started
 
@@ -189,6 +189,7 @@ the deliberately superseded Phase 03 plan; do not fabricate its completion.
 | Phase 07.1 P05 | 16m 5s | 3 tasks | 11 files |
 | Phase 07.1 P06 | 11m 14s | 2 tasks | 7 files |
 | Phase 07.1 P07 | 9m 56s | 2 tasks | 8 files |
+| Phase 07.1 P08 | 18min | 2 tasks | 11 files |
 
 ## Accumulated Context
 
@@ -445,6 +446,8 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - [Phase 07.1]: Transport matches are read-only opaque corroboration and cannot claim canonical SHA-256 verification or lifecycle authority.
 - [Phase 07.1]: Optional structural transport observation keeps injected providers without head support selected and reports UNAVAILABLE.
 - [Phase 07.1]: Only exact typed missing-object errors normalize to ABSENT; other transport failures retain typed backend causes.
+- [Phase 07.1]: Phase 07.1 Plan 08: Candidate transport evidence is fresh destination-local corroboration persisted only through an exact authority candidate-verification transition; it does not select lifecycle visibility.
+- [Phase 07.1]: Phase 07.1 Plan 08: Reconciliation uses only the selected participant's bounded report-only inventory cursor; listing cannot authorize cleanup or adoption.
 
 ### Pending Todos
 
@@ -474,6 +477,6 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 
 ## Session Continuity
 
-Last session: 2026-09-13T17:53:41.022Z
-Stopped at: Completed 07.1-07-PLAN.md
+Last session: 2026-09-13T18:21:13.966Z
+Stopped at: Completed 07.1-08-PLAN.md
 Resume file: None
