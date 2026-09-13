@@ -42,7 +42,7 @@ Amazon S3 is an explicitly composed payload participant; it does not become a
 metadata authority, visibility authority, or cross-resource transaction. For a
 production S3 topology, configure an explicit bucket and region, use a stable
 bucket name whose ownership you control, and grant only narrowly scoped IAM
-credentials and bucket-policy permissions for the configured prefix.
+credentials and bucket policy permissions for the configured prefix.
 
 The obstore 0.11.1 cutover intentionally does **not** expose
 `ExpectedBucketOwner` or another owner-pinning workaround. Treat that as a

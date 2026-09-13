@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import os
+from pathlib import Path
 import subprocess
 import sys
 import textwrap
@@ -209,3 +210,31 @@ def test_optional_sqlcache_surface_remains_separate_when_dependency_is_blocked()
     )
 
     assert completed.returncode == 0, completed.stderr
+
+
+def test_public_storage_docs_keep_the_d16_transport_boundary_explicit():
+    """Published guidance retains one provider/handler seam and Phase 8 limits."""
+
+    repository_root = Path(__file__).parents[1]
+    documented = {
+        "README.md": ("128 MiB", "opaque transport evidence", "Phase 8"),
+        "docs/API_REFERENCE.md": ("owner pinning", "SHA-256", "Phase 8"),
+        "docs/PLUGIN_DEVELOPMENT.md": (
+            "store.handlers.register_handler",
+            "custom endpoint",
+            "Phase 8",
+        ),
+        "docs/SECURITY.md": (
+            "ExpectedBucketOwner",
+            "stable bucket",
+            "name whose ownership",
+            "bucket policy",
+            "Phase 8",
+        ),
+    }
+    retired_payload_apis = ("S3BlobBackend", "BlobBackend", "register_blob_backend")
+
+    for relative_path, required_terms in documented.items():
+        text = (repository_root / relative_path).read_text(encoding="utf-8")
+        assert all(term in text for term in required_terms)
+        assert all(retired not in text for retired in retired_payload_apis)

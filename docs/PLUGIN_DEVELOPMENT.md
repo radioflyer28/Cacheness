@@ -304,8 +304,8 @@ obstore participant behind `StoreTopology`; `BlobStore` remains the lifecycle
 owner. Do not add a second transport, fallback client, dual read/write path, or
 payload selector.
 
-For Amazon S3, use the built-in S3 payload role with an explicit bucket and
-region, native AWS credentials, and no production custom endpoint. D-16 does
+For Amazon S3, use the built-in S3 payload role with an explicit bucket and region,
+native AWS credentials, and no production custom endpoint. D-16 does
 not support owner-pinning headers: use stable bucket ownership plus narrowly
 scoped IAM and bucket policy instead.
 

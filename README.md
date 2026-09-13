@@ -440,6 +440,8 @@ comparison API is not a cryptographic content check and never selects lifecycle
 visibility.
 
 See [API_REFERENCE.md](docs/API_REFERENCE.md) for full `BlobStore` documentation.
+Real AWS, compatible-service, native-platform, full optional-package matrix,
+RSS/performance, and SHA-256-versus-XXH3 qualification remain Phase 8 work.
 
 ## Security and Integrity
 
