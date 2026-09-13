@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Callable, Protocol, runtime_checkable
 
 from .catalog import CatalogPage, CatalogQuery, CatalogSchema
+from .transport_evidence import MAX_TRANSPORT_EVIDENCE_BYTES
 
 
 _MAX_TEXT_BYTES = 512
@@ -63,6 +64,7 @@ class EntrySnapshot:
     locator: str
     manifest: bytes
     expectation: EntryExpectation
+    transport_evidence: bytes | None = None
 
     def __post_init__(self) -> None:
         for field_name in ("key", "generation", "locator"):
@@ -74,6 +76,12 @@ class EntrySnapshot:
         digest = hashlib.sha256(self.manifest).hexdigest()
         if self.expectation.manifest_digest != digest:
             raise ValueError("entry expectation digest must corroborate the manifest")
+        if self.transport_evidence is not None and (
+            not isinstance(self.transport_evidence, bytes)
+            or not self.transport_evidence
+            or len(self.transport_evidence) > MAX_TRANSPORT_EVIDENCE_BYTES
+        ):
+            raise ValueError("transport_evidence must be bounded authenticated bytes or None")
 
 
 @dataclass(frozen=True)
@@ -137,6 +145,7 @@ class VerificationProof:
     digest: str
     byte_size: int
     manifest: bytes = b""
+    transport_evidence: bytes | None = None
 
     def __post_init__(self) -> None:
         if len(self.digest) != 64 or any(char not in "0123456789abcdef" for char in self.digest):
@@ -145,6 +154,12 @@ class VerificationProof:
             raise ValueError("byte_size must be a non-negative integer")
         if not isinstance(self.manifest, bytes) or len(self.manifest) > _MAX_MANIFEST_BYTES:
             raise ValueError("manifest must be bounded bytes")
+        if self.transport_evidence is not None and (
+            not isinstance(self.transport_evidence, bytes)
+            or not self.transport_evidence
+            or len(self.transport_evidence) > MAX_TRANSPORT_EVIDENCE_BYTES
+        ):
+            raise ValueError("transport_evidence must be bounded authenticated bytes or None")
 
 
 @dataclass(frozen=True)

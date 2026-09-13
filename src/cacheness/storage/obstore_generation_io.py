@@ -34,6 +34,7 @@ from cacheness.error_handling import (
 from cacheness.interfaces import GuardedReadSnapshot, GuardedWriteResult
 
 from .guarded_handler_io import GuardedHandlerIO, GuardedStagedArtifact
+from .transport_evidence import PayloadTransportObservation
 
 
 DEFAULT_MAX_TRANSFER_BYTES = 128 * 1024 * 1024
@@ -284,6 +285,23 @@ class ObstoreGenerationIO:
         metadata = dict(result) if isinstance(result, Mapping) else {}
         published = staged.result_for(Path(locator_text), byte_size)
         published["metadata"] = metadata
+        if self.qualification_identity == "s3":
+            evidence = (
+                self._object_evidence(
+                    locator_text, metadata, operation="obstore.publish"
+                )
+                if type(metadata.get("size")) is int
+                else self.head_generation(locator_text)
+            )
+            if evidence.byte_size != byte_size:
+                raise CacheBlobLifecycleConflictError(
+                    "Published transport observation disagrees with staged payload size"
+                )
+            published["transport_observation"] = PayloadTransportObservation(
+                e_tag=evidence.e_tag,
+                byte_size=evidence.byte_size,
+                version=evidence.version,
+            )
         return published
 
     @contextmanager

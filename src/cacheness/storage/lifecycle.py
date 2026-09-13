@@ -42,6 +42,10 @@ from .lifecycle_authority import (
 from .manifest import BlobManifest, StoreVersionDimensions, sign_current_manifest
 from .path_security import resolve_managed_locator
 from .read_contract import BlobEntry
+from .transport_evidence import (
+    PayloadTransportEvidence,
+    PayloadTransportObservation,
+)
 
 
 _TOMBSTONE_OPERATION_ID_FIELD = "_cacheness_tombstone_operation_id"
@@ -159,6 +163,77 @@ class AuthorityLifecycleEngine:
             ),
         )
 
+    def _transport_store_identity(self, signing_key: bytes) -> str:
+        """Return stable authority identity without deriving it from mutable metadata."""
+        identity_snapshot = getattr(self.authority, "identity_snapshot", None)
+        if callable(identity_snapshot):
+            identity = identity_snapshot()
+            store_id = getattr(identity, "store_id", None)
+            if isinstance(store_id, str) and store_id:
+                return store_id
+        return hashlib.sha256(
+            b"cacheness.transport-evidence.store-identity.v1\x00" + signing_key
+        ).hexdigest()
+
+    def _sign_transport_evidence(
+        self,
+        manifest: BlobManifest,
+        observation: PayloadTransportObservation | None,
+    ) -> bytes | None:
+        """Authenticate an adapter observation only after canonical verification."""
+        if observation is None:
+            return None
+        signing_key = self.store._authority_manifest_key()
+        return PayloadTransportEvidence.issue(
+            observation,
+            store_identity=self._transport_store_identity(signing_key),
+            key=manifest.key,
+            generation=manifest.generation,
+            locator=manifest.locator,
+            payload_sha256=manifest.digest,
+            payload_byte_size=manifest.byte_size,
+            signing_key=signing_key,
+        ).canonical_bytes()
+
+    def _verify_transport_evidence(
+        self, manifest: BlobManifest, evidence_bytes: bytes | None
+    ) -> None:
+        """Verify persisted optional evidence without granting it integrity authority."""
+        if evidence_bytes is None:
+            return
+        signing_key = self.store._authority_manifest_key()
+        PayloadTransportEvidence.from_canonical_bytes(evidence_bytes).verify(
+            store_identity=self._transport_store_identity(signing_key),
+            key=manifest.key,
+            generation=manifest.generation,
+            locator=manifest.locator,
+            payload_sha256=manifest.digest,
+            payload_byte_size=manifest.byte_size,
+            signing_key=signing_key,
+        )
+
+    def _exact_transport_observation(
+        self, manifest: BlobManifest
+    ) -> PayloadTransportObservation | None:
+        """Read report-only evidence from only the exact replay locator."""
+        participant = self.store._materialize_authority_store()
+        if getattr(participant, "qualification_identity", None) != "s3":
+            return None
+        observe = getattr(participant, "head_generation", None)
+        if not callable(observe):
+            return None
+        observed = observe(manifest.locator)
+        byte_size = getattr(observed, "byte_size", None)
+        if byte_size != manifest.byte_size:
+            raise CacheBlobLifecycleConflictError(
+                "Replay transport observation disagrees with its prepared descriptor"
+            )
+        return PayloadTransportObservation(
+            e_tag=getattr(observed, "e_tag", None),
+            byte_size=byte_size,
+            version=getattr(observed, "version", None),
+        )
+
     def _candidate_locator(self, key: str, generation: str, suffix: str) -> Path:
         return (
             Path("generations")
@@ -241,7 +316,10 @@ class AuthorityLifecycleEngine:
         """Return one persisted canonical result without re-running publication."""
         if replay.promotion is None:
             raise CacheBlobLifecycleConflictError("Promoted replay lacks a canonical result")
-        self._entry_manifest(replay.promotion.entry)
+        manifest = self._entry_manifest(replay.promotion.entry)
+        self._verify_transport_evidence(
+            manifest, replay.promotion.entry.transport_evidence
+        )
         self._settle_debts(replay.promotion.cleanup_debt)
         return LifecyclePutResult(
             operation_id=replay.prepared.operation_id,
@@ -284,6 +362,22 @@ class AuthorityLifecycleEngine:
                 raise CacheBlobLifecycleConflictError(
                     "Replay verification does not corroborate its prepared descriptor"
                 )
+            self._verify_transport_evidence(
+                manifest, replay.verification.transport_evidence
+            )
+            self._reach("put.before_promotion", key=spec.key)
+            promoted = self.authority.promote_mutation(prepared)
+            self._reach("put.promoted", key=spec.key)
+            self._settle_debts(promoted.cleanup_debt)
+            self._reach("put.cleanup_retired", key=spec.key)
+            return LifecyclePutResult(
+                operation_id=prepared.operation_id,
+                key=spec.key,
+                expected=spec.expected,
+                promoted=promoted.entry,
+                previous=None,
+                cleanup_debt=tuple(promoted.cleanup_debt),
+            )
 
         observed = self._observe_replay_candidate(manifest)
         candidate_persisted = False
@@ -324,12 +418,16 @@ class AuthorityLifecycleEngine:
 
         try:
             self._reach("put.candidate_verified", key=spec.key)
+            transport_evidence = self._sign_transport_evidence(
+                manifest, self._exact_transport_observation(manifest)
+            )
             self.authority.record_verification(
                 prepared,
                 VerificationProof(
                     digest=expected_digest,
                     byte_size=expected_size,
                     manifest=spec.manifest,
+                    transport_evidence=transport_evidence,
                 ),
             )
             self._reach("put.before_promotion", key=spec.key)
@@ -509,6 +607,13 @@ class AuthorityLifecycleEngine:
                     raise CacheBlobLifecycleConflictError(
                         "Published payload disagrees with its prepared descriptor"
                     )
+                observation = published.get("transport_observation")
+                if observation is not None and not isinstance(
+                    observation, PayloadTransportObservation
+                ):
+                    raise CacheBlobLifecycleConflictError(
+                        "Payload participant returned invalid transport observation"
+                    )
                 self._reach("put.candidate_verified", key=key)
                 self.authority.record_verification(
                     prepared,
@@ -516,6 +621,9 @@ class AuthorityLifecycleEngine:
                         digest=digest,
                         byte_size=byte_size,
                         manifest=manifest.canonical_bytes(),
+                        transport_evidence=self._sign_transport_evidence(
+                            manifest, observation
+                        ),
                     ),
                 )
                 self._reach("put.before_promotion", key=key)

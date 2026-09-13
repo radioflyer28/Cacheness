@@ -149,6 +149,11 @@ class InMemoryLifecycleAuthority:
                 entry.expectation.generation,
                 entry.expectation.manifest_digest,
             ),
+            transport_evidence=(
+                None
+                if entry.transport_evidence is None
+                else bytes(entry.transport_evidence)
+            ),
         )
 
     def read_entry(self, key: str) -> EntrySnapshot | None:
@@ -220,6 +225,12 @@ class InMemoryLifecycleAuthority:
                 raise CacheBlobLifecycleConflictError("Prepared mutation cannot accept verification")
             if mutation[2] == "promoted":
                 return
+            if mutation[1] is not None:
+                if mutation[1] != proof:
+                    raise CacheBlobLifecycleConflictError(
+                        "Prepared mutation verification cannot be replaced"
+                    )
+                return
             self._mutations[prepared.operation_id] = (
                 mutation[0],
                 proof,
@@ -278,6 +289,7 @@ class InMemoryLifecycleAuthority:
                     generation=spec.generation,
                     manifest_digest=hashlib.sha256(manifest).hexdigest(),
                 ),
+                transport_evidence=proof.transport_evidence,
             )
             self._entries[spec.key] = entry
             self._mutations[prepared.operation_id] = (
