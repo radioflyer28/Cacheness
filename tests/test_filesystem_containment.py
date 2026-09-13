@@ -11,7 +11,6 @@ import stat
 import subprocess
 import threading
 from copy import deepcopy
-from io import BytesIO
 from pathlib import Path
 from typing import Any
 
@@ -28,9 +27,9 @@ from cacheness.error_handling import (
 )
 from cacheness.storage.blob_store import BlobStore
 from cacheness.storage.composition import BackendRef, StoreTopology
-from cacheness.storage.backends.blob_backends import FilesystemBlobBackend
 from cacheness.storage.integrity import sign_hmac_sha256
 from cacheness.storage.manifest import BlobManifest
+from cacheness.storage.obstore_generation_io import ObstoreGenerationIO
 from cacheness.storage import path_security
 from cacheness.storage.path_security import (
     ManagedFileOps,
@@ -334,8 +333,29 @@ def test_windows_junction_is_rejected_as_a_managed_reparse_component(tmp_path):
     assert (outside / "entry").read_bytes() == b"outside"
 
 
+class _NativePayloadHandler:
+    """Use one handler-owned native file through the current participant seam."""
+
+    def put(self, value: bytes, path: Path, _config: object) -> dict[str, object]:
+        artifact = path.with_suffix(".native")
+        artifact.write_bytes(value)
+        return {
+            "actual_path": str(artifact),
+            "file_size": len(value),
+            "metadata": {"format": "containment-native"},
+        }
+
+
+def _filesystem_provider(root: Path) -> ObstoreGenerationIO:
+    """Build one private-staging LocalStore participant for containment checks."""
+    return ObstoreGenerationIO.for_filesystem(
+        base_dir=root,
+        handler_root=root.parent / "handler-stage",
+    )
+
+
 @pytest.mark.parametrize(
-    "blob_id",
+    "locator",
     [
         "../escape",
         "/tmp/escape",
@@ -345,88 +365,66 @@ def test_windows_junction_is_rejected_as_a_managed_reparse_component(tmp_path):
         "safe/mixed\\escape",
     ],
 )
-@pytest.mark.parametrize("streaming", [False, True])
-def test_backend_rejects_hostile_ids_before_creating_shards(tmp_path, blob_id, streaming):
-    """Both write entry points reject direct unsafe IDs without creating residue."""
-    backend = FilesystemBlobBackend(tmp_path / "root")
-
-    with pytest.raises(CacheUnsafePathError):
-        if streaming:
-            backend.write_blob_stream(blob_id, BytesIO(b"payload"))
-        else:
-            backend.write_blob(blob_id, b"payload")
-
-    assert list(backend.base_dir.iterdir()) == []
-
-
-@pytest.mark.parametrize(
-    "operation", ["read", "delete", "exists", "read_stream", "size"]
-)
-@pytest.mark.parametrize("locator_kind", ["outside", "ancestor_link", "leaf_link"])
-def test_backend_rejects_unsafe_locators_for_every_direct_operation(
-    tmp_path, operation, locator_kind
-):
-    """Unsafe locators never become a miss-like result or touch outside bytes."""
+def test_generation_participant_rejects_hostile_locators_before_publication(
+    tmp_path: Path, locator: str
+) -> None:
+    """Untrusted locator text cannot create an object or compatibility residue."""
     root = tmp_path / "root"
-    backend = FilesystemBlobBackend(root)
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    sentinel = outside / "sentinel"
-    sentinel.write_bytes(b"outside")
-
-    if locator_kind == "outside":
-        locator = sentinel
-    elif locator_kind == "ancestor_link":
-        (root / "managed").symlink_to(outside, target_is_directory=True)
-        locator = root / "managed" / "sentinel"
-    else:
-        (root / "leaf").symlink_to(sentinel)
-        locator = root / "leaf"
-
-    with pytest.raises(CacheUnsafePathError):
-        if operation == "read":
-            backend.read_blob(str(locator))
-        elif operation == "delete":
-            backend.delete_blob(str(locator))
-        elif operation == "exists":
-            backend.exists(str(locator))
-        elif operation == "read_stream":
-            stream = backend.read_blob_stream(str(locator))
-            stream.close()
-        else:
-            backend.get_size(str(locator))
-
-    assert sentinel.read_bytes() == b"outside"
+    provider = _filesystem_provider(root)
+    try:
+        with provider.stage(_NativePayloadHandler(), b"payload", object()) as staged:
+            with pytest.raises(CacheUnsafePathError):
+                provider.publish_generation(staged, locator)
+        assert list(root.iterdir()) == []
+    finally:
+        provider.close()
 
 
+@pytest.mark.parametrize("operation", ["snapshot", "head", "cleanup"])
 @pytest.mark.parametrize(
     "locator",
     ["../escape", "/tmp/escape", "C:\\escape", "\\\\server\\share\\escape", "\\rooted"],
 )
-def test_backend_rejects_cross_platform_direct_locator_shapes(tmp_path, locator):
-    """Direct locators apply the same host-independent path-shape policy."""
-    backend = FilesystemBlobBackend(tmp_path / "root")
+def test_generation_participant_rejects_cross_platform_locator_shapes(
+    tmp_path: Path, operation: str, locator: str
+) -> None:
+    """All current exact-generation operations validate before LocalStore I/O."""
+    provider = _filesystem_provider(tmp_path / "root")
+    try:
+        with pytest.raises(CacheUnsafePathError):
+            if operation == "snapshot":
+                with provider.open_snapshot(locator, {}):
+                    pass
+            elif operation == "head":
+                provider.head_generation(locator)
+            else:
+                provider.delete_or_prove_absent(locator)
+    finally:
+        provider.close()
 
-    with pytest.raises(CacheUnsafePathError):
-        backend.exists(locator)
 
-
-def test_backend_preserves_valid_sharded_atomic_stream_lifecycle(tmp_path):
-    """Guarded writes retain compatible paths, streams, size, and deletion behavior."""
-    backend = FilesystemBlobBackend(tmp_path / "root", shard_chars=2)
-    first_locator = backend.write_blob("ab-entry", b"first")
-    second_locator = backend.write_blob_stream("ab-entry", BytesIO(b"second"))
-
-    assert first_locator == second_locator
-    assert Path(second_locator).parent == backend.base_dir / "ab"
-    assert backend.read_blob(second_locator) == b"second"
-    with backend.read_blob_stream(second_locator) as stream:
-        assert stream.read() == b"second"
-    assert backend.exists(second_locator)
-    assert backend.get_size(second_locator) == len(b"second")
-    assert backend.delete_blob(second_locator)
-    assert not backend.exists(second_locator)
-    assert not list(backend.base_dir.rglob("*.tmp"))
+def test_generation_participant_preserves_valid_immutable_lifecycle(tmp_path: Path) -> None:
+    """Current LocalStore publish, snapshot, collision, and cleanup stay exact."""
+    root = tmp_path / "root"
+    provider = _filesystem_provider(root)
+    locator = Path("generations") / "contained" / "payload.native"
+    try:
+        with provider.stage(_NativePayloadHandler(), b"first", object()) as staged:
+            published = provider.publish_generation(staged, locator)
+        with provider.open_snapshot(locator, dict(published["metadata"])) as snapshot:
+            assert snapshot.path.read_bytes() == b"first"
+        with provider.stage(_NativePayloadHandler(), b"replacement", object()) as staged:
+            with pytest.raises(FileExistsError):
+                provider.publish_generation(staged, locator)
+        assert provider.head_generation(locator).byte_size == len(b"first")
+        provider.delete_or_prove_absent(locator)
+        provider.delete_or_prove_absent(locator)
+        with pytest.raises(FileNotFoundError):
+            with provider.open_snapshot(locator, {}):
+                pass
+        assert not list(root.rglob("*.tmp"))
+    finally:
+        provider.close()
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX special-node fixtures")

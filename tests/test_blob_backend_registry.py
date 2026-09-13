@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import pytest
 
-from cacheness.storage.backends.blob_backends import InMemoryBlobBackend
 from cacheness.storage.composition import (
     BackendRole,
     CompositionValidationError,
@@ -19,13 +18,16 @@ from cacheness.storage.composition import (
 from cacheness.storage.obstore_generation_io import ObstoreGenerationIO
 
 
-class RecordingPayload(InMemoryBlobBackend):
-    """Payload factory used to prove exact construction-option forwarding."""
+class RecordingPayload:
+    """Structural payload factory used to prove exact option forwarding."""
 
     def __init__(self, label: str, retry_limit: int = 0) -> None:
-        super().__init__()
         self.label = label
         self.retry_limit = retry_limit
+
+    def materialize_handler_io(self) -> object:
+        """Declare the narrow payload role without restoring byte CRUD."""
+        raise AssertionError("registry construction does not materialize payload I/O")
 
 
 class RecordingProjection:

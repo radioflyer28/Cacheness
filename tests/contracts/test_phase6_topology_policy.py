@@ -18,7 +18,6 @@ from cacheness.core import UnifiedCache
 from cacheness.error_handling import CacheBlobStoreClosedError
 from cacheness.handlers import ObjectHandler
 from cacheness.storage.blob_store import BlobStore
-from cacheness.storage.backends.blob_backends import InMemoryBlobBackend
 from cacheness.storage.composition import (
     BackendRef,
     RoleRegistry,
@@ -26,6 +25,7 @@ from cacheness.storage.composition import (
     qualified_topology_profiles,
 )
 from cacheness.storage.memory_lifecycle_authority import InMemoryLifecycleAuthority
+from cacheness.storage.obstore_generation_io import ObstoreGenerationIO
 
 
 class _SharedRemoteManifestKey:
@@ -41,8 +41,8 @@ class _SharedRemoteManifestKey:
         return self.get_key()
 
 
-class _CandidateS3Payload(InMemoryBlobBackend):
-    """S3-shaped candidate payload with no connection to a live service."""
+class _CandidateS3Payload:
+    """S3-shaped structural provider with no connection to a live service."""
 
     qualification_identity = "s3"
     topology_capabilities = {
@@ -53,6 +53,15 @@ class _CandidateS3Payload(InMemoryBlobBackend):
         "streaming": True,
         "listing": True,
     }
+
+    def __init__(self) -> None:
+        self._provider = ObstoreGenerationIO.for_memory()
+
+    def materialize_handler_io(self) -> ObstoreGenerationIO:
+        return self._provider
+
+    def close(self) -> None:
+        self._provider.close()
 
 
 class _CandidatePostgresqlAuthority(InMemoryLifecycleAuthority):
@@ -133,8 +142,9 @@ def test_deterministic_remote_candidate_uses_the_same_policy_call_graph(
 ) -> None:
     """The remote profile is an explicit candidate, never live evidence."""
 
+    payload = _CandidateS3Payload()
     topology = StoreTopology(
-        payload=_CandidateS3Payload(),
+        payload=payload,
         authority=_CandidatePostgresqlAuthority(),
     )
     store = BlobStore(
@@ -162,6 +172,7 @@ def test_deterministic_remote_candidate_uses_the_same_policy_call_graph(
     finally:
         cache.close()
         store.close()
+        payload.close()
 
 
 def test_profiles_are_declared_in_stable_authority_payload_order() -> None:

@@ -15,9 +15,9 @@ from cacheness.storage.composition import (
     allowed_progress_outcomes,
     resolve_metadata_role,
 )
-from cacheness.storage.backends.blob_backends import InMemoryBlobBackend
 from cacheness.storage.lifecycle import AuthorityLifecycleEngine
 from cacheness.storage.memory_lifecycle_authority import InMemoryLifecycleAuthority
+from cacheness.storage.obstore_generation_io import ObstoreGenerationIO
 from cacheness.error_handling import CacheBlobBackendError
 
 
@@ -101,8 +101,8 @@ class _StaticRemoteManifestKey:
         return self._key
 
 
-class _RemotePayload(InMemoryBlobBackend):
-    """Deterministic participant boundary used without claiming live S3 evidence."""
+class _RemotePayload:
+    """Structural participant boundary without claiming live S3 evidence."""
 
     qualification_identity = "s3"
     topology_capabilities = {
@@ -113,6 +113,15 @@ class _RemotePayload(InMemoryBlobBackend):
         "streaming": True,
         "listing": True,
     }
+
+    def __init__(self) -> None:
+        self._provider = ObstoreGenerationIO.for_memory()
+
+    def materialize_handler_io(self) -> ObstoreGenerationIO:
+        return self._provider
+
+    def close(self) -> None:
+        self._provider.close()
 
 
 class _RemoteAuthority(InMemoryLifecycleAuthority):
