@@ -11,7 +11,6 @@ from obstore.store import LocalStore
 from cacheness.storage import BlobStore
 from cacheness.storage.composition import BackendRef, StoreTopology
 from cacheness.storage.guarded_handler_io import GuardedHandlerIO
-from cacheness.storage.memory_lifecycle_authority import InMemoryLifecycleAuthority
 from cacheness.storage.obstore_generation_io import ObstoreGenerationIO
 
 
@@ -23,12 +22,12 @@ def test_local_store_provider_round_trips_native_npz_through_blob_store(
     provider = ObstoreGenerationIO(
         LocalStore(payload_root, mkdir=True),
         GuardedHandlerIO(payload_root),
-        qualification_identity="memory",
+        qualification_identity="filesystem",
     )
     store = BlobStore(
         StoreTopology(
             payload=BackendRef(instance=provider),
-            authority=BackendRef(instance=InMemoryLifecycleAuthority()),
+            authority=BackendRef(name="sqlite", options={"root": tmp_path / "authority"}),
         ),
         cache_dir=tmp_path / "store",
     )

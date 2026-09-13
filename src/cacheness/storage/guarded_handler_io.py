@@ -16,7 +16,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, BinaryIO, Dict
 
 from cacheness.error_handling import CacheReason, CacheUnsafePathError
 from cacheness.interfaces import GuardedReadSnapshot, GuardedWriteResult
@@ -128,6 +128,37 @@ class GuardedStagedArtifact:
         metadata = result.get("metadata")
         result["metadata"] = dict(metadata) if isinstance(metadata, dict) else {}
         return result
+
+
+@dataclass
+class GuardedSnapshotSink:
+    """One private snapshot file that an approved transport may fill once.
+
+    ``GuardedHandlerIO`` keeps the directory, exclusive file creation, mode,
+    suffix validation, and lifetime. A payload participant may write bytes to
+    the retained destination but cannot choose a handler-visible path.
+    """
+
+    path: Path
+    destination: BinaryIO
+    metadata: Dict[str, Any]
+    _finished: bool = False
+
+    def finish(self) -> GuardedReadSnapshot:
+        """Flush and seal the snapshot before a handler can receive its path."""
+        if self._finished:
+            raise RuntimeError("Private snapshot has already been sealed")
+        self.destination.flush()
+        os.fsync(self.destination.fileno())
+        self.destination.close()
+        self._finished = True
+        return GuardedReadSnapshot(self.path, self.metadata)
+
+    def close(self) -> None:
+        """Close an unfinished snapshot without exposing it to a handler."""
+        if not self._finished:
+            self.destination.close()
+            self._finished = True
 
 
 class GuardedHandlerIO:
@@ -425,21 +456,46 @@ class GuardedHandlerIO:
             locator,
             operation="snapshot",
         )
-        suffix = "".join(managed_locator.suffixes)
+        with self.open_snapshot_sink(managed_locator, metadata) as sink:
+            self.file_ops.copy_to_stream(managed_locator, sink.destination)
+            yield sink.finish()
+
+    @staticmethod
+    def native_suffix(locator: Path | str) -> str:
+        """Return the bounded suffix safe for a private handler snapshot."""
+        suffix = "".join(Path(locator).suffixes)
         if len(suffix) > _MAX_SUFFIX_LENGTH or not _SAFE_SUFFIX.fullmatch(suffix):
             _raise_invalid_stage_artifact()
+        return suffix
 
+    @contextmanager
+    def open_snapshot_sink(
+        self,
+        locator: Path | str,
+        metadata: Dict[str, Any],
+    ) -> Iterator[GuardedSnapshotSink]:
+        """Yield one mode-restricted private sink for verified transport bytes."""
+        suffix = self.native_suffix(locator)
         with self._private_stage() as stage_root:
             snapshot_path = stage_root / f"snapshot{suffix}"
-            with snapshot_path.open("xb") as destination:
-                snapshot_path.chmod(0o600)
-                self.file_ops.copy_to_stream(managed_locator, destination)
-                destination.flush()
-                os.fsync(destination.fileno())
-
+            descriptor = os.open(
+                snapshot_path,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+            )
+            destination = os.fdopen(descriptor, "wb")
             snapshot_metadata = dict(metadata)
             snapshot_metadata["actual_path"] = str(snapshot_path)
-            yield GuardedReadSnapshot(snapshot_path, snapshot_metadata)
+            sink = GuardedSnapshotSink(snapshot_path, destination, snapshot_metadata)
+            try:
+                yield sink
+            finally:
+                sink.close()
 
 
-__all__ = ["GuardedHandlerIO", "GuardedReadSnapshot", "GuardedStagedArtifact"]
+__all__ = [
+    "GuardedHandlerIO",
+    "GuardedReadSnapshot",
+    "GuardedSnapshotSink",
+    "GuardedStagedArtifact",
+]

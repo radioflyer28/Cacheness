@@ -24,7 +24,9 @@ class _NativePathHandler:
 def test_stage_retains_a_private_suffix_preserving_regular_file(tmp_path: Path) -> None:
     """Handlers see a private staging path and publication keeps its descriptor."""
     handler = _NativePathHandler()
-    guarded = GuardedHandlerIO(tmp_path / "managed")
+    managed_root = tmp_path / "managed"
+    managed_root.mkdir()
+    guarded = GuardedHandlerIO(managed_root)
     try:
         with guarded.stage(handler, b"native", config=None) as staged:
             assert handler.received_path is not None
