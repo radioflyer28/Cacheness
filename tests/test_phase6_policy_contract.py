@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ast
+from pathlib import Path
 import math
 
 import pytest
@@ -64,6 +66,24 @@ def _seed(cache: UnifiedCache, request_id: str, value: object) -> str:
         },
     )
     return receipt.key
+
+
+def test_policy_imports_no_obstore_transport_and_keeps_one_blob_store(tmp_path) -> None:
+    """Cache policy remains above its selected BlobStore after the transport cutover."""
+
+    module = ast.parse(Path("src/cacheness/core.py").read_text(encoding="utf-8"))
+    imported_modules = {
+        node.module
+        for node in ast.walk(module)
+        if isinstance(node, ast.ImportFrom) and node.module is not None
+    }
+    cache = _cache(tmp_path)
+    try:
+        assert "obstore" not in imported_modules
+        assert cache._cache_blob_store is cache.store
+        assert cache.store.lifecycle is cache.store._authority_lifecycle
+    finally:
+        cache.close()
 
 
 @pytest.mark.parametrize(

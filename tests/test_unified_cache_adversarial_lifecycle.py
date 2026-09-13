@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import ast
+from pathlib import Path
+
 import pytest
 
 from cacheness.config import CacheConfig, CacheStorageConfig
@@ -20,6 +23,19 @@ def _cache(tmp_path) -> UnifiedCache:
     )
     cache.initialize()
     return cache
+
+
+def test_policy_module_does_not_construct_or_import_the_payload_transport() -> None:
+    """Only BlobStore is allowed to reach the selected payload participant."""
+
+    module = ast.parse(Path("src/cacheness/core.py").read_text(encoding="utf-8"))
+    imported_modules = {
+        node.module
+        for node in ast.walk(module)
+        if isinstance(node, ast.ImportFrom) and node.module is not None
+    }
+
+    assert "obstore" not in imported_modules
 
 
 def test_replacement_after_an_invalidation_snapshot_is_not_deleted(

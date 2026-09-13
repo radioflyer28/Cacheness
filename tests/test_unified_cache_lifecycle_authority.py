@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
+from obstore.store import MemoryStore
 import pytest
 
 from cacheness.config import CacheConfig, CacheStorageConfig
@@ -9,6 +12,8 @@ from cacheness.core import UnifiedCache
 from cacheness.error_handling import CacheBlobStoreClosedError
 from cacheness.storage import BlobStore
 from cacheness.storage.composition import BackendRef, StoreTopology
+from cacheness.storage.guarded_handler_io import GuardedHandlerIO
+from cacheness.storage.obstore_generation_io import ObstoreGenerationIO
 
 
 def _topology() -> StoreTopology:
@@ -17,6 +22,21 @@ def _topology() -> StoreTopology:
     return StoreTopology(
         payload=BackendRef(name="memory"), authority=BackendRef(name="memory")
     )
+
+
+class _ObservedPayloadProvider(ObstoreGenerationIO):
+    """Count ownership-driven closes of one injected/shared participant."""
+
+    def __init__(self, root: Path) -> None:
+        root.mkdir(parents=True)
+        super().__init__(
+            MemoryStore(), GuardedHandlerIO(root), qualification_identity="memory"
+        )
+        self.close_calls = 0
+
+    def close(self) -> None:
+        self.close_calls += 1
+        super().close()
 
 
 def test_topology_form_creates_one_owned_blob_store(tmp_path) -> None:
@@ -52,6 +72,43 @@ def test_injected_store_remains_available_after_facade_close(tmp_path) -> None:
         assert store.get("direct") == {"value": "direct"}
     finally:
         store.close()
+
+
+def test_payload_provider_ownership_closes_only_the_selected_owner(tmp_path) -> None:
+    """The cache/BlobStore boundary never double-closes or adopts a provider."""
+
+    topology_owned = _ObservedPayloadProvider(tmp_path / "topology-owned")
+    registry = _topology().role_registry
+    registry.register(
+        "payload",
+        "memory",
+        lambda: topology_owned,
+        capabilities=topology_owned.topology_capabilities,
+        replace=True,
+    )
+    store_owned = BlobStore(
+        StoreTopology(
+            payload=BackendRef(name="memory"),
+            authority=BackendRef(name="memory"),
+            role_registry=registry,
+        ),
+        cache_dir=tmp_path / "owned-store",
+    )
+    store_owned.put({"value": "owned"}, key="owned")
+    store_owned.close()
+    assert topology_owned.close_calls == 1
+
+    caller_owned = _ObservedPayloadProvider(tmp_path / "caller-owned")
+    caller_store = BlobStore(
+        StoreTopology(
+            payload=BackendRef(instance=caller_owned), authority=BackendRef(name="memory")
+        ),
+        cache_dir=tmp_path / "caller-store",
+    )
+    caller_store.put({"value": "caller"}, key="caller")
+    caller_store.close()
+    assert caller_owned.close_calls == 0
+    caller_owned.close()
 
 
 def test_policy_replacement_keeps_the_latest_authoritative_generation(tmp_path) -> None:
