@@ -200,11 +200,13 @@ def moto_s3_provider(
         aws_secret_access_key="testing",
     )
     client.create_bucket(Bucket=_S3_BUCKET)
+    handler_root = tmp_path / "handler-root"
+    handler_root.mkdir()
     provider = ObstoreGenerationIO.for_s3(
         bucket=_S3_BUCKET,
         prefix="contract/s3",
         region=_S3_REGION,
-        handler_root=tmp_path / "handler-root",
+        handler_root=handler_root,
         endpoint=endpoint_url,
         allow_test_endpoint=True,
     )

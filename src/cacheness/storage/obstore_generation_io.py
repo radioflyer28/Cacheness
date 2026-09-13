@@ -13,6 +13,7 @@ import hashlib
 from pathlib import Path, PurePosixPath
 import re
 from typing import Any
+from urllib.parse import urlparse
 
 from obstore.exceptions import (
     AlreadyExistsError,
@@ -25,6 +26,7 @@ from obstore.exceptions import (
 from cacheness.error_handling import (
     CacheBlobBackendError,
     CacheBlobLifecycleConflictError,
+    CacheConfigurationError,
     CacheReason,
     CacheUnsafePathError,
 )
@@ -81,6 +83,88 @@ class ObstoreGenerationIO:
                 "host_scope": "host",
                 "listing": True,
             }
+        elif qualification_identity == "s3":
+            self.topology_capabilities = {
+                **self.topology_capabilities,
+                "durable": True,
+                "process_scope": "multi_host",
+                "host_scope": "multi_host",
+                "listing": True,
+            }
+
+    @classmethod
+    def for_s3(
+        cls,
+        *,
+        bucket: str,
+        prefix: str,
+        region: str,
+        handler_root: Path | str,
+        endpoint: str | None = None,
+        allow_test_endpoint: bool = False,
+        max_sdk_retries: int = 1,
+        max_upload_bytes: int = DEFAULT_MAX_TRANSFER_BYTES,
+        max_download_bytes: int = DEFAULT_MAX_TRANSFER_BYTES,
+    ) -> "ObstoreGenerationIO":
+        """Build the shared participant for explicitly configured Amazon S3.
+
+        Production uses obstore's standard AWS credential chain.  An endpoint
+        override is deliberately limited to the loopback HTTP moto fixture so
+        compatible object stores cannot inherit Amazon S3 qualification.
+        """
+
+        if not isinstance(bucket, str) or not bucket.strip():
+            raise CacheConfigurationError("S3 bucket must be a non-empty string")
+        if not isinstance(region, str) or not region.strip():
+            raise CacheConfigurationError("S3 region must be a non-empty string")
+        if not isinstance(prefix, str) or not prefix.strip("/"):
+            raise CacheConfigurationError("S3 prefix must be a non-empty string")
+        if type(max_sdk_retries) is not int or not 0 <= max_sdk_retries <= 3:
+            raise CacheConfigurationError(
+                "S3 max_sdk_retries must be an integer between zero and three"
+            )
+        if not isinstance(allow_test_endpoint, bool):
+            raise CacheConfigurationError("allow_test_endpoint must be a boolean")
+
+        store_kwargs: dict[str, Any] = {
+            "prefix": prefix.strip("/"),
+            "config": {"region": region.strip(), "conditional_put": "etag"},
+            "retry_config": {"max_retries": max_sdk_retries},
+        }
+        if endpoint is not None:
+            if not allow_test_endpoint or not cls._is_loopback_moto_endpoint(endpoint):
+                raise CacheConfigurationError(
+                    "S3 endpoint overrides are allowed only for an explicit loopback moto test"
+                )
+            store_kwargs["endpoint"] = endpoint
+            store_kwargs["allow_http"] = True
+        elif allow_test_endpoint:
+            raise CacheConfigurationError(
+                "allow_test_endpoint requires an explicit loopback moto endpoint"
+            )
+
+        from obstore.store import S3Store
+
+        return cls(
+            S3Store(bucket.strip(), **store_kwargs),
+            GuardedHandlerIO(handler_root),
+            qualification_identity="s3",
+            max_upload_bytes=max_upload_bytes,
+            max_download_bytes=max_download_bytes,
+        )
+
+    @staticmethod
+    def _is_loopback_moto_endpoint(endpoint: object) -> bool:
+        """Accept only the explicit local HTTP exception used by moto tests."""
+
+        if not isinstance(endpoint, str) or not endpoint:
+            return False
+        parsed = urlparse(endpoint)
+        return (
+            parsed.scheme == "http"
+            and parsed.hostname in {"127.0.0.1", "localhost"}
+            and parsed.port is not None
+        )
 
     @staticmethod
     def _transfer_limit(value: int, field_name: str) -> int:
