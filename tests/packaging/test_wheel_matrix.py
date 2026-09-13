@@ -11,12 +11,26 @@ import pytest
 
 PROJECT_ROOT = Path(__file__).parents[2]
 RUNNER_PATH = PROJECT_ROOT / "tools" / "run_phase8_packaging.py"
+EVIDENCE_PATH = PROJECT_ROOT / "tools" / "phase8_evidence.py"
 
 
 def _load_runner():
     """Load the standalone wheel runner without making ``tools`` a package."""
     specification = importlib.util.spec_from_file_location(
         "phase8_packaging_runner_test", RUNNER_PATH
+    )
+    assert specification is not None
+    assert specification.loader is not None
+    module = importlib.util.module_from_spec(specification)
+    sys.modules[specification.name] = module
+    specification.loader.exec_module(module)
+    return module
+
+
+def _load_evidence():
+    """Load the shared evidence validator without making ``tools`` a package."""
+    specification = importlib.util.spec_from_file_location(
+        "phase8_packaging_evidence_test", EVIDENCE_PATH
     )
     assert specification is not None
     assert specification.loader is not None
@@ -152,3 +166,75 @@ def test_optional_groups_get_fresh_wheel_requirements_and_non_live_probes(
     tensorflow = next(result for result in results if result.name == "tensorflow")
     assert tensorflow.compatibility == "INCOMPATIBLE"
     assert tensorflow.probes == ("tensorflow_incompatible_platform",)
+
+
+def test_optional_group_wheel_qualification_runs_each_compatible_extra(
+    tmp_path: Path,
+) -> None:
+    """Compatible extras install separately and prove their public behavior."""
+    runner = _load_runner()
+    artifact = runner.build_wheel(tmp_path / "dist")
+
+    results = runner.run_optional_probes(
+        artifact,
+        workspace=tmp_path / "probes",
+        tensorflow_compatible=False,
+    )
+
+    assert [result.name for result in results] == list(runner.OPTIONAL_GROUPS)
+    assert all(result.requirement.startswith(str(artifact.path)) for result in results)
+    assert all(result.non_live for result in results if result.name in {"s3", "postgresql", "cloud"})
+    tensorflow = next(result for result in results if result.name == "tensorflow")
+    assert tensorflow.compatibility == "INCOMPATIBLE"
+
+
+def test_packaging_evidence_allows_only_the_reviewed_sanitized_pass_shape() -> None:
+    """A package matrix pass is class-scoped evidence, not a live-service claim."""
+    evidence = _load_evidence()
+    payload = {
+        "result": "passed",
+        "claim_categories": {
+            "integrity": "NOT_QUALIFIED",
+            "recovery": "NOT_QUALIFIED",
+            "progress": "NOT_QUALIFIED",
+            "performance": "NOT_QUALIFIED",
+        },
+        "non_qualifying_classes": [
+            evidence_class
+            for evidence_class in evidence.EVIDENCE_CLASSES
+            if evidence_class != "packaging"
+        ],
+        "subjects": list(evidence.QUALIFIED_SUBJECTS),
+        "wheel_sha256": "a" * 64,
+        "python": "3.12.9",
+        "platform": "Linux-x86_64",
+        "probes": ["base:public_exports", "dataframes:pandas_polars_parquet_round_trip"],
+        "optional_groups": [
+            "recommended",
+            "dataframes",
+            "tensorflow",
+            "s3",
+            "postgresql",
+            "cloud",
+        ],
+        "compatibility": [
+            "recommended:COMPATIBLE",
+            "dataframes:COMPATIBLE",
+            "tensorflow:COMPATIBLE",
+            "s3:COMPATIBLE",
+            "postgresql:COMPATIBLE",
+            "cloud:COMPATIBLE",
+        ],
+        "non_live_groups": ["s3", "postgresql", "cloud"],
+    }
+
+    envelope = evidence.make_envelope(
+        evidence_class="packaging",
+        status="PASS",
+        revision="b" * 40,
+        source_digest="c" * 64,
+        generated_at_utc="2026-09-13T00:00:00+00:00",
+        payload=payload,
+    )
+
+    assert evidence.is_qualification_evidence(envelope, "packaging")
