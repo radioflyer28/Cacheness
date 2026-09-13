@@ -33,6 +33,33 @@ _KEY = "generations/parity/exact-payload.bin"
 _PAYLOAD = b"cacheness-obstore-sdk-parity"
 
 
+def _is_known_absence_type(error_type: type[BaseException]) -> bool:
+    """Classify only documented missing-object exceptions as absence."""
+    return issubclass(error_type, (NotFoundError, FileNotFoundError))
+
+
+def _is_test_only_moto_endpoint(endpoint: str) -> bool:
+    """Keep HTTP endpoint overrides scoped to the loopback moto fixture."""
+    parsed = urlparse(endpoint)
+    return (
+        parsed.scheme == "http"
+        and parsed.hostname in {"127.0.0.1", "localhost"}
+        and parsed.port is not None
+    )
+
+
+def _moto_s3_store_kwargs(endpoint: str) -> dict[str, object]:
+    """Build the sole HTTP endpoint override allowed by this SDK contract."""
+    if not _is_test_only_moto_endpoint(endpoint):
+        raise ValueError("only a loopback HTTP moto endpoint is permitted in tests")
+    return {
+        "prefix": "sdk-parity",
+        "config": {"region": _REGION, "conditional_put": "etag"},
+        "endpoint": endpoint,
+        "allow_http": True,
+    }
+
+
 @dataclass(frozen=True)
 class _StoreCase:
     """A named store under the exact SDK parity contract."""
@@ -81,10 +108,6 @@ def moto_s3_store(monkeypatch: pytest.MonkeyPatch) -> Iterator[_StoreCase]:
     host, port = server.get_host_and_port()
     endpoint_url = f"http://{host}:{port}"
 
-    parsed_endpoint = urlparse(endpoint_url)
-    assert parsed_endpoint.scheme == "http"
-    assert parsed_endpoint.hostname == "127.0.0.1"
-
     monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "testing")
     monkeypatch.setenv("AWS_DEFAULT_REGION", _REGION)
@@ -97,13 +120,7 @@ def moto_s3_store(monkeypatch: pytest.MonkeyPatch) -> Iterator[_StoreCase]:
     )
     client.create_bucket(Bucket=_BUCKET)
 
-    store = S3Store(
-        _BUCKET,
-        prefix="sdk-parity",
-        config={"region": _REGION, "conditional_put": "etag"},
-        endpoint=endpoint_url,
-        allow_http=True,
-    )
+    store = S3Store(_BUCKET, **_moto_s3_store_kwargs(endpoint_url))
     try:
         yield _StoreCase("s3", store)
     finally:
@@ -142,6 +159,9 @@ def test_consumed_sync_object_primitives_have_exact_immutable_parity(
         mode="create",
         use_multipart=False,
     )
+    assert store.put_calls == [
+        (_KEY, {"mode": "create", "use_multipart": False})
+    ]
     assert isinstance(result, Mapping)
     assert {"e_tag", "version"} <= result.keys()
     first_meta = store.head(_KEY)
@@ -159,11 +179,17 @@ def test_consumed_sync_object_primitives_have_exact_immutable_parity(
     )
     recovered_meta = store.head(_KEY)
     assert recovered_meta["size"] == len(_PAYLOAD)
+    assert store.head_calls == [_KEY, _KEY]
     assert store.list_calls == []
+    assert store.put_calls == [
+        (_KEY, {"mode": "create", "use_multipart": False}),
+        (_KEY, {"mode": "create", "use_multipart": False}),
+    ]
 
     stream_result = store.get(_KEY)
     assert stream_result.meta["size"] == len(_PAYLOAD)
     assert b"".join(stream_result.stream(min_chunk_size=1)) == _PAYLOAD
+    assert store.get_calls == [_KEY]
 
     pages = list(store.list("generations/", chunk_size=1))
     assert len(pages) == 1
@@ -194,6 +220,21 @@ def test_sdk_error_types_keep_collision_absence_and_configuration_distinct(
 
     assert AlreadyExistsError is not NotFoundError
     assert not issubclass(UnknownConfigurationKeyError, NotFoundError)
+
+
+def test_s3_sdk_accepts_only_supported_bounded_transport_options() -> None:
+    """Retry and checksum diagnostics are transport policy, not lifecycle policy."""
+    store = S3Store(
+        _BUCKET,
+        config={
+            "region": _REGION,
+            "conditional_put": "etag",
+            "checksum_algorithm": "sha256",
+        },
+        retry_config={"max_retries": 1},
+    )
+
+    assert isinstance(store, S3Store)
 
 
 def test_error_classification_keeps_known_absence_narrow() -> None:
@@ -239,3 +280,12 @@ def test_http_endpoint_override_is_limited_to_local_moto(
 ) -> None:
     """Only the deterministic loopback moto fixture may override the endpoint."""
     assert _is_test_only_moto_endpoint(endpoint) is is_allowed
+
+
+def test_moto_s3_fixture_never_reintroduces_owner_pinning() -> None:
+    """D-16 leaves endpoint override as the fixture's only transport exception."""
+    kwargs = _moto_s3_store_kwargs("http://127.0.0.1:5000")
+
+    assert set(kwargs) == {"allow_http", "config", "endpoint", "prefix"}
+    assert "expected_bucket_owner" not in kwargs["config"]
+    assert "client_options" not in kwargs
