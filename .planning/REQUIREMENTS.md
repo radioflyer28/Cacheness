@@ -61,7 +61,7 @@ Phase 3 completion below is scoped to the qualified initialized local SQLite/fil
 
 ### Delivery Confidence
 
-- [ ] **QUAL-01**: A clean minimal wheel installation imports every guaranteed public symbol and completes a memory-backed round trip.
+- [x] **QUAL-01**: A clean minimal wheel installation imports every guaranteed public symbol and completes a memory-backed round trip.
 - [ ] **QUAL-02**: Each advertised optional dependency group installs and imports independently.
 - [ ] **QUAL-03**: CI covers supported Python versions, backend contracts, lint policy, coverage, packaging, PostgreSQL, and AWS S3 integration.
 - [ ] **QUAL-04**: Carry forward the finite Phase 3 integrity/recovery regressions and cover named commit boundaries for each new supported topology with deterministic fault/crash tests. Shared-worker fixtures initialize first; success/conflict/typed retryable outcomes are distinguished from corruption. No universal scheduling guarantee or automatic repeated race-fix loop is required.
@@ -142,7 +142,7 @@ topology.
 | MIGR-05 | Phase 7 | Complete |
 | MIGR-06 | Phase 7 | Complete |
 | MIGR-07 | Phase 2 | Complete |
-| QUAL-01 | Phase 8 | Pending |
+| QUAL-01 | Phase 8 | Complete |
 | QUAL-02 | Phase 8 | Pending |
 | QUAL-03 | Phase 8 | Pending |
 | QUAL-04 | Phase 8 | Pending |

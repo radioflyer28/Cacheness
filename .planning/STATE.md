@@ -3,17 +3,17 @@ gsd_state_version: 1.0
 milestone: v1.0
 current_phase: 07.1
 current_phase_name: obstore-payload-participant-unification
-status: Ready to execute
-stopped_at: Phase 07.1 planned (11 plans, 10 waves)
-last_updated: "2026-09-12T23:59:00.000Z"
-last_activity: 2026-09-12
-last_activity_desc: Phase 07.1 planning complete and independently verified
-state_head: c6812bce6016e1b78f7898c2f321e412997a9076
+status: executing
+stopped_at: Completed 07.1-01-PLAN.md
+last_updated: "2026-09-13T14:57:43.718Z"
+last_activity: 2026-09-13
+last_activity_desc: Phase 07.1 execution started
+state_head: 2cb8c04a89478d528a4163b9ed46151eaf7f5912
 progress:
   total_phases: 9
   completed_phases: 6
   total_plans: 116
-  completed_plans: 104
+  completed_plans: 105
 milestone_name: milestone
 ---
 
@@ -24,14 +24,14 @@ milestone_name: milestone
 See: .planning/PROJECT.md (updated 2026-09-11)
 
 **Core value:** Applications can store and retrieve data reliably through one backend-neutral lifecycle, with caching policy layered above storage without compromising integrity or cleanup correctness.
-**Current focus:** Phase 07.1 — Obstore Payload Participant Unification
+**Current focus:** Phase 07.1 — obstore-payload-participant-unification
 
 ## Current Position
 
-Phase: 07.1 (obstore-payload-participant-unification) — READY TO EXECUTE
-Plan: 0 of 11
+Phase: 07.1 (obstore-payload-participant-unification) — EXECUTING
+Plan: 2 of 11
 Status: Ready to execute
-Last activity: 2026-09-12 — Phase 07.1 planning complete and independently verified
+Last activity: 2026-09-13 — Phase 07.1 execution started
 
 Phase 07 closed with 24/24 plans summarized and an independent 9/9 must-have
 verification pass. Its final gap binds the terminal rebuild-debt threat to the
@@ -182,6 +182,7 @@ the deliberately superseded Phase 03 plan; do not fabricate its completion.
 | Phase 07 P22 | 15 min | 2 tasks | 6 files |
 | Phase 07 P23 | 36m | 1 tasks | 5 files |
 | Phase 07-explicit-migration-and-rebuild-cutover P24 | 4m | 1 tasks | 2 files |
+| Phase 07.1 P01 | 10min | 1 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -421,6 +422,7 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - [Phase 07]: Authenticated rebuild cleanup debt fences direct stage, verify, and accept operations; explicit resume remains the only settlement dispatcher.
 - [Phase 07]: Only REBUILDING and REBUILD_VERIFYING evidence may enter exact receipt cleanup; accepted evidence with debt is invalid at the model boundary.
 - [Phase 07]: T-07-21-03 now requires ordered forged-debt plus forward-fence/resume selector evidence.
+- [Phase 07.1]: Phase 07.1 Plan 01: User approved exactly obstore 0.11.1; no fork, custom signer, boto3 fallback, or owner-pinning restoration is authorized.
 
 ### Pending Todos
 
@@ -450,6 +452,6 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 
 ## Session Continuity
 
-Last session: 2026-09-12T17:03:11.992Z
-Stopped at: Phase 07.1 context gathered
-Resume file: .planning/phases/07.1-obstore-payload-participant-unification/07.1-CONTEXT.md
+Last session: 2026-09-13T14:57:43.566Z
+Stopped at: Completed 07.1-01-PLAN.md
+Resume file: .planning/phases/07.1-obstore-payload-participant-unification/07.1-02-PLAN.md
