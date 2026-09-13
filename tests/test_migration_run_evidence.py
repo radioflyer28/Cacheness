@@ -9,6 +9,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from obstore.store import MemoryStore
 
 from cacheness.error_handling import (
     CacheBlobMigrationEvidenceError,
@@ -32,6 +33,8 @@ from cacheness.storage.migration_evidence import (
     decode_maintenance_evidence,
     encode_maintenance_evidence,
 )
+from cacheness.storage.guarded_handler_io import GuardedHandlerIO
+from cacheness.storage.obstore_generation_io import ObstoreGenerationIO
 
 
 class _SentinelKeyProvider:
@@ -177,9 +180,15 @@ def test_evidence_never_renders_or_logs_key_material(tmp_path: Path, caplog: pyt
 
 
 def _memory_store(root: Path, key_provider: _SentinelKeyProvider) -> BlobStore:
+    (root / "handler-stage").mkdir(parents=True)
+    payload = ObstoreGenerationIO(
+        MemoryStore(),
+        GuardedHandlerIO(root / "handler-stage"),
+        qualification_identity="memory",
+    )
     store = BlobStore(
         StoreTopology(
-            payload=BackendRef(name="memory"),
+            payload=BackendRef(instance=payload),
             authority=BackendRef(name="memory"),
         ),
         cache_dir=root,

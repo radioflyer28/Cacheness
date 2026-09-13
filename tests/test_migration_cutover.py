@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from obstore.store import LocalStore, MemoryStore
 
 from cacheness.storage import BackendRef, BlobStore, StoreTopology
 from cacheness.error_handling import (
@@ -32,6 +33,8 @@ from cacheness.storage.manifest import (
     StoreVersionDimensions,
     verify_current_manifest,
 )
+from cacheness.storage.guarded_handler_io import GuardedHandlerIO
+from cacheness.storage.obstore_generation_io import ObstoreGenerationIO
 from cacheness.interfaces import PayloadTransformationEdge
 
 
@@ -179,9 +182,15 @@ class _MigrationMcapHandler:
 
 def _memory_store(root: Path, key_provider: _SharedMemoryKeyProvider) -> BlobStore:
     """Create an initialized, explicitly same-process store for tracer tests."""
+    (root / "handler-stage").mkdir(parents=True)
+    payload = ObstoreGenerationIO(
+        MemoryStore(),
+        GuardedHandlerIO(root / "handler-stage"),
+        qualification_identity="memory",
+    )
     store = BlobStore(
         StoreTopology(
-            payload=BackendRef(name="memory"),
+            payload=BackendRef(instance=payload),
             authority=BackendRef(name="memory"),
         ),
         cache_dir=root,
@@ -194,9 +203,15 @@ def _memory_store(root: Path, key_provider: _SharedMemoryKeyProvider) -> BlobSto
 
 def _sqlite_store(root: Path, key_provider: _SharedMemoryKeyProvider) -> BlobStore:
     """Create the supported local durable topology for cutover authority tests."""
+    (root / "handler-stage").mkdir(parents=True)
+    payload = ObstoreGenerationIO(
+        LocalStore(root / "payloads", mkdir=True),
+        GuardedHandlerIO(root / "handler-stage"),
+        qualification_identity="filesystem",
+    )
     store = BlobStore(
         StoreTopology(
-            payload=BackendRef(name="filesystem", options={"base_dir": root}),
+            payload=BackendRef(instance=payload),
             authority=BackendRef(name="sqlite", options={"root": root}),
         ),
         cache_dir=root,
