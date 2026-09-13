@@ -238,3 +238,29 @@ def test_packaging_evidence_allows_only_the_reviewed_sanitized_pass_shape() -> N
     )
 
     assert evidence.is_qualification_evidence(envelope, "packaging")
+
+
+def test_runner_payload_preserves_the_reviewed_non_live_group_order(
+    tmp_path: Path,
+) -> None:
+    """Runner-generated evidence remains canonical instead of set-order dependent."""
+    runner = _load_runner()
+    artifact_path = tmp_path / "cacheness-0.3.14-py3-none-any.whl"
+    artifact_path.write_bytes(b"wheel")
+    artifact = runner.WheelArtifact(path=artifact_path, sha256="d" * 64)
+    results = (
+        runner.ProbeResult("base", str(artifact_path), ("public_exports",)),
+        *(
+            runner.ProbeResult(
+                group,
+                f"{artifact_path}[{group}]",
+                ("public_exports",),
+                non_live=group in {"s3", "postgresql", "cloud"},
+            )
+            for group in runner.OPTIONAL_GROUPS
+        ),
+    )
+
+    payload = runner._packaging_payload(artifact, results, status="PASS")
+
+    assert payload["non_live_groups"] == ["s3", "postgresql", "cloud"]

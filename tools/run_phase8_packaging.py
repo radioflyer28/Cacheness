@@ -32,7 +32,7 @@ OPTIONAL_GROUPS = (
     "cloud",
 )
 TENSORFLOW_COMPATIBLE_PYTHON_MINORS = frozenset({(3, 11), (3, 12)})
-NON_LIVE_SERVICE_GROUPS = frozenset({"s3", "postgresql", "cloud"})
+NON_LIVE_SERVICE_GROUPS = ("s3", "postgresql", "cloud")
 RELEVANT_SOURCE_PATHS = (
     "pyproject.toml",
     "uv.lock",
@@ -653,7 +653,7 @@ def _packaging_payload(
             for result in results
             if result.name != "base"
         ],
-        "non_live_groups": sorted(NON_LIVE_SERVICE_GROUPS),
+        "non_live_groups": list(NON_LIVE_SERVICE_GROUPS),
     }
 
 
