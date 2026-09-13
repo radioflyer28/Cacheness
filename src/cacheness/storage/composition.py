@@ -14,9 +14,9 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Protocol, runtime_checkable
 
-from .backends.blob_backends import FilesystemBlobBackend, InMemoryBlobBackend
 from .lifecycle_authority import LifecycleAuthority
 from .memory_lifecycle_authority import InMemoryLifecycleAuthority
+from .obstore_generation_io import ObstoreGenerationIO
 from .sqlite_lifecycle_authority import SqliteLifecycleAuthority
 from .transport_evidence import PayloadTransportObservation
 
@@ -540,11 +540,16 @@ class RoleRegistry:
         # Built-ins take the same path as application registrations. JSON is a
         # derived-only projection; PostgreSQL is classified as derived but not
         # constructible until Phase 5 qualifies a real ProjectionSink.
-        self.register(BackendRole.PAYLOAD.value, "memory", InMemoryBlobBackend)
+        self.register(
+            BackendRole.PAYLOAD.value,
+            "memory",
+            _construct_memory_payload,
+            capabilities=ObstoreGenerationIO.topology_capabilities,
+        )
         self.register(
             BackendRole.PAYLOAD.value,
             "filesystem",
-            FilesystemBlobBackend,
+            _construct_filesystem_payload,
             capabilities={
                 "durable": True,
                 "process_scope": "host",
@@ -702,18 +707,23 @@ def _construct_sqlite_authority(*, root: str | Path, **options: object) -> objec
     return SqliteLifecycleAuthority.for_root(Path(root), **options)
 
 
+def _construct_memory_payload(**options: object) -> object:
+    """Construct the guarded in-process obstore participant."""
+    return ObstoreGenerationIO.for_memory(**options)
+
+
+def _construct_filesystem_payload(*, base_dir: str | Path, **options: object) -> object:
+    """Construct the guarded LocalStore participant at one managed root."""
+    return ObstoreGenerationIO.for_filesystem(base_dir=base_dir, **options)
+
+
 def _construct_s3_payload(**options: object) -> object:
     """Construct only the guarded Amazon S3 generation-I/O participant.
 
-    The lazy import leaves base-package import independent of boto3.  The
-    participant itself raises its install-oriented ImportError when the cloud
-    extra is absent; registration remains constructibility, not qualification.
+    The participant uses obstore's standard AWS credential chain. Registration
+    remains constructibility, not a live-service qualification claim.
     """
-    from .backends.s3_backend import S3BlobBackend
-
-    participant = S3BlobBackend(**options)
-    participant.qualification_identity = "s3"
-    return participant
+    return ObstoreGenerationIO.for_s3(**options)
 
 
 def _construct_postgresql_authority(**options: object) -> object:

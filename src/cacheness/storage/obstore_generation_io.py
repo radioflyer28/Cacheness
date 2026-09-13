@@ -13,6 +13,7 @@ from dataclasses import dataclass
 import hashlib
 from pathlib import Path, PurePosixPath
 import re
+from tempfile import TemporaryDirectory
 from typing import Any
 from urllib.parse import urlparse
 
@@ -23,6 +24,7 @@ from obstore.exceptions import (
     NotFoundError,
     PreconditionError,
 )
+from obstore.store import LocalStore, MemoryStore
 
 from cacheness.error_handling import (
     CacheBlobBackendError,
@@ -78,6 +80,7 @@ class ObstoreGenerationIO:
         handler_io: GuardedHandlerIO,
         *,
         qualification_identity: str,
+        temporary_root: TemporaryDirectory[str] | None = None,
         max_upload_bytes: int = DEFAULT_MAX_TRANSFER_BYTES,
         max_download_bytes: int = DEFAULT_MAX_TRANSFER_BYTES,
         max_inventory_objects: int = DEFAULT_MAX_INVENTORY_OBJECTS,
@@ -92,6 +95,7 @@ class ObstoreGenerationIO:
             raise ValueError("qualification_identity must name a known payload topology")
         self._store = store
         self._handler_io = handler_io
+        self._temporary_root = temporary_root
         self.qualification_identity = qualification_identity
         self.max_upload_bytes = self._transfer_limit(max_upload_bytes, "max_upload_bytes")
         self.max_download_bytes = self._transfer_limit(
@@ -120,6 +124,69 @@ class ObstoreGenerationIO:
                 "host_scope": "multi_host",
                 "listing": True,
             }
+
+    @classmethod
+    def for_memory(
+        cls,
+        *,
+        handler_root: Path | str | None = None,
+        max_upload_bytes: int = DEFAULT_MAX_TRANSFER_BYTES,
+        max_download_bytes: int = DEFAULT_MAX_TRANSFER_BYTES,
+        max_inventory_objects: int = DEFAULT_MAX_INVENTORY_OBJECTS,
+        max_inventory_bytes: int = DEFAULT_MAX_TRANSFER_BYTES,
+    ) -> "ObstoreGenerationIO":
+        """Build the one process-local obstore participant with private staging."""
+
+        temporary_root: TemporaryDirectory[str] | None = None
+        if handler_root is None:
+            temporary_root = TemporaryDirectory(prefix="cacheness-memory-")
+            root = Path(temporary_root.name)
+        else:
+            root = Path(handler_root)
+            root.mkdir(parents=True, exist_ok=True)
+        return cls(
+            MemoryStore(),
+            GuardedHandlerIO(root),
+            qualification_identity="memory",
+            temporary_root=temporary_root,
+            max_upload_bytes=max_upload_bytes,
+            max_download_bytes=max_download_bytes,
+            max_inventory_objects=max_inventory_objects,
+            max_inventory_bytes=max_inventory_bytes,
+        )
+
+    @classmethod
+    def for_filesystem(
+        cls,
+        *,
+        base_dir: Path | str,
+        handler_root: Path | str | None = None,
+        max_upload_bytes: int = DEFAULT_MAX_TRANSFER_BYTES,
+        max_download_bytes: int = DEFAULT_MAX_TRANSFER_BYTES,
+        max_inventory_objects: int = DEFAULT_MAX_INVENTORY_OBJECTS,
+        max_inventory_bytes: int = DEFAULT_MAX_TRANSFER_BYTES,
+    ) -> "ObstoreGenerationIO":
+        """Build the one LocalStore participant with private handler staging."""
+
+        root = Path(base_dir)
+        root.mkdir(parents=True, exist_ok=True)
+        temporary_root: TemporaryDirectory[str] | None = None
+        if handler_root is None:
+            temporary_root = TemporaryDirectory(prefix="cacheness-filesystem-")
+            private_root = Path(temporary_root.name)
+        else:
+            private_root = Path(handler_root)
+            private_root.mkdir(parents=True, exist_ok=True)
+        return cls(
+            LocalStore(root, mkdir=True),
+            GuardedHandlerIO(private_root),
+            qualification_identity="filesystem",
+            temporary_root=temporary_root,
+            max_upload_bytes=max_upload_bytes,
+            max_download_bytes=max_download_bytes,
+            max_inventory_objects=max_inventory_objects,
+            max_inventory_bytes=max_inventory_bytes,
+        )
 
     @classmethod
     def for_s3(
@@ -650,6 +717,8 @@ class ObstoreGenerationIO:
             return
         self._closed = True
         self._handler_io.close()
+        if self._temporary_root is not None:
+            self._temporary_root.cleanup()
 
     def _require_open(self) -> None:
         if self._closed:
