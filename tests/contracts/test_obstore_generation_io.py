@@ -6,8 +6,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import boto3
 import numpy as np
 import pytest
+from moto.server import ThreadedMotoServer
 
 from obstore.exceptions import PreconditionError
 from obstore.store import LocalStore, MemoryStore
@@ -15,6 +17,8 @@ from obstore.store import LocalStore, MemoryStore
 from cacheness.storage import BlobStore
 from cacheness.storage.composition import BackendRef, StoreTopology
 from cacheness.storage.guarded_handler_io import GuardedHandlerIO
+from cacheness.storage.lifecycle import AuthorityLifecycleEngine
+from cacheness.storage.memory_lifecycle_authority import InMemoryLifecycleAuthority
 from cacheness.storage.obstore_generation_io import ObstoreGenerationIO
 from cacheness.error_handling import (
     CacheBlobBackendError,
@@ -140,6 +144,88 @@ class _PreconditionCollisionStore(_RecordingStore):
         del source, kwargs
         self.calls.append(("put", locator))
         raise PreconditionError("simulated create precondition")
+
+
+class _DeterministicRemoteAuthority(InMemoryLifecycleAuthority):
+    """Test-only remote-shaped authority for a mocked S3 transport contract."""
+
+    qualification_identity = "postgresql"
+    topology_capabilities = {
+        "durable": True,
+        "process_scope": "multi_host",
+        "host_scope": "multi_host",
+        "transaction_scope": "authority",
+        "exact_cas": True,
+        "portable_query": True,
+        "canonical_scan": True,
+        "index_acceleration": True,
+    }
+
+
+class _StaticRemoteManifestKey:
+    """Provide deterministic shared test key material for the remote profile."""
+
+    def get_key(self) -> bytes:
+        return b"m" * 32
+
+    def get_or_initialize_new_store(self) -> bytes:
+        return self.get_key()
+
+    def initialize_new_store(self) -> bytes:
+        return self.get_key()
+
+
+_S3_REGION = "us-east-1"
+_S3_BUCKET = "cacheness-obstore-generation-contract"
+
+
+@pytest.fixture
+def moto_s3_provider(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[ObstoreGenerationIO, object]:
+    """Build the sole test-only HTTP endpoint exception for mocked S3."""
+
+    server = ThreadedMotoServer(ip_address="127.0.0.1", port=0, verbose=False)
+    server.start()
+    host, port = server.get_host_and_port()
+    endpoint_url = f"http://{host}:{port}"
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "testing")
+    monkeypatch.setenv("AWS_DEFAULT_REGION", _S3_REGION)
+    client = boto3.client(
+        "s3",
+        endpoint_url=endpoint_url,
+        region_name=_S3_REGION,
+        aws_access_key_id="testing",
+        aws_secret_access_key="testing",
+    )
+    client.create_bucket(Bucket=_S3_BUCKET)
+    provider = ObstoreGenerationIO.for_s3(
+        bucket=_S3_BUCKET,
+        prefix="contract/s3",
+        region=_S3_REGION,
+        handler_root=tmp_path / "handler-root",
+        endpoint=endpoint_url,
+        allow_test_endpoint=True,
+    )
+    try:
+        yield provider, client
+    finally:
+        provider.close()
+        server.stop()
+
+
+def _mocked_s3_blob_store(tmp_path: Path, provider: ObstoreGenerationIO) -> BlobStore:
+    """Compose the real lifecycle engine with test-only remote-shaped authority."""
+
+    return BlobStore(
+        StoreTopology(
+            payload=BackendRef(instance=provider),
+            authority=BackendRef(instance=_DeterministicRemoteAuthority()),
+        ),
+        cache_dir=tmp_path / "mocked-s3-store",
+        manifest_key_provider=_StaticRemoteManifestKey(),
+    )
 
 
 @pytest.fixture(params=("local", "memory"), ids=("local", "memory"))
@@ -411,5 +497,65 @@ def test_transfer_bounds_fail_before_unbounded_upload_or_download(
                 pass
         assert wrapped.calls == [("get", locator.as_posix())]
         assert wrapped.list_calls == 0
+    finally:
+        provider.close()
+
+
+def test_mocked_s3_provider_completes_one_authoritative_lifecycle_for_native_and_mcap(
+    tmp_path: Path,
+    moto_s3_provider: tuple[ObstoreGenerationIO, object],
+) -> None:
+    """Moto exercises object mechanics; the real engine still owns visibility."""
+
+    provider, _client = moto_s3_provider
+    store = _mocked_s3_blob_store(tmp_path, provider)
+    handler = _McapHandler()
+    store.handlers.register_handler(handler, priority=0)
+    native_value = np.asarray([11, 13, 17], dtype=np.int64)
+    custom_value = _McapRecord(b"mocked S3 custom handler")
+
+    try:
+        native_receipt = store.put_entry(native_value, key="s3-native")
+        custom_receipt = store.put_entry(custom_value, key="s3-mcap")
+
+        assert type(store.lifecycle) is AuthorityLifecycleEngine
+        assert store.topology.qualified_profile.pair == ("postgresql", "s3")
+        assert store.get(native_receipt.key).tolist() == [11, 13, 17]
+        assert store.get(custom_receipt.key) == custom_value
+        assert handler.put_paths and handler.get_paths
+        assert all(path.suffix == ".mcap" for path in handler.get_paths)
+        assert all(not path.is_relative_to(provider.root) for path in handler.get_paths)
+
+        assert store.delete(native_receipt.key) is True
+        assert store.delete(custom_receipt.key) is True
+    finally:
+        store.close()
+
+
+def test_mocked_s3_collision_and_lost_create_response_settle_only_by_exact_object(
+    moto_s3_provider: tuple[ObstoreGenerationIO, object],
+) -> None:
+    """One immutable S3 object wins; response loss never consults an inventory."""
+
+    provider, _client = moto_s3_provider
+    handler = _McapHandler()
+    locator = Path("generations") / "mocked-s3" / "response-loss.mcap"
+
+    try:
+        with provider.stage(handler, _McapRecord(b"first"), config=None) as staged:
+            published = provider.publish_generation(staged, locator)
+        with provider.stage(handler, _McapRecord(b"second"), config=None) as staged:
+            with pytest.raises(FileExistsError):
+                provider.publish_generation(staged, locator)
+        with provider.open_snapshot(locator, dict(published["metadata"])) as snapshot:
+            assert snapshot.path.read_bytes() == b"MCAP\x00first"
+
+        provider._store = _AcceptedThenRaisedStore(provider._store)
+        lost_locator = Path("generations") / "mocked-s3" / "lost-response.mcap"
+        with provider.stage(handler, _McapRecord(b"response loss"), config=None) as staged:
+            recovered = provider.publish_generation(staged, lost_locator)
+        with provider.open_snapshot(lost_locator, dict(recovered["metadata"])) as snapshot:
+            assert snapshot.path.read_bytes() == b"MCAP\x00response loss"
+        assert provider._store.list_calls == 0
     finally:
         provider.close()
