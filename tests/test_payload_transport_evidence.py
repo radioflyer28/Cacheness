@@ -13,6 +13,10 @@ from cacheness.storage.transport_evidence import (
     PayloadTransportEvidence,
     PayloadTransportObservation,
 )
+from cacheness.storage import (
+    PayloadTransportComparison,
+    PayloadTransportComparisonStatus,
+)
 
 
 _SIGNING_KEY = b"e" * 32
@@ -108,3 +112,23 @@ def test_observation_rejects_oversized_text_and_invalid_size() -> None:
 
     with pytest.raises(CacheManifestIntegrityError):
         PayloadTransportObservation(e_tag=None, byte_size=-1, version=None)
+
+
+def test_transport_comparison_cannot_claim_canonical_payload_verification() -> None:
+    """Transport corroboration remains explicitly noncanonical public evidence."""
+    comparison = PayloadTransportComparison(
+        key="logical-key",
+        generation="generation-1",
+        locator="generations/generation-1.native",
+        status=PayloadTransportComparisonStatus.MATCH,
+    )
+
+    assert comparison.canonical_payload_integrity_verified is False
+    with pytest.raises(ValueError):
+        PayloadTransportComparison(
+            key="logical-key",
+            generation="generation-1",
+            locator="generations/generation-1.native",
+            status=PayloadTransportComparisonStatus.MATCH,
+            canonical_payload_integrity_verified=True,
+        )
