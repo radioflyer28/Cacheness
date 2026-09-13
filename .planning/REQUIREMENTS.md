@@ -64,10 +64,10 @@ Phase 3 completion below is scoped to the qualified initialized local SQLite/fil
 - [x] **QUAL-01**: A clean minimal wheel installation imports every guaranteed public symbol and completes a memory-backed round trip.
 - [ ] **QUAL-02**: Each advertised optional dependency group installs and imports independently.
 - [ ] **QUAL-03**: CI covers supported Python versions, backend contracts, lint policy, coverage, packaging, PostgreSQL, and AWS S3 integration.
-- [ ] **QUAL-04**: Carry forward the finite Phase 3 integrity/recovery regressions and cover named commit boundaries for each new supported topology with deterministic fault/crash tests. Shared-worker fixtures initialize first; success/conflict/typed retryable outcomes are distinguished from corruption. No universal scheduling guarantee or automatic repeated race-fix loop is required.
+- [x] **QUAL-04**: Carry forward the finite Phase 3 integrity/recovery regressions and cover named commit boundaries for each new supported topology with deterministic fault/crash tests. Shared-worker fixtures initialize first; success/conflict/typed retryable outcomes are distinguished from corruption. No universal scheduling guarantee or automatic repeated race-fix loop is required.
 - [ ] **QUAL-05**: Lifecycle and cache-policy code meets targeted statement and branch coverage thresholds established by the project.
 - [ ] **QUAL-06**: Checked-in benchmarks establish final performance budgets and distributions for named workloads/environments after lifecycle behavior stabilizes. Benchmark thresholds do not become runtime deadlines or strengthen public progress/atomicity promises.
-- [ ] **QUAL-07**: Supported inventory and aggregate operations avoid unbounded memory use and accidental N+1 backend calls.
+- [x] **QUAL-07**: Supported inventory and aggregate operations avoid unbounded memory use and accidental N+1 backend calls.
 
 ## v2 Requirements
 
@@ -145,10 +145,10 @@ topology.
 | QUAL-01 | Phase 8 | Complete |
 | QUAL-02 | Phase 8 | Pending |
 | QUAL-03 | Phase 8 | Pending |
-| QUAL-04 | Phase 8 | Pending |
+| QUAL-04 | Phase 8 | Complete |
 | QUAL-05 | Phase 8 | Pending |
 | QUAL-06 | Phase 8 | Pending |
-| QUAL-07 | Phase 8 | Pending |
+| QUAL-07 | Phase 8 | Complete |
 
 **Coverage:**
 
