@@ -23,6 +23,7 @@ from cacheness.storage.obstore_generation_io import ObstoreGenerationIO
 from cacheness.error_handling import (
     CacheBlobBackendError,
     CacheBlobLifecycleConflictError,
+    CacheConfigurationError,
     CacheUnsafePathError,
 )
 
@@ -559,5 +560,73 @@ def test_mocked_s3_collision_and_lost_create_response_settle_only_by_exact_objec
         with provider.open_snapshot(lost_locator, dict(recovered["metadata"])) as snapshot:
             assert snapshot.path.read_bytes() == b"MCAP\x00response loss"
         assert provider._store.list_calls == 0
+    finally:
+        provider.close()
+
+
+@pytest.mark.parametrize(
+    "invalid_options",
+    (
+        {"bucket": ""},
+        {"region": ""},
+        {"endpoint": "https://objects.example.test"},
+        {"expected_bucket_owner": "123456789012"},
+    ),
+)
+def test_s3_configuration_rejects_unsafe_or_unsupported_account_boundaries(
+    tmp_path: Path, invalid_options: dict[str, str]
+) -> None:
+    """D-16 rejects owner pinning rather than rebuilding an unsafe workaround."""
+
+    handler_root = tmp_path / "handler-root"
+    handler_root.mkdir()
+    options: dict[str, object] = {
+        "bucket": _S3_BUCKET,
+        "prefix": "contract/s3",
+        "region": _S3_REGION,
+        "handler_root": handler_root,
+    }
+    options.update(invalid_options)
+
+    with pytest.raises(CacheConfigurationError):
+        ObstoreGenerationIO.for_s3(**options)
+
+
+def test_mocked_s3_enforces_direct_put_bounds_and_preserves_exact_maintenance_scope(
+    moto_s3_provider: tuple[ObstoreGenerationIO, object],
+) -> None:
+    """S3 mechanics are bounded evidence, never a catalog or visibility authority."""
+
+    provider, client = moto_s3_provider
+    handler = _McapHandler()
+    locator = Path("generations") / "mocked-s3" / "bounded.mcap"
+    other_key = "contract/s3/generations/mock-scope/unrelated.mcap"
+    client.put_object(Bucket=_S3_BUCKET, Key=other_key, Body=b"unrelated")
+    wrapped = _RecordingStore(provider._store)
+    provider._store = wrapped
+    provider.max_upload_bytes = 1
+
+    try:
+        with provider.stage(handler, _McapRecord(b"too large"), config=None) as staged:
+            with pytest.raises(CacheBlobBackendError, match="upload bound"):
+                provider.publish_generation(staged, locator)
+        assert wrapped.calls == []
+
+        provider.max_upload_bytes = 128 * 1024 * 1024
+        with provider.stage(handler, _McapRecord(b"exact"), config=None) as staged:
+            provider.publish_generation(staged, locator)
+        evidence = provider.head_generation(locator)
+        assert evidence.byte_size == len(b"MCAP\x00exact")
+        assert evidence.e_tag is not None
+        assert not hasattr(evidence, "digest")
+
+        page = provider.inventory_page(max_objects=1)
+        assert page.objects
+        assert page.next_offset is not None
+        assert all(item.locator.startswith("generations/") for item in page.objects)
+
+        provider.delete_or_prove_absent(locator)
+        client.head_object(Bucket=_S3_BUCKET, Key=other_key)
+        assert wrapped.list_calls == 1
     finally:
         provider.close()
