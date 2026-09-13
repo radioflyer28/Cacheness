@@ -9,16 +9,14 @@ from __future__ import annotations
 
 import pytest
 
-from cacheness.storage.backends.blob_backends import (
-    FilesystemBlobBackend,
-    InMemoryBlobBackend,
-)
+from cacheness.storage.backends.blob_backends import InMemoryBlobBackend
 from cacheness.storage.composition import (
     BackendRole,
     CompositionValidationError,
     RoleRegistration,
     RoleRegistry,
 )
+from cacheness.storage.obstore_generation_io import ObstoreGenerationIO
 
 
 class RecordingPayload(InMemoryBlobBackend):
@@ -51,15 +49,15 @@ def test_fresh_registries_have_per_instance_builtin_registrations(tmp_path):
     filesystem = first.construct(
         BackendRole.PAYLOAD,
         "filesystem",
-        {"base_dir": tmp_path / "payloads", "shard_chars": 0},
+        {"base_dir": tmp_path / "payloads"},
     )
 
-    assert isinstance(first_memory, InMemoryBlobBackend)
-    assert isinstance(second_memory, InMemoryBlobBackend)
+    assert isinstance(first_memory, ObstoreGenerationIO)
+    assert isinstance(second_memory, ObstoreGenerationIO)
     assert first_memory is not second_memory
-    assert isinstance(filesystem, FilesystemBlobBackend)
-    assert filesystem.shard_chars == 0
-    assert filesystem.base_dir == (tmp_path / "payloads").resolve()
+    assert isinstance(filesystem, ObstoreGenerationIO)
+    assert first_memory.qualification_identity == "memory"
+    assert filesystem.qualification_identity == "filesystem"
 
 
 def test_role_and_name_collisions_are_typed_and_replace_is_explicit():

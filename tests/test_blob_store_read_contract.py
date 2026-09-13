@@ -20,6 +20,7 @@ from cacheness.storage import (
 from cacheness.storage.composition import BackendRef, StoreTopology
 from cacheness.storage.legacy_manifest import LegacyManifestRecognitionError
 from cacheness.storage.manifest import BlobManifest, verify_current_manifest
+from cacheness.storage.obstore_generation_io import ObstoreGenerationIO
 from cacheness.storage.transport_evidence import PayloadTransportObservation
 
 
@@ -33,6 +34,62 @@ def _topology(root: Path) -> StoreTopology:
 
 def _store(root: Path) -> BlobStore:
     return BlobStore(_topology(root), cache_dir=root)
+
+
+class _NoObservationPayload:
+    """Caller-owned structural participant without optional transport inspection."""
+
+    qualification_identity = "filesystem"
+    topology_capabilities = {
+        "durable": True,
+        "process_scope": "host",
+        "host_scope": "host",
+        "immutable_generations": True,
+        "streaming": True,
+        "listing": True,
+    }
+
+    def __init__(self, delegate: ObstoreGenerationIO) -> None:
+        self._delegate = delegate
+        self.close_calls = 0
+
+    def materialize_handler_io(self) -> "_NoObservationPayload":
+        return self
+
+    @property
+    def root(self) -> Path:
+        return self._delegate.root
+
+    def stage(self, *args, **kwargs):
+        return self._delegate.stage(*args, **kwargs)
+
+    def publish_generation(self, *args, **kwargs):
+        return self._delegate.publish_generation(*args, **kwargs)
+
+    def open_snapshot(self, *args, **kwargs):
+        return self._delegate.open_snapshot(*args, **kwargs)
+
+    def delete_or_prove_absent(self, *args, **kwargs):
+        return self._delegate.delete_or_prove_absent(*args, **kwargs)
+
+    def close(self) -> None:
+        self.close_calls += 1
+        self._delegate.close()
+
+
+def _store_without_transport_observation(
+    root: Path,
+) -> tuple[BlobStore, _NoObservationPayload]:
+    """Inject a real generation participant without adding observation support."""
+    provider = _NoObservationPayload(ObstoreGenerationIO.for_filesystem(base_dir=root))
+    store = BlobStore(
+        StoreTopology(
+            payload=BackendRef(instance=provider),
+            authority=BackendRef(name="sqlite", options={"root": root}),
+        ),
+        cache_dir=root,
+    )
+    return store, provider
 
 
 def _put_with_transport_evidence(
@@ -220,15 +277,27 @@ def test_transport_comparison_reports_unavailable_without_evidence_or_provider(
         assert no_evidence is not None
         assert no_evidence.status is PayloadTransportComparisonStatus.UNAVAILABLE
 
+    finally:
+        store.close()
+
+    provider_store, provider = _store_without_transport_observation(
+        tmp_path / "transport-no-provider"
+    )
+    try:
         receipt, participant, _ = _put_with_transport_evidence(
-            store, monkeypatch, key="transport-no-provider"
+            provider_store, monkeypatch, key="transport-no-provider"
         )
-        monkeypatch.delattr(participant, "observe_transport", raising=False)
-        no_provider = store.compare_transport_evidence(receipt.key)
+
+        assert provider_store.payload_backend is provider
+        assert participant is provider
+        assert not hasattr(provider, "observe_transport")
+        no_provider = provider_store.compare_transport_evidence(receipt.key)
         assert no_provider is not None
         assert no_provider.status is PayloadTransportComparisonStatus.UNAVAILABLE
     finally:
-        store.close()
+        provider_store.close()
+        assert provider.close_calls == 0
+        provider.close()
 
 
 def test_transport_comparison_reports_exact_absence_and_preserves_backend_cause(

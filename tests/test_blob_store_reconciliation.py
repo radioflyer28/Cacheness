@@ -29,7 +29,7 @@ def _prepared_spec(operation_id: str, *, manifest: bytes = b"record") -> Mutatio
         operation_id=operation_id,
         key=f"key-{operation_id}",
         generation=f"generation-{operation_id}",
-        candidate_locator=f".cacheness/generations/{operation_id}.payload",
+        candidate_locator=f"generations/{operation_id}/{operation_id}.payload",
         expected=EntryExpectation.absent(),
         manifest=manifest,
     )
@@ -192,9 +192,20 @@ def test_authority_reconciliation_apply_resumes_bounded_cleanup_debt(
         first = store.reconcile(apply=True)
         assert first.resume_token is not None
         first_finding = first.machine_view()["findings"]
-        assert len(first_finding) == 1
-        assert first_finding[0]["applied_state"] == "applied"
-        assert first_finding[0]["checkpoint_state"] == "completed"
+        lifecycle_actions = [
+            finding
+            for finding in first_finding
+            if finding["residue_type"] == "cleanup_debt"
+        ]
+        assert first.operation_records_seen == 1
+        assert len(lifecycle_actions) == 1
+        assert lifecycle_actions[0]["applied_state"] == "applied"
+        assert lifecycle_actions[0]["checkpoint_state"] == "completed"
+        assert all(
+            finding["proposed_action"] == "report_only"
+            for finding in first_finding
+            if finding["residue_type"] == "payload_inventory"
+        )
         assert len(store.lifecycle_authority.pending_cleanup_debts()) == 1
 
         second = store.reconcile(apply=True, resume_token=first.resume_token)

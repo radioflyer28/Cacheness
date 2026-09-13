@@ -892,7 +892,7 @@ def test_blob_store_clear_keeps_tombstone_authority_when_reclamation_fails(
             for entry in entries_before
             if entry is not None
         ]
-        delete = store.guarded_handler_io.file_ops.delete
+        delete_or_prove_absent = store.guarded_handler_io.delete_or_prove_absent
         payload_delete_count = 0
 
         def fail_one_payload_delete(locator):
@@ -900,10 +900,14 @@ def test_blob_store_clear_keeps_tombstone_authority_when_reclamation_fails(
             if root / Path(locator) in payload_paths:
                 payload_delete_count += 1
                 if payload_delete_count == failing_payload_delete:
-                    raise RuntimeError("payload delete unavailable")
-            return delete(locator)
+                    raise OSError("Could not prove managed payload cleanup")
+            return delete_or_prove_absent(locator)
 
-        monkeypatch.setattr(store.guarded_handler_io.file_ops, "delete", fail_one_payload_delete)
+        monkeypatch.setattr(
+            store.guarded_handler_io,
+            "delete_or_prove_absent",
+            fail_one_payload_delete,
+        )
 
         with pytest.raises(CacheBlobBackendError) as error:
             store.clear()

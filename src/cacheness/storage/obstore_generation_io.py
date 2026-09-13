@@ -435,9 +435,16 @@ class ObstoreGenerationIO:
             ) from error
 
     def delete_or_prove_absent(self, locator: Path | str) -> None:
-        """Delete one exact generation, then settle only on exact absence proof."""
+        """Delete one authority-owned exact cleanup target after absence proof.
+
+        Normal object operations remain confined to immutable ``generations/``
+        locators.  The lifecycle authority may also supply an exact signed
+        ``tombstones/`` locator when it resumes deletion cleanup; that locator
+        is deliberately accepted here and nowhere that can publish, read, head,
+        or inventory payload objects.
+        """
         self._require_open()
-        locator_text = self._validated_locator(locator)
+        locator_text = self._validated_cleanup_locator(locator)
         try:
             self._store.delete([locator_text])
         except (NotFoundError, FileNotFoundError):
@@ -730,6 +737,32 @@ class ObstoreGenerationIO:
     @staticmethod
     def _validated_locator(locator: Path | str) -> str:
         """Accept only canonical immutable paths below ``generations/``."""
+        return ObstoreGenerationIO._validated_locator_in_namespace(
+            locator,
+            allowed_namespaces={"generations"},
+            require_handler_suffix=True,
+            error_message="Generation locator is outside the immutable namespace",
+        )
+
+    @staticmethod
+    def _validated_cleanup_locator(locator: Path | str) -> str:
+        """Accept one exact immutable or authority-tombstone cleanup locator."""
+        return ObstoreGenerationIO._validated_locator_in_namespace(
+            locator,
+            allowed_namespaces={"generations", "tombstones"},
+            require_handler_suffix=False,
+            error_message="Cleanup locator is outside an authority-owned namespace",
+        )
+
+    @staticmethod
+    def _validated_locator_in_namespace(
+        locator: Path | str,
+        *,
+        allowed_namespaces: set[str],
+        require_handler_suffix: bool,
+        error_message: str,
+    ) -> str:
+        """Validate one exact relative locator for its explicitly named operation."""
         if not isinstance(locator, (Path, str)):
             raise CacheUnsafePathError(
                 "Generation locator must be a relative path",
@@ -749,15 +782,16 @@ class ObstoreGenerationIO:
                 reason=CacheReason.INVALID_IDENTIFIER,
             )
         parts = PurePosixPath(text).parts
-        if len(parts) != 3 or parts[0] != "generations" or any(
+        if len(parts) != 3 or parts[0] not in allowed_namespaces or any(
             part in {"", ".", ".."} or not _LOCATOR_SEGMENT.fullmatch(part)
             for part in parts
         ):
             raise CacheUnsafePathError(
-                "Generation locator is outside the immutable namespace",
+                error_message,
                 reason=CacheReason.INVALID_IDENTIFIER,
             )
-        GuardedHandlerIO.native_suffix(text)
+        if require_handler_suffix:
+            GuardedHandlerIO.native_suffix(text)
         return text
 
 

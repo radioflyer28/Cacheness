@@ -365,6 +365,38 @@ def test_local_and_memory_share_exact_immutable_generation_contract(
         provider.close()
 
 
+def test_authority_tombstone_locator_is_an_exact_cleanup_target_only(
+    tmp_path: Path,
+) -> None:
+    """Tombstones reach only idempotent cleanup, never object publication or reads."""
+
+    wrapped = _RecordingStore(MemoryStore())
+    handler_root = tmp_path / "handler-root"
+    handler_root.mkdir()
+    provider = _provider(wrapped, handler_root, identity="memory")
+    tombstone = Path("tombstones") / "authoritycleanup" / ("a" * 32)
+
+    try:
+        provider.delete_or_prove_absent(tombstone)
+
+        with provider.stage(_McapHandler(), _McapRecord(b"not-a-payload"), config=None) as staged:
+            with pytest.raises(CacheUnsafePathError):
+                provider.publish_generation(staged, tombstone)
+        with pytest.raises(CacheUnsafePathError):
+            with provider.open_snapshot(tombstone, {}):
+                pass
+        with pytest.raises(CacheUnsafePathError):
+            provider.head_generation(tombstone)
+
+        assert wrapped.calls == [
+            ("delete", tombstone.as_posix()),
+            ("head", tombstone.as_posix()),
+        ]
+        assert wrapped.list_calls == 0
+    finally:
+        provider.close()
+
+
 @pytest.mark.parametrize("store_name", ("local", "memory"))
 def test_accepted_then_lost_create_response_is_settled_by_exact_identity(
     tmp_path: Path, store_name: str

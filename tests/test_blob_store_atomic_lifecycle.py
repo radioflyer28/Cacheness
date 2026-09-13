@@ -6,7 +6,6 @@ import json
 from multiprocessing import get_context
 import os
 from pathlib import Path
-import stat
 import textwrap
 from typing import Any
 
@@ -16,7 +15,6 @@ from cacheness.error_handling import CacheBlobRecoverableCleanupError
 from cacheness.storage import BlobReceipt, BlobStore
 from cacheness.storage.catalog import CatalogField, CatalogQuery, CatalogSchema
 from cacheness.storage.composition import BackendRef, StoreTopology
-from cacheness.storage import path_security
 from cacheness.storage.sqlite_lifecycle_authority import AUTHORITY_RELATIVE_PATH
 from _lifecycle_test_support import (
     CRASH_BOUNDARY_EXIT,
@@ -155,33 +153,33 @@ _EXCLUSIVE_STREAM_CRASH_EXIT = 91
 
 
 def _crash_during_live_exclusive_stream(root: str, boundary: str) -> None:
-    """Crash in a child after durable intent and inside real native publication."""
+    """Crash after durable intent at the participant/obstore publication seam."""
     store = _store(root)
-    guarded_io = store._materialize_authority_store()
-    file_ops = guarded_io.file_ops
-    if boundary == "stream_copy":
-        original_write_all = file_ops._write_all
+    participant = store._materialize_authority_store()
 
-        def crash_after_first_write(descriptor: int, chunk: bytes) -> None:
-            original_write_all(descriptor, chunk)
-            pending = store.lifecycle_authority.pending_mutations()
-            assert len(pending) == 1
-            assert pending[0].spec.candidate_locator
-            os._exit(_EXCLUSIVE_STREAM_CRASH_EXIT)
+    def crash_with_prepared_candidate() -> None:
+        pending = store.lifecycle_authority.pending_mutations()
+        assert len(pending) == 1
+        assert pending[0].spec.candidate_locator
+        os._exit(_EXCLUSIVE_STREAM_CRASH_EXIT)
 
-        file_ops._write_all = crash_after_first_write
-    elif boundary == "file_fsync":
-        original_fsync = path_security.os.fsync
+    if boundary == "obstore_put":
+        obstore_store = participant._store
+        original_put = obstore_store.put
 
-        def crash_after_candidate_fsync(descriptor: int) -> None:
-            original_fsync(descriptor)
-            if stat.S_ISREG(os.fstat(descriptor).st_mode):
-                pending = store.lifecycle_authority.pending_mutations()
-                assert len(pending) == 1
-                assert pending[0].spec.candidate_locator
-                os._exit(_EXCLUSIVE_STREAM_CRASH_EXIT)
+        def crash_after_obstore_put(*args, **kwargs):
+            original_put(*args, **kwargs)
+            crash_with_prepared_candidate()
 
-        path_security.os.fsync = crash_after_candidate_fsync
+        obstore_store.put = crash_after_obstore_put
+    elif boundary == "participant_publish":
+        original_publish = participant.publish_generation
+
+        def crash_after_participant_publish(*args, **kwargs):
+            original_publish(*args, **kwargs)
+            crash_with_prepared_candidate()
+
+        participant.publish_generation = crash_after_participant_publish
     else:  # pragma: no cover - parametrized caller defines all supported boundaries.
         raise AssertionError(f"Unknown exclusive-stream crash boundary: {boundary}")
 
@@ -203,7 +201,7 @@ def test_crash_harness_terminates_a_public_put_at_a_named_boundary(
     assert result.returncode == CRASH_BOUNDARY_EXIT
 
 
-@pytest.mark.parametrize("boundary", ("stream_copy", "file_fsync"))
+@pytest.mark.parametrize("boundary", ("obstore_put", "participant_publish"))
 def test_live_exclusive_stream_crash_preserves_prior_generation_and_exact_debt(
     tmp_path: Path,
     boundary: str,
