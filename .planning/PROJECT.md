@@ -2,7 +2,7 @@
 
 ## What This Is
 
-Cacheness is a Python storage and caching library for arbitrary objects, arrays, dataframes, and function results. Its object-storage path uses a reliable `BlobStore` foundation that `UnifiedCache` consumes as its policy layer. Catalog customization, backend composition, cache-policy coverage, and explicit offline migration/rebuild tooling are implemented; final production qualification remains in Phase 8. `SqlCache` remains separate.
+Cacheness is a Python storage and caching library for arbitrary objects, arrays, dataframes, and function results. Its object-storage path uses a reliable `BlobStore` foundation that `UnifiedCache` consumes as its policy layer. Built-in filesystem, memory, and S3 payload mechanics now share one guarded obstore participant beneath the single lifecycle authority. Catalog customization, cache-policy coverage, and explicit offline migration/rebuild tooling are implemented; final production qualification remains in Phase 8. `SqlCache` remains separate.
 
 The intended audience is Python applications that need local or remote persistence with predictable cache semantics across filesystem, memory, S3, JSON, SQLite, and PostgreSQL backends.
 
@@ -31,10 +31,12 @@ Applications can store and retrieve data reliably through one backend-neutral li
 - ✓ Remaining cache policy, decorator, and statistics behavior runs above the canonical `BlobStore` engine — Phase 6
 - ✓ The pre-production `BlobStore`/cache surface has explicit versioned migration and confirmed rebuild tooling; ordinary opens never perform implicit upgrades — Phases 4, 6, and 7
 - ✓ Persisted metadata and paths use safe parsing, containment, signing, and fail-closed integrity boundaries — Phases 1 through 5
+- ✓ Built-in filesystem, memory, and S3 payload mechanics use one guarded obstore participant while `BlobStore` retains sole lifecycle authority — Phase 07.1; live-service release qualification remains Phase 8
+- ✓ Opaque S3 ETag/version evidence can be cataloged and compared without replacing canonical SHA-256/size verification — Phase 07.1
 
 ### Active
 
-- [ ] Make `BlobStore` the canonical owner of payload and metadata lifecycle across every advertised built-in backend
+- [ ] Release-qualify `BlobStore` lifecycle behavior across every advertised built-in backend and supported environment
 - [ ] Publish complete generations through one catalog transaction; coordinate external payload effects with attributable intent/debt and deterministic reconciliation when resources are available, not cross-resource ACID or instantaneous orphan-free cleanup
 - [ ] Guarantee same-key integrity and defined success/conflict/retryable-failure outcomes within each explicitly supported backend topology
 - [ ] Correct package dependency and optional-feature detection so a minimal supported installation imports reliably
@@ -59,7 +61,7 @@ The codebase began as a disk cache and expanded into direct blob storage, backen
 
 At project initialization, payload writes and metadata writes were separate, without rollback; cleanup and composition were incomplete. Phase 3 now has a SQLite lifecycle authority, immutable native generations, exact publication, and intent/debt recovery. The direct implementation removed the cache's projection-repair/deferred-cleanup orchestration and added supported same-generation entry snapshots and receipts. See [the implementation ledger](../docs/phase3-direct-implementation-2026-09-06.md) and [initialization/failure guide](../docs/STORAGE_INITIALIZATION.md), not the earlier audit alone, for the delivered baseline.
 
-Phases 4 through 7 delivered injected catalog composition, supported payload participants, cache-policy reuse of `BlobStore`, and explicit stopped-worker migration/rebuild tooling. Phase 8 owns the remaining release qualification: minimal packaging, supported Python/platform matrices, real PostgreSQL and AWS S3 evidence, coverage policy, and measured performance. Deterministic adapters or standalone backend implementations are not substitutes for those live release claims.
+Phases 4 through 7 delivered injected catalog composition, cache-policy reuse of `BlobStore`, and explicit stopped-worker migration/rebuild tooling. Phase 07.1 replaced the separate filesystem/memory/S3 payload mechanics with one guarded obstore participant while preserving the single lifecycle authority and path-based custom-handler seam. Phase 8 owns the remaining release qualification: minimal packaging, supported Python/platform matrices, real PostgreSQL and AWS S3 evidence, coverage policy, and measured performance. Deterministic adapters or standalone backend implementations are not substitutes for those live release claims.
 
 The security model assumes trusted application payloads and a trusted owner for each local store, so pickle/dill remain available and Cacheness lifecycle-control objects must not be deleted or rebound by that owner while the store is live. Persisted metadata and paths are still untrusted inputs: the implementation must eliminate `eval`, contain filesystem paths, bind structured query paths safely, and fail closed when signing, integrity verification, or control-object identity checks fail. Initial Windows local-store coordination supports processes running as one OS user in one interactive or service session; cross-user, cross-service, and cross-session sharing requires a future explicit authority and ACL contract.
 
@@ -102,6 +104,8 @@ Historical baseline (2026-08-29): 777 collected tests, 749 passing, 26 skipped a
 | Require explicit stopped-worker migration and rebuild | Ordinary constructors must validate rather than silently mutate; maintenance uses bounded authenticated evidence and exact authority-owned recovery | ✓ Phase 7 |
 | Support current plus immediately previous released layouts | Bounds migration support while allowing older released stores to advance through declared steps; pre-production layouts need not be fabricated | ✓ Phase 7 |
 | Keep handler-owned transforms and explicit rebuild separate from lifecycle authority | Format handlers own serialization changes while the catalog remains the sole visibility and recovery authority | ✓ Phase 7 |
+| Use obstore for built-in payload object mechanics only | Removes duplicate filesystem/S3 mechanics while preserving `BlobStore`/`AuthorityLifecycleEngine` as the sole owner of intent, visibility, reconciliation, and cleanup debt | ✓ Phase 07.1 |
+| Treat ETag/version as opaque signed transport evidence | Enables server-side corroboration without pretending ETag is the canonical blob digest or extending database ACID across the object store | ✓ Phase 07.1 |
 
 ## Evolution
 
@@ -121,4 +125,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-09-11 after Phase 7 completion*
+*Last updated: 2026-09-13 after Phase 07.1 completion*

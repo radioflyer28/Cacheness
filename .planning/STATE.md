@@ -11,7 +11,7 @@ last_activity_desc: Phase 07.1 complete, transitioned to Phase 08
 state_head: b7bbf2dba478250e277e7ce90a3b3f2f8a199f34
 progress:
   total_phases: 9
-  completed_phases: 7
+  completed_phases: 8
   total_plans: 116
   completed_plans: 115
 milestone_name: milestone
@@ -21,10 +21,10 @@ milestone_name: milestone
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-09-11)
+See: .planning/PROJECT.md (updated 2026-09-13)
 
 **Core value:** Applications can store and retrieve data reliably through one backend-neutral lifecycle, with caching policy layered above storage without compromising integrity or cleanup correctness.
-**Current focus:** Phase 07.1 — obstore-payload-participant-unification
+**Current focus:** Phase 08 — Production Gates and Performance Stabilization
 
 ## Current Position
 
@@ -33,20 +33,20 @@ Plan: Not started
 Status: Ready to plan
 Last activity: 2026-09-13 — Phase 07.1 complete, transitioned to Phase 08
 
-Phase 07 closed with 24/24 plans summarized and an independent 9/9 must-have
-verification pass. Its final gap binds the terminal rebuild-debt threat to the
-exact forward-fence/resume regression; the scoped code review, contract tests,
-quick verifier, Ruff gate, and deterministic non-live suite all passed.
+Phase 07.1 closed with 11/11 plans summarized and an independent 46/46
+must-have verification pass. Built-in filesystem, memory, and S3 payload
+mechanics now use one guarded `ObstoreGenerationIO`; `BlobStore` still owns the
+single `AuthorityLifecycleEngine`, and `UnifiedCache` remains policy-only.
 
-Migration is now an explicit stopped-worker maintenance workflow with bounded,
-authenticated authority evidence. Ordinary opens do not upgrade, unexplained
-payloads remain invisible and unadopted, and Phase 07 did not add a second
-lifecycle authority or claim cross-resource ACID.
+The security audit closes 47/47 plan threats after a bounded canonical-evidence
+parser repair. ETag/version remain opaque signed transport corroboration;
+canonical SHA-256 plus size remains the integrity decision. Live AWS,
+PostgreSQL, platform/package matrices, performance/RSS, and hash benchmarking
+remain explicit Phase 8 nonclaims.
 
-Roadmap progress: [████████░░] 7 of 9 phases complete. The generated disk counter remains 6 because Phase 03 was directly qualified after a deliberately superseded plan; its canonical 24/24 roadmap disposition controls and must not be reopened merely to repair that counter.
-counter remains 6 because Phase 03 was directly qualified after a deliberately
-superseded plan; its canonical 24/24 roadmap disposition controls and must not
-be reopened merely to repair that counter.
+Roadmap progress: [█████████░] 8 of 9 phases complete. The generated disk plan
+counter still includes the deliberately superseded Phase 03 plan; do not reopen
+that closed phase merely to repair the counter.
 
 ## Roadmap Evolution
 
@@ -489,6 +489,6 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 
 ## Session Continuity
 
-Last session: 2026-09-13T20:12:43.226Z
+Last session: 2026-09-13T21:02:59.747Z
 Stopped at: Phase 07.1 complete, ready to plan Phase 08
 Resume file: None

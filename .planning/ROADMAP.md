@@ -600,6 +600,7 @@ Plans:
 | 5. Payload Backends and Supported Topology Qualification | 9/9 | Complete    | 2026-09-08 |
 | 6. UnifiedCache Policy Composition | 11/11 | Complete    | 2026-09-09 |
 | 7. Explicit Migration and Rebuild Cutover | 24/24 | Complete    | 2026-09-11 |
+| 07.1. Obstore Payload Participant Unification | 11/11 | Complete | 2026-09-13 |
 | 8. Production Gates and Performance Stabilization | 0/TBD | Not started | - |
 
 ## Backlog
