@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 07.1
 current_phase_name: obstore-payload-participant-unification
 status: executing
-stopped_at: Completed 07.1-05-PLAN.md
-last_updated: "2026-09-13T17:02:26.284Z"
+stopped_at: Completed 07.1-06-PLAN.md
+last_updated: "2026-09-13T17:32:22.316Z"
 last_activity: 2026-09-13
 last_activity_desc: Phase 07.1 execution started
-state_head: 238e154f3e272ea72057fb17e635d9a94a50ec4e
+state_head: b6f6fe2a07493a1d731a1a92b273c4b3cc17e656
 progress:
   total_phases: 9
   completed_phases: 6
   total_plans: 116
-  completed_plans: 109
+  completed_plans: 110
 milestone_name: milestone
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-09-11)
 ## Current Position
 
 Phase: 07.1 (obstore-payload-participant-unification) — EXECUTING
-Plan: 6 of 11
+Plan: 7 of 11
 Status: Ready to execute
 Last activity: 2026-09-13 — Phase 07.1 execution started
 
@@ -187,6 +187,7 @@ the deliberately superseded Phase 03 plan; do not fabricate its completion.
 | Phase 07.1 P03 | 19min | 2 tasks | 4 files |
 | Phase 07.1 P04 | 11m 19s | 2 tasks | 2 files |
 | Phase 07.1 P05 | 16m 5s | 3 tasks | 11 files |
+| Phase 07.1 P06 | 11m 14s | 2 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -437,6 +438,9 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - [Phase 07.1]: ETag and object version remain opaque signed observations; canonical SHA-256 plus size remains the integrity decision.
 - [Phase 07.1]: Catalog and user metadata changes preserve generation and evidence through one authority-only CAS.
 - [Phase 07.1]: SQLite and PostgreSQL implement the same narrow metadata CAS to remain LifecycleAuthority conformant.
+- [Phase 07.1]: SQLite schema 9 and PostgreSQL schema/capability 5 are explicit cutovers; prior development layouts require stopped-worker migration or rebuild.
+- [Phase 07.1]: Transport evidence remains opaque, optional authority state and is copied only with its immutable generation identity.
+- [Phase 07.1]: Metadata replacement remains one authority CAS and never invokes a payload participant or claims cross-resource ACID.
 
 ### Pending Todos
 
@@ -466,6 +470,6 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 
 ## Session Continuity
 
-Last session: 2026-09-13T17:02:25.961Z
-Stopped at: Completed 07.1-05-PLAN.md
+Last session: 2026-09-13T17:32:22.040Z
+Stopped at: Completed 07.1-06-PLAN.md
 Resume file: None

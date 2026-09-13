@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 5
+open_count: 6
 waived_count: 0
 fixed_count: 42
-total_count: 47
-last_updated: 2026-09-13T17:02:52.758Z
+total_count: 48
+last_updated: 2026-09-13T17:31:57.763Z
 ---
 
 # Broken Windows Ledger
@@ -62,6 +62,7 @@ last_updated: 2026-09-13T17:02:52.758Z
 | 45 | 07.1 | deviation | src/cacheness/storage/obstore_generation_io.py |  | S3 prefix and malformed loopback endpoint validation added before SDK construction. | fixed |  | 2026-09-13T16:37:35.184Z | 2026-09-13T16:38:06.612Z |
 | 46 | 07.1 | deviation | src/cacheness/storage/obstore_generation_io.py |  | Mocked-S3 PutResult lacks size; exact HEAD corroborates it before signed transport evidence. | fixed |  | 2026-09-13T17:02:22.540Z | 2026-09-13T17:02:52.564Z |
 | 47 | 07.1 | deviation | src/cacheness/storage/sqlite_lifecycle_authority.py |  | Durable authority adapters implement the metadata CAS required by the expanded runtime protocol. | fixed |  | 2026-09-13T17:02:22.726Z | 2026-09-13T17:02:52.758Z |
+| 48 | 07.1 | deviation | tests/test_sqlite_lifecycle_authority.py |  | Updated durable-authority test rows for the new nullable evidence column | open |  | 2026-09-13T17:31:57.763Z |  |
 
 ````json
 [
@@ -628,6 +629,18 @@ last_updated: 2026-09-13T17:02:52.758Z
     "reason": "",
     "recorded_at": "2026-09-13T17:02:22.726Z",
     "resolved_at": "2026-09-13T17:02:52.758Z"
+  },
+  {
+    "id": 48,
+    "kind": "deviation",
+    "phase": "07.1",
+    "file": "tests/test_sqlite_lifecycle_authority.py",
+    "line": null,
+    "description": "Updated durable-authority test rows for the new nullable evidence column",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-13T17:31:57.763Z",
+    "resolved_at": null
   }
 ]
 ````
