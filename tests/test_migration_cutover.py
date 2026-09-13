@@ -350,8 +350,15 @@ def test_maintenance_request_requires_stopped_workers_and_separate_work_dir(
 
 def test_release_authority_baseline_exposes_only_the_resolved_publication_states() -> None:
     """RQ-01 fixes the first release schema and whole-store state vocabulary."""
-    assert SQLITE_USER_VERSION == 8
-    assert CURRENT_SQLITE_USER_VERSION == 8
+    from cacheness.storage.backends.postgresql_lifecycle_authority import (
+        POSTGRESQL_AUTHORITY_CAPABILITY,
+        POSTGRESQL_AUTHORITY_SCHEMA_VERSION,
+    )
+
+    assert SQLITE_USER_VERSION == 9
+    assert CURRENT_SQLITE_USER_VERSION == 9
+    assert POSTGRESQL_AUTHORITY_SCHEMA_VERSION == 5
+    assert POSTGRESQL_AUTHORITY_CAPABILITY == "postgresql-lifecycle-authority-v5"
     assert {state.value for state in AuthorityPublicationState} == {
         "idle",
         "candidate",

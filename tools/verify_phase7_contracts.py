@@ -848,7 +848,7 @@ def _assignment_value(source: str, variable: str) -> object | None:
 
 
 def _audit_persisted_baselines(root: Path) -> tuple[str, ...]:
-    """Pin the released SQLite/PostgreSQL publication baselines to 8 and 4."""
+    """Pin the released SQLite/PostgreSQL publication baselines to 9 and 5."""
     sqlite = (root / "src/cacheness/storage/sqlite_lifecycle_authority.py").read_text(
         encoding="utf-8"
     )
@@ -856,12 +856,12 @@ def _audit_persisted_baselines(root: Path) -> tuple[str, ...]:
         root / "src/cacheness/storage/backends/postgresql_lifecycle_authority.py"
     ).read_text(encoding="utf-8")
     errors: list[str] = []
-    if _assignment_value(sqlite, "SQLITE_USER_VERSION") != 8:
-        errors.append("SQLite authority publication schema is not pinned to 8")
-    if _assignment_value(postgresql, "POSTGRESQL_AUTHORITY_SCHEMA_VERSION") != 4:
-        errors.append("PostgreSQL authority publication schema is not pinned to 4")
-    if _assignment_value(postgresql, "POSTGRESQL_AUTHORITY_CAPABILITY") != "postgresql-lifecycle-authority-v4":
-        errors.append("PostgreSQL authority capability is not pinned to schema 4")
+    if _assignment_value(sqlite, "SQLITE_USER_VERSION") != 9:
+        errors.append("SQLite authority publication schema is not pinned to 9")
+    if _assignment_value(postgresql, "POSTGRESQL_AUTHORITY_SCHEMA_VERSION") != 5:
+        errors.append("PostgreSQL authority publication schema is not pinned to 5")
+    if _assignment_value(postgresql, "POSTGRESQL_AUTHORITY_CAPABILITY") != "postgresql-lifecycle-authority-v5":
+        errors.append("PostgreSQL authority capability is not pinned to schema 5")
     return tuple(errors)
 
 
@@ -1147,7 +1147,7 @@ def main(argv: list[str] | None = None) -> int:
     for requirement in MIGRATION_REQUIREMENT_NODES:
         status = "see diagnostics" if requirement in failed_requirements else "PASS"
         print(f"{requirement}: {status}")
-    print("SQLite/PostgreSQL publication baseline: 8/4 deterministic contract")
+    print("SQLite/PostgreSQL publication baseline: 9/5 deterministic contract")
     if args.quick:
         print(
             "Deterministic PostgreSQL adapter contract: NOT RUN in --quick; "

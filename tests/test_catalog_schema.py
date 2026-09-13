@@ -202,7 +202,7 @@ def test_current_manifest_keeps_version_dimensions_independent_and_authenticated
     versions = manifest.StoreVersionDimensions(
         store_epoch=11,
         manifest_schema_version=3,
-        sqlite_user_version=8,
+        sqlite_user_version=manifest.CURRENT_SQLITE_USER_VERSION,
         payload_format_version=19,
         store_format_version=2,
     )
@@ -231,7 +231,7 @@ def test_current_manifest_keeps_version_dimensions_independent_and_authenticated
 
     assert restored.versions.store_epoch == 11
     assert restored.versions.manifest_schema_version == 3
-    assert restored.versions.sqlite_user_version == 8
+    assert restored.versions.sqlite_user_version == manifest.CURRENT_SQLITE_USER_VERSION
     assert restored.payload_format_version == 19
     assert isinstance(restored.catalog_values, MappingProxyType)
 
