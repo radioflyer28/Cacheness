@@ -240,3 +240,8 @@ def test_public_storage_docs_keep_the_d16_transport_boundary_explicit():
         )
         assert all(term in text for term in required_terms)
         assert all(retired not in text for retired in retired_payload_apis)
+
+    for relative_path in ("README.md", "docs/PLUGIN_DEVELOPMENT.md"):
+        source = (repository_root / relative_path).read_text(encoding="utf-8")
+        assert '"actual_path": str(' in source
+        assert '"file_path": str(' not in source

@@ -745,7 +745,7 @@ class ParquetHandler(CacheHandler):
     def put(self, data, file_path, config):
         output = file_path.with_suffix(".parquet")
         data.to_parquet(output, compression="snappy")
-        return {"storage_format": "parquet", "file_path": str(output)}
+        return {"storage_format": "parquet", "actual_path": str(output)}
     
     def get(self, file_path, metadata):
         import pandas as pd

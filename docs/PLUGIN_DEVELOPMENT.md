@@ -53,7 +53,7 @@ class MyCustomHandler(CacheHandler):
             config: Cache configuration object
             
         Returns:
-            Dict with at least 'storage_format' and actual 'file_path' used
+            Dict with at least 'storage_format' and 'actual_path' used
         """
         output_path = file_path.with_suffix(".mycustom")
         
@@ -63,7 +63,7 @@ class MyCustomHandler(CacheHandler):
         
         return {
             "storage_format": "my_custom_format",
-            "file_path": str(output_path),
+            "actual_path": str(output_path),
             "custom_field": "any additional metadata",
         }
     
@@ -158,7 +158,7 @@ class ParquetHandler(CacheHandler):
         
         return {
             "storage_format": "parquet",
-            "file_path": str(output_path),
+            "actual_path": str(output_path),
             "compression": "snappy",
             "row_count": len(data),
             "columns": list(data.columns),
@@ -401,7 +401,7 @@ def test_my_handler_roundtrip():
         metadata = handler.put(data, file_path, config=None)
         assert metadata["storage_format"] == "my_custom_format"
         
-        loaded = handler.get(Path(metadata["file_path"]), metadata)
+        loaded = handler.get(Path(metadata["actual_path"]), metadata)
         assert loaded.value == 42
 ```
 
