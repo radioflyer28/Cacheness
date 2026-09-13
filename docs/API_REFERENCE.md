@@ -6,91 +6,48 @@ Complete reference for all cacheness classes, methods, and configuration options
 
 ### `BlobStore`
 
-Low-level blob storage API without caching semantics (TTL, eviction). Useful for ML model versioning, artifact storage, and data pipeline checkpoints.
+`BlobStore` is the one payload-plus-metadata lifecycle owner. It receives one
+explicit `StoreTopology`; `UnifiedCache` adds policy above that store and does
+not select payload transports independently.
 
 ```python
-from cacheness.storage import BlobStore
+from cacheness.storage import BackendRef, BlobStore, StoreTopology
 
-class BlobStore:
-    def __init__(
-        self,
-        cache_dir: str = ".blobstore",
-        backend: Optional[Union[str, MetadataBackend]] = None,
-        compression: str = "lz4",
-        compression_level: int = 3,
-        content_addressable: bool = False
-    )
+topology = StoreTopology(
+    payload=BackendRef(name="memory"),
+    authority=BackendRef(name="memory"),
+)
+store = BlobStore(topology, cache_dir="./artifacts")
+store.initialize()
+try:
+    key = store.put({"answer": 42}, key="example")
+    assert store.get(key) == {"answer": 42}
+finally:
+    store.close()
 ```
 
-**Parameters:**
-- `cache_dir` (str): Directory for storing blobs and metadata
-- `backend` (str|MetadataBackend): Backend type ("json", "sqlite") or instance
-- `compression` (str): Compression codec (lz4, zstd, gzip, blosclz)
-- `compression_level` (int): Compression level (1-9)
-- `content_addressable` (bool): If True, use content hash as blob key
+`put(data, key=None, metadata=None) -> str` writes one handler-produced native
+payload through the selected participant and promotes it through the selected
+authority. `put_entry(...) -> BlobReceipt` exposes the committed generation
+receipt when callers need exact lifecycle information. `get(key)` returns the
+decoded value or `None` for an absent entry; `get_metadata`, `update_metadata`,
+`delete`, and `query_catalog` operate through the same authority boundary.
 
-#### Methods
+For a durable local topology, pair a filesystem payload role with SQLite
+authority. The Amazon S3 payload role requires an explicit bucket and region;
+it uses native AWS credentials and does not expose owner pinning or production
+custom endpoints. The direct conditional-create cap starts at **128 MiB** and
+is configurable. Oversized writes fail rather than using multipart or a
+fallback transport.
 
-##### `put(data, key=None, metadata=None) -> str`
-Store a blob with optional metadata.
+Payload bytes must pass signed canonical SHA-256 plus byte-size verification
+before a handler deserializes them. ETag and optional object version are signed,
+generation-bound opaque transport observations. `PayloadTransportComparison`
+only compares the authoritative generation with an exact `head()` observation:
+it is read-only, noncanonical, and never changes lifecycle visibility.
 
-**Parameters:**
-- `data` (Any): The data to store
-- `key` (Optional[str]): Optional key for the blob (auto-generated if None)
-- `metadata` (Optional[Dict]): Custom metadata to store with the blob
-
-**Returns:**
-- `str`: The blob key
-
-**Example:**
-```python
-store = BlobStore(cache_dir="./models")
-key = store.put(model, key="xgboost_v1", metadata={"accuracy": 0.95})
-```
-
-##### `get(key: str) -> Optional[Any]`
-Retrieve a blob by key.
-
-##### `get_metadata(key: str) -> Optional[Dict]`
-Get blob metadata without loading content.
-
-##### `update_metadata(key: str, metadata: Dict) -> bool`
-Update metadata for an existing blob.
-
-##### `delete(key: str) -> bool`
-Delete a blob and its metadata.
-
-##### `exists(key: str) -> bool`
-Check if a blob exists.
-
-##### `list(prefix=None, metadata_filter=None) -> List[str]`
-List blob keys with optional filtering.
-
-**Example:**
-```python
-# List all blobs
-all_keys = store.list()
-
-# Filter by prefix
-model_keys = store.list(prefix="model_")
-
-# Filter by metadata
-v1_models = store.list(metadata_filter={"version": "1.0"})
-```
-
-##### `clear() -> int`
-Remove all blobs.
-
-##### `close()`
-Close the blob store and release resources.
-
-**Example:**
-```python
-# Context manager usage (recommended)
-with BlobStore(cache_dir="./artifacts") as store:
-    store.put(data, key="artifact_1")
-    result = store.get("artifact_1")
-```
+Real AWS, compatible services, platform/package matrices, RSS/performance
+budgets, and SHA-256-versus-XXH3 benchmarking remain Phase 8 qualification.
 
 ---
 
@@ -1037,80 +994,42 @@ List all registered metadata backends.
 
 ---
 
-### Blob Backend Registration
+### Payload participants and handler registration
 
-Register custom blob backends for data storage.
-
-```python
-from cacheness import (
-    register_blob_backend,
-    unregister_blob_backend,
-    get_blob_backend,
-    list_blob_backends,
-    BlobBackend,  # Base class
-    FilesystemBlobBackend,
-    InMemoryBlobBackend,
-)
-```
-
-#### `register_blob_backend(name, backend_class, description=None, required_packages=None)`
-
-Register a custom blob backend.
-
-**Example:**
-```python
-from cacheness import register_blob_backend, BlobBackend
-
-class S3BlobBackend(BlobBackend):
-    def __init__(self, bucket: str, prefix: str = "", **kwargs):
-        import boto3
-        self._s3 = boto3.client("s3")
-        self.bucket = bucket
-        self.prefix = prefix
-    
-    # ... implement BlobBackend methods
-
-register_blob_backend(
-    name="s3",
-    backend_class=S3BlobBackend,
-    description="Amazon S3 blob storage",
-    required_packages=["boto3"],
-)
-```
-
-#### `get_blob_backend(name, **kwargs) -> BlobBackend`
-
-Get a blob backend instance by name.
-
-#### `list_blob_backends() -> list`
-
-List all registered blob backends.
-
-**Built-in Backends:**
-- `filesystem` - Local file storage (default)
-- `memory` - In-memory storage
-
----
-
-### Using Custom Backends in Configuration
+Payload transports are not public registry plugins. `StoreTopology` owns one
+role registry and selects a guarded built-in participant for `memory`,
+`filesystem`, or explicit Amazon S3 composition. `BlobStore` remains the only
+lifecycle owner; handlers remain the format extension seam.
 
 ```python
-from cacheness import cacheness, CacheConfig, CacheMetadataConfig, CacheBlobConfig
+from cacheness import CacheHandler
+from cacheness.storage import BackendRef, BlobStore, StoreTopology
 
-# Use registered backends by name
-config = CacheConfig(
-    metadata=CacheMetadataConfig(
-        backend="redis",
-        connection_url="redis://localhost:6379/0",
-    ),
-    blob=CacheBlobConfig(
-        backend="s3",
-        bucket="my-cache-bucket",
-    )
+topology = StoreTopology(
+    payload=BackendRef(name="memory"),
+    authority=BackendRef(name="memory"),
 )
-
-cache = cacheness(config=config)
+store = BlobStore(topology)
+store.handlers.register_handler(MyCustomHandler(), priority=0)
 ```
+
+The unchanged handler signatures are `put(data, Path, config)` and
+`get(Path, metadata)`. Handlers receive private local staging/snapshot paths,
+never object-store locators or client objects. Cacheness enforces containment,
+native suffix preservation, descriptor validation, and exactly one regular
+output file around each handler call.
+
+For the Amazon S3 participant, configure an explicit bucket and region, use
+stable bucket-name ownership with narrow IAM and bucket policies, and do not
+configure a production endpoint override. Owner pinning is intentionally
+unsupported by D-16. A direct conditional create has a configurable **128 MiB
+initial default**; there is no multipart or SDK fallback path. Canonical signed
+SHA-256 plus byte size decides integrity before deserialization. ETag and
+optional version are signed opaque transport evidence only; comparison is
+read-only and noncanonical.
+
+Phase 8 retains real AWS/compatible-service, native-platform, full optional
+package-matrix, RSS/performance, and digest-benchmark qualification.
 
 ---
 

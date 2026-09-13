@@ -36,6 +36,35 @@ cross-session coordinator. Deployment ACLs must exclude other principals, and
 deployments must not configure the same local store for more than one session.
 Use an external transactional authority whenever that topology is required.
 
+### Amazon S3 transport boundary (D-16)
+
+Amazon S3 is an explicitly composed payload participant; it does not become a
+metadata authority, visibility authority, or cross-resource transaction. For a
+production S3 topology, configure an explicit bucket and region, use a stable
+bucket name whose ownership you control, and grant only narrowly scoped IAM
+credentials and bucket-policy permissions for the configured prefix.
+
+The obstore 0.11.1 cutover intentionally does **not** expose
+`ExpectedBucketOwner` or another owner-pinning workaround. Treat that as a
+cross-account defense-in-depth residual risk: Cacheness does not fork the SDK,
+add a custom SigV4 signer, retain a legacy SDK escape hatch, or create a second
+payload participant. Production custom endpoint overrides are rejected; only
+loopback mocked-S3 test fixtures may use them. Compatible S3 services require
+their own qualification.
+
+Publication is one direct conditional create at an immutable generation
+locator. The configurable direct-create limit has a **128 MiB initial default**;
+oversized payloads fail clearly rather than activating multipart, temporary
+objects, or a fallback path. Before deserialization, Cacheness verifies the
+signed canonical SHA-256 digest and byte size. ETag and optional version are
+signed, generation-bound opaque transport evidence, not content hashes. The
+developer transport comparison is read-only and noncanonical; it cannot prove
+the canonical digest, authorize adoption, or select lifecycle visibility.
+
+Phase 8 retains real AWS and compatible-service qualification, platform and
+packaging matrices, RSS/performance budgets, and SHA-256-versus-XXH3 benchmark
+evidence. Mocked S3 and skipped live tests do not satisfy those gates.
+
 ### Pickle and dill are executable serialization
 
 `pickle` and `dill` can execute arbitrary code while deserializing. Do not load

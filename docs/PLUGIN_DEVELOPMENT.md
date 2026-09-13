@@ -4,27 +4,18 @@ This guide covers how to extend cacheness with custom handlers and backends. Cac
 
 ## Overview
 
-Cacheness has three extensibility points:
+Cacheness has two supported extension points:
 
 | Extension Point | Purpose | Base Class | Registration Function |
 |-----------------|---------|------------|----------------------|
-| **Handlers** | Serialize/deserialize custom data types | `CacheHandler` | `register_handler()` |
-| **Metadata Backends** | Store cache metadata (keys, timestamps, etc.) | `MetadataBackend` | `register_metadata_backend()` |
-| **Blob Backends** | Store actual cached data (files, S3, etc.) | `BlobBackend` | `register_blob_backend()` |
+| **Handlers** | Serialize/deserialize custom data types | `CacheHandler` | `store.handlers.register_handler()` |
+| **Catalog projections** | Derive read models from authority-owned entries | projection contract | `StoreTopology(..., projections=...)` |
 
 ## Quick Start
 
 ```python
-from cacheness import (
-    # Handler registration
-    register_handler, unregister_handler, list_handlers, CacheHandler,
-    # Metadata backend registration
-    register_metadata_backend, unregister_metadata_backend, 
-    list_metadata_backends, MetadataBackend,
-    # Blob backend registration
-    register_blob_backend, unregister_blob_backend,
-    list_blob_backends, BlobBackend,
-)
+from cacheness import CacheHandler
+from cacheness.storage import BackendRef, BlobStore, StoreTopology
 ```
 
 ---
@@ -305,150 +296,41 @@ cache = cacheness(config=config)
 
 ---
 
-## Custom Blob Backends
+## Store-local payload participation
 
-Blob backends store the actual cached data (serialized files). Use custom backends for cloud storage (S3, GCS, Azure) or specialized file systems.
+Payload implementations are deliberately not a plugin registry. Built-in
+`memory`, `filesystem`, and Amazon S3 payload roles materialize one guarded
+obstore participant behind `StoreTopology`; `BlobStore` remains the lifecycle
+owner. Do not add a second transport, fallback client, dual read/write path, or
+payload selector.
 
-### Blob Backend Interface
-
-```python
-from cacheness import BlobBackend
-from typing import Optional
-from io import BytesIO
-
-class S3BlobBackend(BlobBackend):
-    """Store cached data in Amazon S3."""
-    
-    def __init__(self, bucket: str, prefix: str = "", **kwargs):
-        self.bucket = bucket
-        self.prefix = prefix
-        # Initialize S3 client
-        import boto3
-        self._s3 = boto3.client("s3")
-    
-    def put(self, key: str, data: bytes) -> str:
-        """Store blob data."""
-        s3_key = f"{self.prefix}{key}"
-        self._s3.put_object(Bucket=self.bucket, Key=s3_key, Body=data)
-        return s3_key
-    
-    def get(self, key: str) -> Optional[bytes]:
-        """Retrieve blob data."""
-        try:
-            s3_key = f"{self.prefix}{key}"
-            response = self._s3.get_object(Bucket=self.bucket, Key=s3_key)
-            return response["Body"].read()
-        except self._s3.exceptions.NoSuchKey:
-            return None
-    
-    def delete(self, key: str) -> bool:
-        """Delete a blob."""
-        try:
-            s3_key = f"{self.prefix}{key}"
-            self._s3.delete_object(Bucket=self.bucket, Key=s3_key)
-            return True
-        except Exception:
-            return False
-    
-    def exists(self, key: str) -> bool:
-        """Check if blob exists."""
-        try:
-            s3_key = f"{self.prefix}{key}"
-            self._s3.head_object(Bucket=self.bucket, Key=s3_key)
-            return True
-        except Exception:
-            return False
-    
-    def list_keys(self, prefix: Optional[str] = None) -> list:
-        """List all blob keys."""
-        search_prefix = f"{self.prefix}{prefix}" if prefix else self.prefix
-        response = self._s3.list_objects_v2(
-            Bucket=self.bucket, 
-            Prefix=search_prefix
-        )
-        return [obj["Key"] for obj in response.get("Contents", [])]
-    
-    def close(self) -> None:
-        """Close backend connections."""
-        pass  # boto3 handles connection pooling
-```
-
-### Registering Blob Backends
+For Amazon S3, use the built-in S3 payload role with an explicit bucket and
+region, native AWS credentials, and no production custom endpoint. D-16 does
+not support owner-pinning headers: use stable bucket ownership plus narrowly
+scoped IAM and bucket policy instead.
 
 ```python
-from cacheness import register_blob_backend, list_blob_backends
-
-# Register a backend class
-register_blob_backend(
-    name="s3",
-    backend_class=S3BlobBackend,
-    description="Amazon S3 blob storage",
-    required_packages=["boto3"],
+topology = StoreTopology(
+    payload=BackendRef(name="memory"),
+    authority=BackendRef(name="memory"),
 )
-
-# List available backends
-for backend in list_blob_backends():
-    print(f"{backend['name']}: {backend['description']}")
+store = BlobStore(topology)
+store.handlers.register_handler(MyCustomHandler(), priority=0)
 ```
 
-### Using Custom Blob Backends
+Handlers retain `put(data, Path, config)` and `get(Path, metadata)`. They
+receive only private suffix-preserving staging or snapshot paths. Cacheness
+validates descriptor identity, containment, and one regular file before object
+publication or handler reads.
 
-```python
-from cacheness import cacheness, CacheConfig, CacheBlobConfig
+S3 direct conditional create has a configurable **128 MiB initial default**.
+Oversized inputs fail rather than activating multipart or temporary-object
+publication. Signed canonical SHA-256 plus byte size is verified before
+deserialization. ETag and optional version are signed opaque, generation-bound
+transport observations; their comparison is read-only and noncanonical.
 
-config = CacheConfig(
-    blob=CacheBlobConfig(
-        backend="s3",
-        bucket="my-cache-bucket",
-        prefix="cache/v1/",
-    )
-)
-
-cache = cacheness(config=config)
-```
-
-### Built-in Blob Backends
-
-| Name | Description | Best For |
-|------|-------------|----------|
-| `filesystem` | Local file storage | Default, local development |
-| `memory` | In-memory storage | Testing, temporary caches |
-
----
-
-## Combining Backends
-
-You can mix and match metadata and blob backends:
-
-```python
-from cacheness import cacheness, CacheConfig, CacheMetadataConfig, CacheBlobConfig
-
-# PostgreSQL for metadata, S3 for blobs
-config = CacheConfig(
-    metadata=CacheMetadataConfig(
-        backend="postgresql",
-        connection_url="postgresql://user:pass@localhost/cache",
-    ),
-    blob=CacheBlobConfig(
-        backend="s3",
-        bucket="my-cache-bucket",
-    )
-)
-
-cache = cacheness(config=config)
-```
-
-### Common Combinations
-
-| Metadata | Blob | Use Case |
-|----------|------|----------|
-| `sqlite` | `filesystem` | Local development (default) |
-| `postgresql` | `filesystem` | Shared metadata, local blobs |
-| `postgresql` | `s3` | Fully distributed production |
-| `memory` | `memory` | Testing and CI |
-| `redis` | `s3` | High-performance distributed |
-
----
+Real AWS, compatible-service, native-platform, full package-matrix, RSS,
+performance, and SHA-256-versus-XXH3 qualification remain Phase 8 work.
 
 ## Best Practices
 
@@ -457,7 +339,7 @@ cache = cacheness(config=config)
 Use the interface classes to ensure your implementations are complete:
 
 ```python
-from cacheness import CacheHandler, MetadataBackend, BlobBackend
+from cacheness import CacheHandler
 
 # Type hints will catch missing methods
 class MyHandler(CacheHandler):
@@ -478,32 +360,7 @@ class RobustHandler(CacheHandler):
             raise  # Re-raise for cache to handle
 ```
 
-### 3. Support Configuration
-
-```python
-class ConfigurableBackend(MetadataBackend):
-    def __init__(self, connection_url: str, pool_size: int = 10, **kwargs):
-        self.connection_url = connection_url
-        self.pool_size = pool_size
-        # Accept **kwargs for future compatibility
-```
-
-### 4. Implement Cleanup
-
-```python
-class ResourceManagedBackend(BlobBackend):
-    def __enter__(self):
-        return self
-    
-    def __exit__(self, *args):
-        self.close()
-    
-    def close(self):
-        # Clean up connections, file handles, etc.
-        self._connection.close()
-```
-
-### 5. Add Logging
+### 3. Add Logging
 
 ```python
 import logging

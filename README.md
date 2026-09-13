@@ -393,31 +393,51 @@ print(cached_tensor.shape)  # (2, 2)
 
 ### Low-Level Storage API
 
-For direct storage access without caching semantics (TTL, eviction), use the `BlobStore` API:
+For direct storage access without cache policy (TTL, eviction), compose one
+`StoreTopology` and give it to `BlobStore`. The selected lifecycle authority is
+the visibility point; the payload participant only performs immutable byte
+effects.
 
 ```python
-from cacheness.storage import BlobStore
+from cacheness.storage import BackendRef, BlobStore, StoreTopology
 
-# Create a blob store for ML model versioning
-store = BlobStore(cache_dir="./models", backend="sqlite", compression="lz4")
-
-# Store a model with metadata
-key = store.put(
-    model, 
-    key="xgboost_v1", 
-    metadata={"accuracy": 0.95, "author": "ml_team"}
+topology = StoreTopology(
+    payload=BackendRef(name="memory"),
+    authority=BackendRef(name="memory"),
 )
+store = BlobStore(topology, cache_dir="./models")
+store.initialize()
 
-# Retrieve by key
-model = store.get("xgboost_v1")
-
-# Query by metadata
-high_accuracy_models = store.list(metadata_filter={"accuracy": 0.95})
-
-# Context manager for automatic cleanup
-with BlobStore(cache_dir="./artifacts") as store:
-    store.put(data, key="artifact_1")
+try:
+    key = store.put(model, key="xgboost_v1", metadata={"accuracy": 0.95})
+    restored_model = store.get(key)
+finally:
+    store.close()
 ```
+
+For a durable local topology, compose `payload=BackendRef(name="filesystem",
+options={"base_dir": ...})` with `authority=BackendRef(name="sqlite",
+options={"root": ...})`. S3 is an explicitly configured payload role rather
+than a standalone backend registry or a cache-policy shortcut.
+
+### S3 transport and integrity boundary
+
+S3 publication is one direct conditional create at an immutable generation
+locator. The default direct-create cap is **128 MiB** (configurable); larger
+payloads fail clearly. Cacheness does not use multipart publication, temporary
+objects, a legacy SDK fallback, or custom endpoint overrides in production.
+
+For native Amazon S3, configure an explicit bucket and region. Owner pinning is
+intentionally unsupported in this obstore cutover (D-16): use stable bucket
+ownership together with narrowly scoped IAM credentials and bucket policy.
+Compatible S3 services and production endpoint overrides require separate
+qualification.
+
+Before any handler deserializes bytes, Cacheness verifies the signed canonical
+SHA-256 digest and byte size. S3 ETag and optional object version are signed,
+generation-bound **opaque transport evidence** only; the read-only transport
+comparison API is not a cryptographic content check and never selects lifecycle
+visibility.
 
 See [API_REFERENCE.md](docs/API_REFERENCE.md) for full `BlobStore` documentation.
 
@@ -526,7 +546,6 @@ Comprehensive examples are available in the [`examples/`](examples/) directory:
 - **[API Request Caching](examples/api_request_caching.py)** - Intelligent API caching with TTL strategies
 - **[Stock Cache Example](examples/stock_cache_example.py)** - SQL pull-through cache with Yahoo Finance integration
 - **[ML Pipeline Caching](examples/ml_pipeline_caching.py)** - Multi-stage ML training pipeline caching
-- **[S3 Caching](examples/s3_caching.py)** - Caching of S3 file downloads with ETag (remote file hash) validation
 - **[Custom Metadata Demo](examples/custom_metadata_demo.py)** - Advanced metadata tracking workflows
 - **[Configurable Serialization](examples/configurable_serialization_demo.py)** - Custom serialization examples
 
@@ -701,12 +720,15 @@ For detailed metadata workflows, see the **[Custom Metadata Guide](docs/CUSTOM_M
 
 ## Extending Cacheness
 
-Cacheness is designed to be extensible. Register custom handlers for new data types, or custom backends for specialized storage.
+Cacheness preserves the path-based handler seam. Register format handlers on
+the selected store's registry; payload participants, managed locators, and
+object-store clients are never passed to handlers.
 
 ### Custom Data Type Handlers
 
 ```python
-from cacheness import register_handler, CacheHandler
+from cacheness import CacheHandler
+from cacheness.storage import BackendRef, BlobStore, StoreTopology
 from pathlib import Path
 
 class ParquetHandler(CacheHandler):
@@ -727,35 +749,19 @@ class ParquetHandler(CacheHandler):
         import pandas as pd
         return pd.read_parquet(file_path)
 
-# Register with highest priority
-register_handler(ParquetHandler(), priority=0)
+topology = StoreTopology(
+    payload=BackendRef(name="memory"),
+    authority=BackendRef(name="memory"),
+)
+store = BlobStore(topology)
+store.handlers.register_handler(ParquetHandler(), priority=0)
 ```
 
-### Custom Storage Backends
-
-```python
-from cacheness import register_metadata_backend, register_blob_backend
-
-# Register a custom metadata backend (Redis, DynamoDB, etc.)
-register_metadata_backend(
-    name="redis",
-    backend_class=RedisBackend,
-    description="Redis-based metadata storage",
-)
-
-# Register a custom blob backend (S3, GCS, Azure, etc.)
-register_blob_backend(
-    name="s3",
-    backend_class=S3BlobBackend,
-    description="Amazon S3 blob storage",
-)
-
-# Use in configuration
-config = CacheConfig(
-    metadata=CacheMetadataConfig(backend="redis", connection_url="redis://localhost"),
-    blob=CacheBlobConfig(backend="s3", bucket="my-cache-bucket"),
-)
-```
+Handlers retain `put(data, Path, config)` and `get(Path, metadata)`. Cacheness
+gives them private suffix-preserving staging or snapshot paths, validates one
+regular output file, and then publishes/reads through the selected store-local
+participant. Do not write a backend registry, pass an object-store client to a
+handler, or retain a managed path after `get()` returns.
 
 For complete examples and interface documentation, see the **[Plugin Development Guide](docs/PLUGIN_DEVELOPMENT.md)**.
 
