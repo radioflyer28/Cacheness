@@ -561,7 +561,7 @@ The discrete values `"QUALIFIED"` and `"CLEAN"` are quoted verbatim from `_STATU
 | A12 | Count authority reads/writes and participant head/open/delete/list separately at fixed scale tiers. | Structural Complexity Contracts | Existing spy interfaces or seeding cost may require equivalent counters/tiers. |
 | A14 | Optional-group qualification should use public `BlobStore`/`UnifiedCache` round trips rather than handler-internal file calls. | Packaging Pitfall | A public route may not expose every handler format selector without a small test-only fixture seam. |
 
-The removed assumptions (TensorFlow matrix, 30-day diagnostic retention, exact controlled-runner label, GitHub Actions/immutable release system, centralized exact-commit aggregation, protected environment, and validation layout) are settled Phase 8 design choices in Plans 01-11. Their external availability is handled by the checkpoints below; it is not assumed.
+The removed assumptions (TensorFlow matrix, 30-day diagnostic retention, exact controlled-runner label, GitHub Actions/immutable release system, centralized exact-commit aggregation, protected environment, and validation layout) are settled Phase 8 design choices in Plans 01-12. Their external availability is handled by the checkpoints below; it is not assumed.
 
 ## Open Questions — RESOLVED FOR PLANNING
 
@@ -585,7 +585,7 @@ No design question remains open. The five prior questions are resolved into dete
 4. **RESOLVED — immutable-release approval and publication**
    - **Settled design:** the final transition is draft release → attach exact sanitized qualifying assets → verify tag SHA, exact asset-name set, each asset state and SHA-256 digest → publish → verify immutable release and each local asset. Extra diagnostic artifacts are forbidden from the qualifying release asset set. [CITED: https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases; CITED: https://docs.github.com/en/rest/releases/assets; CITED: https://docs.github.com/en/code-security/how-tos/secure-your-supply-chain/secure-your-dependencies/verify-release-integrity]
    - **External prerequisite/owner:** a repository administrator enables immutable releases and names an authorized release operator/reviewer. This research does not claim the setting or identity exists.
-   - **Preflight/checkpoint:** before Plan 11 Task 3, verify repository/org immutable-release policy, `gh auth status`, release permissions, exact tag-to-SHA resolution, and complete same-SHA evidence. The operator performs the irreversible publish only after the verifier passes; a final read-only verifier requires published/non-draft immutable state plus the exact assets/digests.
+   - **Preflight/checkpoint:** before Plan 12 Task 1, verify repository/org immutable-release policy, `gh auth status`, release permissions, exact tag-to-SHA resolution, and complete same-SHA evidence. Plan 12 Task 2 binds operator/reviewer approval to the exact prepublication report digest; Task 3 performs the irreversible publish and then requires published/non-draft immutable state plus the exact assets/digests in a final read-only verifier.
 
 5. **RESOLVED — live PostgreSQL/Amazon-S3 environment**
    - **Settled design:** use a protected GitHub environment, the four existing configuration names, real PostgreSQL plus authoritative Amazon S3 with standard provider identity and no endpoint override, exact owner markers, bounded cleanup, and the frozen three-module live suite. [VERIFIED: `08-08-PLAN.md`; `tools/run_phase5_qualification.py:34-39,395-491`; `08-CONTEXT.md` D-09 through D-13]
@@ -673,7 +673,7 @@ The full-suite command includes marked live modules and therefore must be used w
 - [ ] `benchmarks/phase8_benchmarks.py`, workload definitions, schema tests, and controlled baseline path. [ASSUMED]
 - [ ] `pyproject.toml` branch coverage setting and `pyperf` dev dependency after human package checkpoint. [ASSUMED]
 - [ ] Exact fixed selectors for named integrity/recovery/policy/qualification/package gaps; percentages alone are insufficient. [VERIFIED: `08-CONTEXT.md` D-15]
-- [ ] Exact-SHA workflow dispatch/run-ID wait/artifact-name download tests, and a final immutable publication verifier for exact tag SHA, published immutable state, exact asset set, upload states, and SHA-256 digests. [VERIFIED: `08-08-PLAN.md` Task 3; `08-10-PLAN.md`; `08-11-PLAN.md` Task 3; CITED: https://cli.github.com/manual/gh_run_download; CITED: https://docs.github.com/en/rest/releases/assets]
+- [ ] Exact-SHA workflow dispatch/run-ID wait/artifact-name download tests, and a final immutable publication verifier for exact tag SHA, published immutable state, exact asset set, upload states, and SHA-256 digests. [VERIFIED: `08-08-PLAN.md` Task 3; `08-10-PLAN.md`; `08-11-PLAN.md` Task 2; `08-12-PLAN.md`; CITED: https://cli.github.com/manual/gh_run_download; CITED: https://docs.github.com/en/rest/releases/assets]
 
 ## Security Domain
 
