@@ -529,7 +529,7 @@ Plans:
 **Goal:** Users get one obstore-backed payload participant for filesystem, memory, and S3 while BlobStore's lifecycle authority remains the sole owner of intent, visibility, reconciliation, and cleanup debt.
 **Requirements**: [STOR-01, STOR-02, STOR-03, STOR-04, STOR-05, STOR-06, STOR-07, STOR-08, BACK-01, BACK-02, BACK-03, BACK-04, BACK-06, BACK-07, CACH-01, CACH-02, CACH-03, SECU-01, SECU-03, SECU-04, SECU-05, SECU-07, SECU-08, MIGR-01, MIGR-02, MIGR-03, MIGR-04, MIGR-05, MIGR-06, MIGR-07, QUAL-01, QUAL-04, QUAL-07]
 **Depends on:** Phase 7
-**Plans:** 9/11 plans executed
+**Plans:** 10/11 plans executed
 
 Plans:
 **Wave 1**
@@ -567,7 +567,7 @@ Plans:
 
 **Wave 9** *(blocked on Wave 8 completion)*
 
-- [ ] 07.1-10-PLAN.md — Delete custom/boto3/multipart mechanics and update retained contract suites.
+- [x] 07.1-10-PLAN.md — Delete custom/boto3/multipart mechanics and update retained contract suites.
 
 **Wave 10** *(blocked on Wave 9 completion)*
 

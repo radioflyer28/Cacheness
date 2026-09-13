@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 07.1
 current_phase_name: obstore-payload-participant-unification
 status: executing
-stopped_at: Completed 07.1-09 post-wave obstore cutover alignment
-last_updated: "2026-09-13T19:05:46.400Z"
+stopped_at: Completed 07.1-10-PLAN.md
+last_updated: "2026-09-13T19:25:05.253Z"
 last_activity: 2026-09-13
 last_activity_desc: Phase 07.1 execution started
-state_head: 69f11c05c654f982dcfa88d9e590c4af5361d4d2
+state_head: 7c42dba92cdf6e21478ad7cca9f65892ff1dae46
 progress:
   total_phases: 9
   completed_phases: 6
   total_plans: 116
-  completed_plans: 113
+  completed_plans: 114
 milestone_name: milestone
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-09-11)
 ## Current Position
 
 Phase: 07.1 (obstore-payload-participant-unification) — EXECUTING
-Plan: 10 of 11
+Plan: 11 of 11
 Status: Ready to execute
 Last activity: 2026-09-13 — Phase 07.1 execution started
 
@@ -191,6 +191,7 @@ the deliberately superseded Phase 03 plan; do not fabricate its completion.
 | Phase 07.1 P07 | 9m 56s | 2 tasks | 8 files |
 | Phase 07.1 P08 | 18min | 2 tasks | 11 files |
 | Phase 07.1 P09 | 537 | 3 tasks | 12 files |
+| Phase 07.1 P10 | 666s | 2 tasks | 10 files |
 
 ## Accumulated Context
 
@@ -452,6 +453,9 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - [Phase 07.1]: Built-in memory, filesystem, and S3 payload factories now materialize only ObstoreGenerationIO; no selector, legacy read path, boto3 escape hatch, or compatibility path remains.
 - [Phase 07.1]: When a selected payload provider materializes itself as guarded handler I/O, StoreTopology's ownership ledger closes it exactly once; caller-injected providers remain caller-owned.
 - [Phase 07.1]: UnifiedCache keeps CACH-03 policy-only removal: TTL, eviction, predicate, decorator, single-key, and global clear delegate exact deletion through BlobStore.
+- [Phase 07.1]: Removed legacy payload modules outright; no aliases, fallback readers, runtime selector, or second lifecycle authority remains.
+- [Phase 07.1]: ObstoreGenerationIO is the deliberate public payload-participant export; PostgreSQL remains conditional on its optional dependency.
+- [Phase 07.1]: Mocked S3 tests use boto3 only to provision Moto buckets, while live AWS/PostgreSQL modules use native obstore credentials and remain Phase 8 collection-only evidence.
 
 ### Pending Todos
 
@@ -481,6 +485,6 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 
 ## Session Continuity
 
-Last session: 2026-09-13T19:05:46.123Z
-Stopped at: Completed 07.1-09 post-wave obstore cutover alignment
+Last session: 2026-09-13T19:25:05.004Z
+Stopped at: Completed 07.1-10-PLAN.md
 Resume file: None
