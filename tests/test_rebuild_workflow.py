@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
+from obstore.store import MemoryStore
 import pytest
 
 from cacheness.error_handling import (
@@ -15,6 +17,7 @@ from cacheness.error_handling import (
 )
 from cacheness.storage import BackendRef, BlobStore, StoreTopology
 from cacheness.storage.catalog import CatalogField, CatalogQuery, CatalogSchema
+from cacheness.storage.guarded_handler_io import GuardedHandlerIO
 from cacheness.storage.migration import (
     MigrationCompatibilityEdge,
     MigrationPlanKind,
@@ -27,6 +30,7 @@ from cacheness.storage.migration_evidence import (
     MaintenanceRunEvidence,
 )
 from cacheness.storage.projections import ProjectionController
+from cacheness.storage.obstore_generation_io import ObstoreGenerationIO
 
 
 class _SharedMemoryKeyProvider:
@@ -104,10 +108,15 @@ def _store(
     projections: tuple[object, ...] = (),
 ) -> BlobStore:
     """Create an initialized same-process store for rebuild-plan contracts."""
-
+    (root / "handler-stage").mkdir(parents=True)
+    payload = ObstoreGenerationIO(
+        MemoryStore(),
+        GuardedHandlerIO(root / "handler-stage"),
+        qualification_identity="memory",
+    )
     store = BlobStore(
         StoreTopology(
-            payload=BackendRef(name="memory"),
+            payload=BackendRef(instance=payload),
             authority=BackendRef(name="memory"),
             projections=projections,
         ),
@@ -344,7 +353,7 @@ def test_rebuild_uses_registered_source_handler_and_destination_blobstore_lifecy
 
 
 def test_rebuild_integrity_failure_runs_before_custom_handler_and_discards_candidates(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Tampered source bytes never reach the custom reader or a destination candidate."""
 
@@ -354,12 +363,19 @@ def test_rebuild_integrity_failure_runs_before_custom_handler_and_discards_candi
     destination = _store(tmp_path / "destination", provider, _McapHandler())
     try:
         source.put_entry(_McapValue("trusted"), key="mcap-entry")
-        snapshot = source.lifecycle_authority.read_entry("mcap-entry")
-        assert snapshot is not None
-        source.payload_backend._storage[f"memory://{snapshot.locator}"] = b"tampered"
         service = _service(source, destination, tmp_path / "maintenance")
         plan = service.create_rebuild_plan(service.inspect())
         service.confirm_rebuild(plan, confirmation=service.rebuild_confirmation(plan))
+        participant = source._materialize_authority_store()
+        original_open_snapshot = participant.open_snapshot
+
+        @contextmanager
+        def tampered_snapshot(locator, metadata):
+            with original_open_snapshot(locator, metadata) as snapshot:
+                snapshot.path.write_bytes(b"tampered")
+                yield snapshot
+
+        monkeypatch.setattr(participant, "open_snapshot", tampered_snapshot)
 
         with pytest.raises(CacheBlobPayloadTamperedError):
             service.stage_rebuild(plan)

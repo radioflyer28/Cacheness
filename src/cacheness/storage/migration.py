@@ -4276,7 +4276,7 @@ class OfflineMigrationService:
                 destination_io = self.destination._materialize_authority_store()
                 try:
                     with destination_io.open_snapshot(candidate.locator, {}) as snapshot:
-                        payload = snapshot.path.read_bytes()
+                        payload_digest, payload_size = sha256_and_size(snapshot.path)
                 except FileNotFoundError:
                     deleted_entries += 1
                     continue
@@ -4289,8 +4289,8 @@ class OfflineMigrationService:
                     or manifest.locator != candidate.locator
                     or manifest.digest != candidate.payload_digest
                     or manifest.byte_size != candidate.byte_size
-                    or hashlib.sha256(payload).hexdigest() != candidate.payload_digest
-                    or len(payload) != candidate.byte_size
+                    or payload_digest != candidate.payload_digest
+                    or payload_size != candidate.byte_size
                 ):
                     raise CacheBlobMigrationEvidenceMismatchError(
                         "candidate manifest ownership or integrity does not match "
@@ -4401,7 +4401,7 @@ class OfflineMigrationService:
         for entry in entries:
             try:
                 self.destination.delete_migration_payload(entry.locator)
-            except Exception:
+            except (FileNotFoundError, OSError, CacheBlobBackendError):
                 pending.append(self._retirement_digest(entry))
         if pending:
             self._write_evidence(

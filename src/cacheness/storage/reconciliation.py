@@ -7,6 +7,7 @@ are never provenance and remain unavailable to repair decisions.
 from __future__ import annotations
 
 import base64
+from collections.abc import Mapping
 import hashlib
 import hmac
 import json
@@ -323,28 +324,27 @@ class _AuthorityReconciler:
         snapshot: ReconciliationSnapshot,
         attributed_locators: set[str],
     ) -> tuple[tuple[ReconciliationFinding, ...], str | None]:
-        """Report one S3 evidence page without deriving lifecycle authority from it."""
-        profile = self.store.topology.qualified_profile
-        if profile.payload_identity != "s3":
+        """Report one bounded participant page without deriving lifecycle authority."""
+        participant = self.store._materialize_authority_store()
+        capabilities = getattr(participant, "topology_capabilities", {})
+        if not isinstance(capabilities, Mapping) or not capabilities.get("listing", False):
             return (), None
-        inventory_page = getattr(
-            self.store._materialize_authority_store(), "inventory_page", None
-        )
+        inventory_page = getattr(participant, "inventory_page", None)
         if not callable(inventory_page):
             raise CacheStorageError(
-                "S3 topology payload does not expose bounded inventory evidence"
+                "payload participant does not expose bounded inventory evidence"
             )
         page = inventory_page(continuation_token)
         objects = getattr(page, "objects", None)
-        next_token = self._bounded_inventory_cursor(getattr(page, "next_token", None))
+        next_token = self._bounded_inventory_cursor(getattr(page, "next_offset", None))
         if not isinstance(objects, tuple):
-            raise CacheStorageError("S3 inventory evidence page is malformed")
+            raise CacheStorageError("payload inventory evidence page is malformed")
 
         locators: list[str] = []
         for item in objects:
             locator = getattr(item, "locator", None)
             if not isinstance(locator, str) or not locator:
-                raise CacheStorageError("S3 inventory evidence object is malformed")
+                raise CacheStorageError("payload inventory evidence object is malformed")
             locators.append(locator)
         owned_locators = self._inventory_locator_attribution(snapshot, tuple(locators))
 
@@ -389,9 +389,9 @@ class _AuthorityReconciler:
     ) -> frozenset[str] | None:
         """Use an optional bounded authority lookup for this inventory page.
 
-        Not every authority can make a remote-inventory ownership claim.  A
+        Not every authority can make a payload-inventory ownership claim.  A
         missing capability is deliberately an indeterminate report, never a
-        synthetic catalog scan or a claim that an S3 name is residue.
+        synthetic catalog scan or a claim that a payload name is residue.
         """
         locator_attribution = getattr(
             self.authority, "inventory_locator_attribution", None
@@ -404,12 +404,12 @@ class _AuthorityReconciler:
         if not isinstance(result, frozenset) or not all(
             isinstance(locator, str) and locator in locators for locator in result
         ):
-            raise CacheStorageError("S3 inventory authority attribution is malformed")
+            raise CacheStorageError("payload inventory authority attribution is malformed")
         return result
 
     @staticmethod
     def _bounded_inventory_cursor(value: object) -> str | None:
-        """Retain only a bounded opaque S3 continuation token in signed evidence."""
+        """Retain only a bounded opaque participant cursor in signed evidence."""
         if value is None:
             return None
         if (
@@ -418,7 +418,7 @@ class _AuthorityReconciler:
             or len(value.encode("utf-8")) > 512
             or any(character.isspace() for character in value)
         ):
-            raise ValueError("S3 inventory continuation token is malformed")
+            raise ValueError("payload inventory continuation token is malformed")
         return value
 
     @staticmethod
