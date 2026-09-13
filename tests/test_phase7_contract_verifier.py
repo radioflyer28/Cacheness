@@ -42,6 +42,8 @@ EXPECTED_TEST_NODES = (
     "tests/test_migration_inspection.py",
     "tests/test_lifecycle_authority_contract.py",
     "tests/contracts/test_postgresql_lifecycle_authority.py",
+    "tests/contracts/test_obstore_generation_io.py",
+    "tests/contracts/test_topology_lifecycle.py",
     "tests/test_migration_run_evidence.py",
     "tests/test_projection_sql_atomicity.py",
     "tests/test_migration_remote_contract.py",
@@ -532,6 +534,29 @@ def test_fixed_manifest_maps_current_three_gap_repairs_exactly() -> None:
     assert changed_owner in verifier.DECISION_NODES["D-21"]
     assert transform in verifier.FLAGGED_ASSUMPTION_NODES["A-MIGR04"]
     assert rebuild_settlement in verifier.FLAGGED_ASSUMPTION_NODES["A-MIGR05"]
+
+
+def test_fixed_manifest_maps_unified_remote_participant_threats_exactly() -> None:
+    """Remote threat coverage follows the unified participant, not retired S3 seams."""
+    verifier = _load_verifier()
+
+    exact_create = (
+        "tests/contracts/test_obstore_generation_io.py::"
+        "test_mocked_s3_collision_and_lost_create_response_settle_only_by_exact_object"
+    )
+    redacted_diagnostic = (
+        "tests/contracts/test_topology_lifecycle.py::"
+        "test_remote_inventory_without_snapshot_attribution_is_indeterminate"
+    )
+    bounded_evidence = (
+        "tests/contracts/test_obstore_generation_io.py::"
+        "test_mocked_s3_enforces_direct_put_bounds_and_preserves_exact_maintenance_scope"
+    )
+
+    assert len(verifier._DECLARED_PHASE7_THREAT_IDS) == 100
+    assert verifier.SECURITY_THREAT_NODES["T-07-27"] == (exact_create,)
+    assert verifier.SECURITY_THREAT_NODES["T-07-28"] == (redacted_diagnostic,)
+    assert verifier.SECURITY_THREAT_NODES["T-07-29"] == (bounded_evidence,)
 
 
 def test_fixed_gap_supply_chain_threats_map_to_frozen_command_contracts() -> None:

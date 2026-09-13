@@ -189,9 +189,9 @@ were zero missing, duplicate, or unexpected threat rows.
 | T-07-23 | tests/test_migration_cutover.py::test_offline_service_abort_removes_only_its_unactivated_candidate | PASS (all) |
 | T-07-24 | tests/test_projection_sql_atomicity.py::test_failed_sql_projection_rebuild_discards_the_candidate_without_publishing | PASS (all) |
 | T-07-26 | tests/contracts/test_postgresql_lifecycle_authority.py::test_constructor_is_non_materializing_and_initialize_is_explicit | PASS (all) |
-| T-07-27 | tests/test_migration_remote_contract.py::test_s3_candidate_response_loss_revalidates_exact_receipt_without_listing | PASS (all) |
-| T-07-28 | tests/test_migration_remote_contract.py::test_s3_candidate_rejects_unowned_locator_before_mutating | PASS (all) |
-| T-07-29 | tests/test_migration_remote_contract.py::test_s3_candidate_rejects_unowned_locator_before_mutating | PASS (all) |
+| T-07-27 | tests/contracts/test_obstore_generation_io.py::test_mocked_s3_collision_and_lost_create_response_settle_only_by_exact_object | PASS (all) |
+| T-07-28 | tests/contracts/test_topology_lifecycle.py::test_remote_inventory_without_snapshot_attribution_is_indeterminate | PASS (all) |
+| T-07-29 | tests/contracts/test_obstore_generation_io.py::test_mocked_s3_enforces_direct_put_bounds_and_preserves_exact_maintenance_scope | PASS (all) |
 | T-07-31 | tests/test_migration_cutover.py::test_sqlite_activation_rollback_keeps_candidate_invisible | PASS (all) |
 | T-07-32 | tests/test_migration_cutover.py::test_offline_service_rolls_back_only_the_activated_receipt | PASS (all) |
 | T-07-33 | tests/test_migration_cutover.py::test_offline_service_finalize_requires_exact_confirmation_and_seals_rollback | PASS (all) |

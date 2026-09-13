@@ -4,16 +4,21 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from obstore.store import MemoryStore
 import pytest
 
 from cacheness.error_handling import CacheBlobBackendError
 from cacheness.storage import BlobStore
-from cacheness.storage.backends.blob_backends import InMemoryBlobBackend
-from cacheness.storage.backends.s3_backend import S3InventoryPage, S3ObjectEvidence
 from cacheness.storage.catalog import CatalogField, CatalogSchema
 from cacheness.storage.composition import BackendRef, RoleRegistry, StoreTopology
+from cacheness.storage.guarded_handler_io import GuardedHandlerIO
 from cacheness.storage.lifecycle import AuthorityLifecycleEngine
 from cacheness.storage.memory_lifecycle_authority import InMemoryLifecycleAuthority
+from cacheness.storage.obstore_generation_io import (
+    ObstoreGenerationIO,
+    ObstoreInventoryPage,
+    ObstoreObjectEvidence,
+)
 from cacheness.storage.reconciliation import ReconciliationAction
 
 
@@ -30,51 +35,8 @@ class _StaticRemoteManifestKey:
         return self.get_key()
 
 
-class _InventoryGenerationIO:
-    """Delegate native payload mechanics while exposing one bounded S3 evidence page."""
-
-    def __init__(self, delegate: object) -> None:
-        self._delegate = delegate
-        self.inventory_calls: list[str | None] = []
-
-    @property
-    def root(self):
-        return self._delegate.root
-
-    def stage(self, *args: object, **kwargs: object):
-        return self._delegate.stage(*args, **kwargs)
-
-    def publish_generation(self, *args: object, **kwargs: object):
-        return self._delegate.publish_generation(*args, **kwargs)
-
-    def open_snapshot(self, *args: object, **kwargs: object):
-        return self._delegate.open_snapshot(*args, **kwargs)
-
-    def delete_or_prove_absent(self, *args: object, **kwargs: object):
-        return self._delegate.delete_or_prove_absent(*args, **kwargs)
-
-    def close(self) -> None:
-        self._delegate.close()
-
-    def inventory_page(self, continuation_token: str | None = None) -> S3InventoryPage:
-        self.inventory_calls.append(continuation_token)
-        if continuation_token == "remote-page-2":
-            return S3InventoryPage(
-                (S3ObjectEvidence("unknown/continued-generation", 17),), None
-            )
-        if continuation_token is not None:
-            return S3InventoryPage((), None)
-        return S3InventoryPage(
-            (
-                S3ObjectEvidence("committed/immutable-generation", 17),
-                S3ObjectEvidence("unknown/immutable-generation", 17),
-            ),
-            "remote-page-2",
-        )
-
-
-class _RemotePayload(InMemoryBlobBackend):
-    """S3-shaped participant boundary without claiming live service evidence."""
+class _RemotePayload(ObstoreGenerationIO):
+    """S3-shaped unified participant without a live-service qualification claim."""
 
     qualification_identity = "s3"
     topology_capabilities = {
@@ -86,14 +48,33 @@ class _RemotePayload(InMemoryBlobBackend):
         "listing": True,
     }
 
-    def __init__(self) -> None:
-        super().__init__()
-        self.inventory_io: _InventoryGenerationIO | None = None
+    def __init__(self, *, handler_root: Path) -> None:
+        handler_root.mkdir(parents=True)
+        super().__init__(
+            MemoryStore(), GuardedHandlerIO(handler_root), qualification_identity="s3"
+        )
+        self.inventory_calls: list[str | None] = []
 
-    def materialize_handler_io(self) -> _InventoryGenerationIO:
-        if self.inventory_io is None:
-            self.inventory_io = _InventoryGenerationIO(super().materialize_handler_io())
-        return self.inventory_io
+    def inventory_page(
+        self, continuation: str | None = None, *, max_objects: int | None = None
+    ) -> ObstoreInventoryPage:
+        """Return fixed opaque pages; inventory stays diagnostic-only in this fake."""
+        del max_objects
+        self.inventory_calls.append(continuation)
+        if continuation == "remote-page-2":
+            return ObstoreInventoryPage(
+                (ObstoreObjectEvidence("unknown/continued-generation", 17, None, None),),
+                None,
+            )
+        if continuation is not None:
+            return ObstoreInventoryPage((), None)
+        return ObstoreInventoryPage(
+            (
+                ObstoreObjectEvidence("committed/immutable-generation", 17, None, None),
+                ObstoreObjectEvidence("unknown/immutable-generation", 17, None, None),
+            ),
+            "remote-page-2",
+        )
 
 
 class _NoUnboundedRemoteAuthority(InMemoryLifecycleAuthority):
@@ -153,7 +134,9 @@ def _remote_store(tmp_path: Path) -> BlobStore:
     )
     return BlobStore(
         StoreTopology(
-            payload=BackendRef(name="s3"),
+            payload=BackendRef(
+                name="s3", options={"handler_root": tmp_path / "remote-handler"}
+            ),
             authority=BackendRef(name="postgresql"),
             role_registry=registry,
         ),
@@ -226,7 +209,7 @@ def test_remote_profile_uses_one_engine_and_bounded_authority_pages(tmp_path: Pa
                 ),
             )
         ]
-        assert store.payload_backend.inventory_io.inventory_calls == [None]
+        assert store.payload_backend.inventory_calls == [None]
 
         assert store.clear() == 1
         assert store.lifecycle_authority.unbounded_list_calls == 0
@@ -246,7 +229,7 @@ def test_remote_inventory_continuation_is_signed_with_the_authority_resume_token
 
         second = store.reconcile(resume_token=first.resume_token)
         assert second.inventory_cursor is None
-        assert store.payload_backend.inventory_io.inventory_calls == [None, "remote-page-2"]
+        assert store.payload_backend.inventory_calls == [None, "remote-page-2"]
         assert [finding.reason for finding in (*first.findings, *second.findings)] == [
             "unattributed_payload_inventory",
             "unattributed_payload_inventory",
@@ -276,5 +259,11 @@ def test_remote_inventory_without_snapshot_attribution_is_indeterminate(tmp_path
             "requires_confirmation"
         }
         assert {finding.residue_role for finding in report.findings} == {"indeterminate"}
+        machine_view = report.machine_view()
+        assert "unknown/immutable-generation" not in repr(machine_view)
+        assert "unknown/immutable-generation" not in repr(report.to_dict())
+        assert all(
+            finding.locator_fingerprint is not None for finding in report.findings
+        )
     finally:
         store.close()
