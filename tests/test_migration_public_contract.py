@@ -15,6 +15,7 @@ import numpy as np
 
 from cacheness.storage import BackendRef, BlobStore, StoreTopology
 import cacheness.storage as storage
+import cacheness.storage.migration_authority as migration_authority
 
 
 PUBLIC_MAINTENANCE_SYMBOLS = {
@@ -58,6 +59,18 @@ PUBLIC_MAINTENANCE_SYMBOLS = {
     "VersionEdge",
     "render_migration_report",
 }
+
+
+def test_migration_authority_does_not_export_duplicate_schema_versions() -> None:
+    """Maintenance contracts cannot publish schema identities that drift from authority."""
+    retired_names = {
+        "SQLITE_MIGRATION_AUTHORITY_SCHEMA_VERSION",
+        "POSTGRESQL_MIGRATION_AUTHORITY_SCHEMA_VERSION",
+        "POSTGRESQL_MIGRATION_AUTHORITY_CAPABILITY",
+    }
+
+    assert retired_names.isdisjoint(migration_authority.__all__)
+    assert all(not hasattr(migration_authority, name) for name in retired_names)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PHASE_DIRECTORY = PROJECT_ROOT / ".planning/phases/07-explicit-migration-and-rebuild-cutover"

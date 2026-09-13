@@ -21,9 +21,6 @@ from .transport_evidence import MAX_TRANSPORT_EVIDENCE_BYTES
 _MAX_TEXT_BYTES = 512
 _MAX_INVENTORY_PAGE_ENTRIES = 256
 _MAX_INVENTORY_WORK_BYTES = 131_072
-SQLITE_MIGRATION_AUTHORITY_SCHEMA_VERSION = 8
-POSTGRESQL_MIGRATION_AUTHORITY_SCHEMA_VERSION = 4
-POSTGRESQL_MIGRATION_AUTHORITY_CAPABILITY = "postgresql-lifecycle-authority-v4"
 
 
 class AuthorityPublicationState(str, Enum):
@@ -468,11 +465,8 @@ __all__ = [
     "CandidateEntryReceipt",
     "FinalizeReceipt",
     "MigrationAuthority",
-    "POSTGRESQL_MIGRATION_AUTHORITY_CAPABILITY",
-    "POSTGRESQL_MIGRATION_AUTHORITY_SCHEMA_VERSION",
     "PriorStoreReceipt",
     "RollbackReceipt",
-    "SQLITE_MIGRATION_AUTHORITY_SCHEMA_VERSION",
     "VerifiedCandidateReceipt",
     "candidate_digest",
     "validate_inventory_page_request",
