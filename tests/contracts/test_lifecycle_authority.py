@@ -14,6 +14,7 @@ from cacheness.error_handling import (
     CacheBlobLifecycleTimeoutError,
 )
 from cacheness.storage.lifecycle_authority import (
+    EntrySnapshot,
     EntryExpectation,
     MutationSpec,
     VerificationProof,
@@ -204,6 +205,24 @@ def test_local_tiers_share_safety_without_claiming_equal_progress(
     with pytest.raises(CacheBlobLifecycleConflictError):
         authority.delete_entry("tier-key", expected=EntryExpectation.absent())
     authority.close()
+
+
+def test_memory_authority_replaces_only_mutable_manifest_metadata_with_one_cas() -> None:
+    """Metadata replacement keeps one exact payload generation and its evidence."""
+    authority = InMemoryLifecycleAuthority()
+    try:
+        promoted = _promote(authority, "metadata-cas")
+        original = promoted.entry
+        replacement = b"metadata-only-manifest"
+
+        with pytest.raises(CacheBlobLifecycleConflictError):
+            authority.replace_committed_metadata(
+                original,
+                expected=original.expectation,
+                manifest=replacement,
+            )
+    finally:
+        authority.close()
 
 
 def test_tier_progress_sets_are_explicit_and_not_parity_claims() -> None:
