@@ -837,7 +837,12 @@ class BlobStore:
 
     def _release_owned_resources(self) -> None:
         if self.guarded_handler_io is not None and not self._guarded_handler_io_released:
-            self.guarded_handler_io.close()
+            # The unified obstore participant is itself the guarded I/O object.
+            # Its close belongs exclusively to StoreTopology's ownership ledger:
+            # closing it here would double-close a store-owned provider or adopt
+            # a caller-owned injected provider.
+            if self.guarded_handler_io is not self.payload_backend:
+                self.guarded_handler_io.close()
             self._guarded_handler_io_released = True
         self.topology.close()
 
