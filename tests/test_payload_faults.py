@@ -19,6 +19,25 @@ from _lifecycle_test_support import (
 from cacheness.error_handling import CacheBlobRecoverableCleanupError
 from cacheness.storage import BlobStore
 from cacheness.storage.composition import BackendRef, StoreTopology
+from cacheness.storage.memory_lifecycle_authority import InMemoryLifecycleAuthority
+from cacheness.storage.transport_evidence import (
+    PayloadTransportEvidence,
+    PayloadTransportObservation,
+)
+
+
+class _RecordingAuthority(InMemoryLifecycleAuthority):
+    """Record the sole verification transition without adding a lifecycle seam."""
+
+    qualification_identity = "memory"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.verification_calls = []
+
+    def record_verification(self, prepared, proof) -> None:
+        self.verification_calls.append((prepared, proof))
+        super().record_verification(prepared, proof)
 
 
 def _store(root: Path) -> BlobStore:
@@ -30,6 +49,60 @@ def _store(root: Path) -> BlobStore:
         ),
         cache_dir=root,
     )
+
+
+def _observed_memory_store(root: Path) -> tuple[BlobStore, _RecordingAuthority]:
+    """Build one participant whose opaque remote-shaped observation is untrusted."""
+    authority = _RecordingAuthority()
+    store = BlobStore(
+        StoreTopology(
+            payload=BackendRef(name="memory"),
+            authority=BackendRef(instance=authority),
+        ),
+        cache_dir=root,
+    )
+    participant = store._materialize_authority_store()
+    publish_generation = participant.publish_generation
+
+    def publish_with_observation(staged, locator):
+        published = publish_generation(staged, locator)
+        published["transport_observation"] = PayloadTransportObservation(
+            e_tag='"mocked-s3-opaque"',
+            byte_size=published["file_size"],
+            version="mocked-version",
+        )
+        return published
+
+    participant.publish_generation = publish_with_observation
+    return store, authority
+
+
+def test_verified_participant_observation_is_signed_in_the_one_authority_transition(
+    tmp_path: Path,
+) -> None:
+    """Only canonical snapshot success allows adapter metadata into the proof."""
+    store, authority = _observed_memory_store(tmp_path / "transport-observation")
+    try:
+        result = store._put_with_result_admitted(
+            {"generation": "observed"},
+            key="transport-observation",
+            operation_id="transport-observation-operation",
+        )
+        replay = authority.read_mutation(result.operation_id)
+        assert replay is not None
+        assert len(authority.verification_calls) == 1
+        assert replay.verification is not None
+        assert replay.verification.transport_evidence is not None
+        assert result.promoted is not None
+        assert result.promoted.transport_evidence == replay.verification.transport_evidence
+
+        evidence = PayloadTransportEvidence.from_canonical_bytes(
+            replay.verification.transport_evidence
+        )
+        assert evidence.observation.e_tag == '"mocked-s3-opaque"'
+        assert evidence.observation.e_tag != evidence.payload_sha256
+    finally:
+        store.close()
 
 
 @pytest.mark.parametrize(
@@ -169,4 +242,3 @@ def test_progress_and_performance_fault_contract_has_no_success_deadline(
         assert store.put({"generation": "one"}, key="progress-key") == "progress-key"
     finally:
         store.close()
-
