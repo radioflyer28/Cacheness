@@ -8,7 +8,7 @@ listings as catalog truth, or add lifecycle coordination outside BlobStore.
 from __future__ import annotations
 
 import io
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
@@ -98,7 +98,8 @@ def moto_s3_store(monkeypatch: pytest.MonkeyPatch) -> Iterator[_StoreCase]:
         _BUCKET,
         prefix="sdk-parity",
         config={"region": _REGION, "conditional_put": "etag"},
-        client_options={"endpoint_url": endpoint_url, "allow_http": True},
+        endpoint=endpoint_url,
+        allow_http=True,
     )
     try:
         yield _StoreCase("s3", store)
@@ -138,12 +139,12 @@ def test_consumed_sync_object_primitives_have_exact_immutable_parity(
         mode="create",
         use_multipart=False,
     )
-    assert hasattr(result, "e_tag")
-    assert hasattr(result, "version")
+    assert isinstance(result, Mapping)
+    assert {"e_tag", "version"} <= result.keys()
     first_meta = store.head(_KEY)
-    assert first_meta.size == len(_PAYLOAD)
-    assert hasattr(first_meta, "e_tag")
-    assert hasattr(first_meta, "version")
+    assert isinstance(first_meta, Mapping)
+    assert first_meta["size"] == len(_PAYLOAD)
+    assert {"e_tag", "version"} <= first_meta.keys()
 
     # A lost create response is recovered only by this exact-object observation.
     with pytest.raises(AlreadyExistsError):
@@ -152,18 +153,19 @@ def test_consumed_sync_object_primitives_have_exact_immutable_parity(
             io.BytesIO(b"replacement bytes must never win"),
             mode="create",
             use_multipart=False,
-        )
+    )
     recovered_meta = store.head(_KEY)
-    assert recovered_meta.size == len(_PAYLOAD)
+    assert recovered_meta["size"] == len(_PAYLOAD)
     assert store.list_calls == []
 
     stream_result = store.get(_KEY)
-    assert stream_result.meta.size == len(_PAYLOAD)
+    assert stream_result.meta["size"] == len(_PAYLOAD)
     assert b"".join(stream_result.stream(min_chunk_size=1)) == _PAYLOAD
 
-    page = list(store.list("generations/", chunk_size=1))
-    assert len(page) == 1
-    assert page[0].size == len(_PAYLOAD)
+    pages = list(store.list("generations/", chunk_size=1))
+    assert len(pages) == 1
+    assert len(pages[0]) == 1
+    assert pages[0][0]["size"] == len(_PAYLOAD)
     assert store.list_calls == [("generations/", {"chunk_size": 1})]
 
     store.delete([_KEY])
