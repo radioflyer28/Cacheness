@@ -80,7 +80,7 @@ from .read_contract import (
     PayloadTransportComparisonStatus,
 )
 from .sqlite_lifecycle_authority import SqliteLifecycleAuthority
-from .transport_evidence import PayloadTransportEvidence
+from .transport_evidence import PayloadTransportEvidence, PayloadTransportObservation
 
 
 logger = logging.getLogger(__name__)
@@ -438,7 +438,7 @@ class BlobStore:
                 "Payload transport observation failed",
                 context={"operation": "transport_comparison", "key": entry.key},
             ) from exc
-        if not isinstance(observed, type(expected)):
+        if not isinstance(observed, PayloadTransportObservation):
             raise CacheBlobBackendError(
                 "Payload participant returned an invalid transport observation",
                 context={"operation": "transport_comparison", "key": entry.key},

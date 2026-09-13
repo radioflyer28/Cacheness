@@ -15,7 +15,6 @@ from cacheness.error_handling import (
 from cacheness.storage import (
     BlobReceipt,
     BlobStore,
-    PayloadTransportComparison,
     PayloadTransportComparisonStatus,
 )
 from cacheness.storage.composition import BackendRef, StoreTopology
@@ -167,6 +166,41 @@ def test_transport_comparison_reports_mismatch_without_mutating_entry(
         store.close()
 
 
+def test_transport_comparison_uses_only_authority_read_and_exact_observation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The developer check cannot repair, promote, delete, list, or deserialize."""
+    store = _store(tmp_path / "transport-read-only")
+    try:
+        receipt, participant, expected_observation = _put_with_transport_evidence(
+            store, monkeypatch, key="transport-read-only"
+        )
+        monkeypatch.setattr(
+            participant,
+            "observe_transport",
+            lambda _locator: expected_observation,
+            raising=False,
+        )
+
+        def reject_mutation(*_args, **_kwargs):
+            raise AssertionError("transport comparison mutated lifecycle state")
+
+        def reject_payload_io(*_args, **_kwargs):
+            raise AssertionError("transport comparison performed payload I/O")
+
+        for name in ("prepare_mutation", "record_verification", "promote_mutation"):
+            monkeypatch.setattr(store.lifecycle_authority, name, reject_mutation)
+        for name in ("publish_generation", "open_snapshot", "delete_or_prove_absent"):
+            monkeypatch.setattr(participant, name, reject_payload_io)
+
+        result = store.compare_transport_evidence(receipt.key)
+
+        assert result is not None
+        assert result.status is PayloadTransportComparisonStatus.MATCH
+    finally:
+        store.close()
+
+
 def test_transport_comparison_reports_unavailable_without_evidence_or_provider(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -254,6 +288,41 @@ def test_transport_comparison_rejects_bad_evidence_before_observation(
         )
         with pytest.raises(CacheManifestIntegrityError):
             store.compare_transport_evidence(receipt.key)
+    finally:
+        store.close()
+
+
+def test_transport_comparison_rejects_transplanted_evidence_before_observation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Signed transport evidence cannot be moved to another committed generation."""
+    store = _store(tmp_path / "transport-transplant")
+    try:
+        first, participant, _ = _put_with_transport_evidence(
+            store, monkeypatch, key="transport-first"
+        )
+        second, _, _ = _put_with_transport_evidence(
+            store, monkeypatch, key="transport-second"
+        )
+        read_entry = store.lifecycle_authority.read_entry
+        first_entry = read_entry(first.key)
+        assert first_entry is not None
+
+        def transplanted_entry(key: str):
+            entry = read_entry(key)
+            if entry is None or key != second.key:
+                return entry
+            return replace(entry, transport_evidence=first_entry.transport_evidence)
+
+        def reject_observation(*_args, **_kwargs):
+            raise AssertionError("transplanted evidence reached the participant")
+
+        monkeypatch.setattr(store.lifecycle_authority, "read_entry", transplanted_entry)
+        monkeypatch.setattr(
+            participant, "observe_transport", reject_observation, raising=False
+        )
+        with pytest.raises(CacheManifestIntegrityError):
+            store.compare_transport_evidence(second.key)
     finally:
         store.close()
 

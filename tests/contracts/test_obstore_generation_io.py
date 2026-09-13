@@ -638,6 +638,10 @@ def test_mocked_s3_enforces_direct_put_bounds_and_preserves_exact_maintenance_sc
         assert evidence.e_tag == '"multipart-looking-opaque-7"'
         assert evidence.version == "opaque-version"
         assert not hasattr(evidence, "digest")
+        observation = provider.observe_transport(locator.as_posix())
+        assert observation.byte_size == len(b"MCAP\x00exact")
+        assert observation.e_tag == '"multipart-looking-opaque-7"'
+        assert observation.version == "opaque-version"
         wrapped.head = actual_head
 
         page = provider.inventory_page(max_objects=1)

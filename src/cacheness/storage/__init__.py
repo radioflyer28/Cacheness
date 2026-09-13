@@ -66,7 +66,12 @@ from .catalog import (
     validate_catalog_mapping,
     validate_catalog_query,
 )
-from .read_contract import BlobEntry, BlobReceipt
+from .read_contract import (
+    BlobEntry,
+    BlobReceipt,
+    PayloadTransportComparison,
+    PayloadTransportComparisonStatus,
+)
 from .manifest import BlobManifest
 from .migration import (
     AbortReceipt,
@@ -182,6 +187,8 @@ __all__ = [
     "validate_catalog_mapping",
     "validate_catalog_query",
     "BlobEntry",
+    "PayloadTransportComparison",
+    "PayloadTransportComparisonStatus",
     "CacheBlobManifestMalformedError",
     "CacheBlobManifestUnauthenticatedError",
     "CacheBlobPayloadMissingError",
