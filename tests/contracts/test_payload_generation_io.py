@@ -20,6 +20,7 @@ from cacheness.storage.composition import (
 )
 from cacheness.storage.integrity import sha256_and_size
 from cacheness.storage.manifest import BlobManifest, verify_current_manifest
+from cacheness.storage.obstore_generation_io import ObstoreGenerationIO
 
 
 @pytest.fixture(params=("filesystem", "memory"), ids=("filesystem", "memory"))
@@ -69,6 +70,7 @@ def test_integrity_payload_generation_participants_publish_immutable_verified_sn
     value = {"payload": payload_name, "generation": 1}
 
     assert isinstance(provider, PayloadGenerationIOProvider)
+    assert isinstance(provider, ObstoreGenerationIO)
     assert store.guarded_handler_io is guarded_io
     assert all(
         callable(getattr(guarded_io, method, None))
@@ -153,4 +155,3 @@ def test_progress_and_performance_are_declared_without_universal_deadlines(
     else:
         assert profile.requirements.progress_outcomes == {"success", "conflict"}
         assert store.capabilities.durable is False
-

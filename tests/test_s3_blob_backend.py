@@ -1,197 +1,110 @@
-"""Contract-only tests for S3 bounded evidence and exact cleanup primitives.
+"""Deterministic S3 maintenance-evidence contracts for obstore.
 
-These Moto/fake tests verify adapter mechanics only. They neither exercise an
-authority lifecycle transition nor qualify Amazon S3 for the remote topology.
+Moto and boto3 provide only local bucket provisioning. The current payload
+participant remains ``ObstoreGenerationIO`` and does not receive a boto3 client.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
+import boto3
 import pytest
+from moto.server import ThreadedMotoServer
+
+from cacheness.storage.obstore_generation_io import ObstoreGenerationIO
 
 
-try:
-    import boto3
-    from moto import mock_aws
-except ImportError:  # pragma: no cover - optional dependency boundary
-    boto3 = None
-    mock_aws = None
+class _NativeHandler:
+    """Write bytes through one handler-owned native file."""
 
-
-pytestmark = pytest.mark.skipif(
-    boto3 is None or mock_aws is None,
-    reason="S3 participant contracts require boto3 and moto",
-)
-
-
-class _ObservedClient:
-    """Capture exact cleanup requests without changing Moto's behavior."""
-
-    def __init__(self, client: object) -> None:
-        self._client = client
-        self.delete_requests: list[dict[str, object]] = []
-        self.head_requests: list[dict[str, object]] = []
-
-    def __getattr__(self, name: str) -> object:
-        return getattr(self._client, name)
-
-    def delete_object(self, **kwargs: object) -> dict[str, object]:
-        self.delete_requests.append(dict(kwargs))
-        return self._client.delete_object(**kwargs)
-
-    def head_object(self, **kwargs: object) -> dict[str, object]:
-        self.head_requests.append(dict(kwargs))
-        return self._client.head_object(**kwargs)
+    def put(self, value: bytes, path: Path, _config: object) -> dict[str, object]:
+        artifact = path.with_suffix(".native")
+        artifact.write_bytes(value)
+        return {
+            "actual_path": str(artifact),
+            "file_size": len(value),
+            "metadata": {"format": "native-test"},
+        }
 
 
 @pytest.fixture
-def s3_participant(tmp_path: Path):
-    """Build one isolated managed-prefix participant for Moto contract checks."""
-    from cacheness.storage.backends.s3_backend import S3BlobBackend
+def s3_maintenance_provider(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> ObstoreGenerationIO:
+    """Provision one local Moto bucket without injecting boto3 into storage."""
 
-    with mock_aws():
-        moto_client = boto3.client("s3", region_name="us-east-1")
-        bucket = "cacheness-evidence-contract"
-        moto_client.create_bucket(Bucket=bucket)
-        client = _ObservedClient(moto_client)
-        backend = S3BlobBackend(
-            bucket=bucket,
-            prefix="managed/run",
-            client=client,
-            staging_root=tmp_path / "private-stage",
-            max_inventory_objects=2,
-            max_inventory_bytes=1024,
-            max_inventory_work=1,
-        )
-        try:
-            yield backend, client, bucket
-        finally:
-            backend.close()
-
-
-def test_inventory_returns_only_one_bounded_continuation_page(s3_participant) -> None:
-    """Inventory never accumulates the bucket and validates the managed prefix."""
-    backend, client, bucket = s3_participant
-    guarded_io = backend.materialize_handler_io()
-    client.put_object(Bucket=bucket, Key="managed/run/generations/a", Body=b"a")
-    client.put_object(Bucket=bucket, Key="managed/run/generations/b", Body=b"bb")
-    client.put_object(Bucket=bucket, Key="managed/run/generations/c", Body=b"ccc")
-    client.put_object(Bucket=bucket, Key="outside/never-list", Body=b"not-owned")
-
-    first = guarded_io.inventory_page()
-    assert tuple(item.locator for item in first.objects) == (
-        "generations/a",
-        "generations/b",
+    server = ThreadedMotoServer(ip_address="127.0.0.1", port=0, verbose=False)
+    server.start()
+    host, port = server.get_host_and_port()
+    endpoint = f"http://{host}:{port}"
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "testing")
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
+    boto3.client(
+        "s3",
+        endpoint_url=endpoint,
+        region_name="us-east-1",
+        aws_access_key_id="testing",
+        aws_secret_access_key="testing",
+    ).create_bucket(Bucket="cacheness-maintenance-contract")
+    handler_root = tmp_path / "private-stage"
+    handler_root.mkdir()
+    provider = ObstoreGenerationIO.for_s3(
+        bucket="cacheness-maintenance-contract",
+        prefix="managed/run",
+        region="us-east-1",
+        handler_root=handler_root,
+        endpoint=endpoint,
+        _allow_test_endpoint=True,
+        max_inventory_objects=1,
     )
-    assert first.next_token is not None
+    try:
+        yield provider
+    finally:
+        provider.close()
+        server.stop()
 
-    second = guarded_io.inventory_page(first.next_token)
-    assert tuple(item.locator for item in second.objects) == ("generations/c",)
-    assert second.next_token is None
+
+def _publish(
+    provider: ObstoreGenerationIO, locator: Path, payload: bytes
+) -> dict[str, object]:
+    with provider.stage(_NativeHandler(), payload, object()) as staged:
+        return provider.publish_generation(staged, locator)
 
 
-def test_recovery_delete_proves_exact_absence_with_one_followup_head(
-    s3_participant,
+def test_inventory_is_bounded_report_only_evidence(
+    s3_maintenance_provider: ObstoreGenerationIO,
 ) -> None:
-    """Delete success is never inferred from an S3 acknowledgement alone."""
-    backend, client, bucket = s3_participant
-    guarded_io = backend.materialize_handler_io()
-    locator = Path("generations") / "cleanup" / "one"
-    key = "managed/run/generations/cleanup/one"
-    client.put_object(Bucket=bucket, Key=key, Body=b"owned")
+    """One bounded page reports only the participant's managed generations."""
 
-    guarded_io.delete_or_prove_absent(locator)
-    assert client.delete_requests == [{"Bucket": bucket, "Key": key}]
-    assert client.head_requests == [{"Bucket": bucket, "Key": key}]
+    provider = s3_maintenance_provider
+    first_locator = Path("generations") / "inventory-one" / "payload.native"
+    second_locator = Path("generations") / "inventory-two" / "payload.native"
+    _publish(provider, first_locator, b"one")
+    _publish(provider, second_locator, b"two")
 
-    guarded_io.delete_or_prove_absent(locator)
-    assert len(client.delete_requests) == 2
-    assert len(client.head_requests) == 2
-
-
-def test_configuration_rejects_legacy_endpoint_and_unmanaged_prefix(tmp_path: Path) -> None:
-    """Pre-production cutover keeps only Amazon-S3 managed-prefix construction."""
-    from cacheness.error_handling import CacheConfigurationError
-    from cacheness.storage.backends.s3_backend import S3BlobBackend
-
-    with pytest.raises(CacheConfigurationError):
-        S3BlobBackend(bucket="bucket", prefix="")
-    with pytest.raises(TypeError):
-        S3BlobBackend(
-            bucket="bucket",
-            prefix="managed",
-            endpoint_url="http://legacy-compatible-endpoint",
-        )
-    assert not hasattr(S3BlobBackend, "write_blob")
-    assert not hasattr(S3BlobBackend, "read_blob")
+    first = provider.inventory_page()
+    assert len(first.objects) == 1
+    assert first.next_offset is not None
+    second = provider.inventory_page(first.next_offset)
+    assert {item.locator for item in (*first.objects, *second.objects)} == {
+        first_locator.as_posix(),
+        second_locator.as_posix(),
+    }
 
 
-def test_inventory_service_error_is_typed_not_an_empty_result(s3_participant, monkeypatch) -> None:
-    """A remote list error does not collapse into false evidence of absence."""
-    from botocore.exceptions import ClientError
-    from cacheness.error_handling import CacheBlobBackendError
-
-    backend, client, _bucket = s3_participant
-    guarded_io = backend.materialize_handler_io()
-
-    def fail_list(**_kwargs: object) -> dict[str, object]:
-        raise ClientError({"Error": {"Code": "AccessDenied"}}, "ListObjectsV2")
-
-    monkeypatch.setattr(client, "list_objects_v2", fail_list)
-    with pytest.raises(CacheBlobBackendError, match="inventory"):
-        guarded_io.inventory_page()
-
-
-def test_inventory_rejects_malformed_cursor_and_outside_response_key(
-    s3_participant, monkeypatch
+def test_exact_cleanup_deletes_one_generation_or_proves_absence(
+    s3_maintenance_provider: ObstoreGenerationIO,
 ) -> None:
-    """Opaque cursors and service records are validated before they become evidence."""
-    from cacheness.error_handling import CacheBlobBackendError
+    """Cleanup stays exact and idempotent without a second S3 authority."""
 
-    backend, client, _bucket = s3_participant
-    guarded_io = backend.materialize_handler_io()
-    with pytest.raises(CacheBlobBackendError, match="continuation token"):
-        guarded_io.inventory_page("cursor with whitespace")
+    provider = s3_maintenance_provider
+    locator = Path("generations") / "cleanup" / "payload.native"
+    _publish(provider, locator, b"owned")
 
-    monkeypatch.setattr(
-        client,
-        "list_objects_v2",
-        lambda **_kwargs: {"Contents": [{"Key": "outside/key", "Size": 1}]},
-    )
-    with pytest.raises(CacheBlobBackendError, match="managed prefix"):
-        guarded_io.inventory_page()
-
-
-def test_delete_reports_a_still_present_object_as_cleanup_failure(
-    s3_participant, monkeypatch
-) -> None:
-    """A successful DeleteObject response alone never satisfies cleanup debt."""
-    from cacheness.error_handling import CacheBlobBackendError
-
-    backend, client, bucket = s3_participant
-    guarded_io = backend.materialize_handler_io()
-    key = "managed/run/generations/cleanup/still-present"
-    client.put_object(Bucket=bucket, Key=key, Body=b"owned")
-    monkeypatch.setattr(client, "head_object", lambda **_kwargs: {"ContentLength": 5})
-
-    with pytest.raises(CacheBlobBackendError, match="remains present"):
-        guarded_io.delete_or_prove_absent("generations/cleanup/still-present")
-    assert client.delete_requests == [{"Bucket": bucket, "Key": key}]
-    assert client.head_requests == []
-
-
-def test_multipart_inventory_reports_only_bounded_unknown_upload_evidence(
-    s3_participant,
-) -> None:
-    """Unknown incomplete uploads are reported, not automatically deleted."""
-    backend, client, bucket = s3_participant
-    guarded_io = backend.materialize_handler_io()
-    response = client.create_multipart_upload(
-        Bucket=bucket, Key="managed/run/generations/incomplete/payload.native"
-    )
-
-    page = guarded_io.multipart_upload_page()
-    assert len(page.uploads) == 1
-    assert page.uploads[0].locator == "generations/incomplete/payload.native"
-    assert page.uploads[0].upload_id == response["UploadId"]
+    provider.delete_or_prove_absent(locator)
+    provider.delete_or_prove_absent(locator)
+    with pytest.raises(FileNotFoundError):
+        with provider.open_snapshot(locator, {}):
+            pass

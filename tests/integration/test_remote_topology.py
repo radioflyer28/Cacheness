@@ -36,11 +36,8 @@ def _remote_store(
     cache_dir: Path,
 ) -> BlobStore:
     """Build one independently owned client over the shared run namespace."""
-    import boto3
-
-    client = boto3.session.Session().client(
-        "s3", region_name=resources.config.region or "us-east-1"
-    )
+    handler_root = cache_dir / "s3-private-stage"
+    handler_root.mkdir(parents=True, exist_ok=True)
     topology = StoreTopology(
         payload=BackendRef(
             name="s3",
@@ -48,15 +45,11 @@ def _remote_store(
                 "bucket": resources.config.s3_bucket,
                 "prefix": resources.namespace.prefix,
                 "region": resources.config.region or "us-east-1",
-                "client": client,
-                "expected_bucket_owner": resources.config.expected_bucket_owner,
-                "staging_root": cache_dir / "s3-private-stage",
+                "handler_root": handler_root,
                 "max_upload_bytes": 8 * 1024 * 1024,
                 "max_download_bytes": 8 * 1024 * 1024,
-                "max_download_work": 256,
                 "max_inventory_objects": 64,
                 "max_inventory_bytes": 8 * 1024 * 1024,
-                "max_inventory_work": 1,
             },
         ),
         authority=BackendRef(
