@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 07.1
 current_phase_name: obstore-payload-participant-unification
 status: executing
-stopped_at: Completed 07.1-04-PLAN.md
-last_updated: "2026-09-13T16:37:39.200Z"
+stopped_at: Completed 07.1-05-PLAN.md
+last_updated: "2026-09-13T17:02:26.284Z"
 last_activity: 2026-09-13
 last_activity_desc: Phase 07.1 execution started
-state_head: 74db4ff0fc71db985bdc98e6341de340608aa8dc
+state_head: 238e154f3e272ea72057fb17e635d9a94a50ec4e
 progress:
   total_phases: 9
   completed_phases: 6
   total_plans: 116
-  completed_plans: 108
+  completed_plans: 109
 milestone_name: milestone
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-09-11)
 ## Current Position
 
 Phase: 07.1 (obstore-payload-participant-unification) — EXECUTING
-Plan: 5 of 11
+Plan: 6 of 11
 Status: Ready to execute
 Last activity: 2026-09-13 — Phase 07.1 execution started
 
@@ -186,6 +186,7 @@ the deliberately superseded Phase 03 plan; do not fabricate its completion.
 | Phase 07.1 P02 | 33min | 2 tasks | 3 files |
 | Phase 07.1 P03 | 19min | 2 tasks | 4 files |
 | Phase 07.1 P04 | 11m 19s | 2 tasks | 2 files |
+| Phase 07.1 P05 | 16m 5s | 3 tasks | 11 files |
 
 ## Accumulated Context
 
@@ -433,6 +434,9 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - [Phase 07.1]: D-16 rejects expected_bucket_owner before S3Store construction; no signer, fork, boto3 production fallback, or parallel participant restores it.
 - [Phase 07.1]: S3 publication remains one direct conditional create with multipart disabled and a 128 MiB default transfer cap.
 - [Phase 07.1]: Exact head and bounded inventory observations are report-only transport evidence; AuthorityLifecycleEngine remains the only visibility authority.
+- [Phase 07.1]: ETag and object version remain opaque signed observations; canonical SHA-256 plus size remains the integrity decision.
+- [Phase 07.1]: Catalog and user metadata changes preserve generation and evidence through one authority-only CAS.
+- [Phase 07.1]: SQLite and PostgreSQL implement the same narrow metadata CAS to remain LifecycleAuthority conformant.
 
 ### Pending Todos
 
@@ -462,6 +466,6 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 
 ## Session Continuity
 
-Last session: 2026-09-13T16:37:38.807Z
-Stopped at: Completed 07.1-04-PLAN.md
+Last session: 2026-09-13T17:02:25.961Z
+Stopped at: Completed 07.1-05-PLAN.md
 Resume file: None

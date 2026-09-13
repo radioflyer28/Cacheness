@@ -2,9 +2,9 @@
 schema_version: 1
 open_count: 5
 waived_count: 0
-fixed_count: 40
-total_count: 45
-last_updated: 2026-09-13T16:38:06.612Z
+fixed_count: 42
+total_count: 47
+last_updated: 2026-09-13T17:02:52.758Z
 ---
 
 # Broken Windows Ledger
@@ -60,6 +60,8 @@ last_updated: 2026-09-13T16:38:06.612Z
 | 43 | 07 | deviation | tests/test_phase7_contract_verifier.py | 209 | Updated fixed-plan omission expectation after adding Plan 23 to the literal inventory. | fixed |  | 2026-09-12T01:50:07.935Z | 2026-09-12T01:50:58.605Z |
 | 44 | 07.1 | deviation | tests/contracts/test_obstore_generation_io.py |  | Private handler root creation fixed in mocked-S3 fixture before GuardedHandlerIO construction. | fixed |  | 2026-09-13T16:37:34.943Z | 2026-09-13T16:38:06.423Z |
 | 45 | 07.1 | deviation | src/cacheness/storage/obstore_generation_io.py |  | S3 prefix and malformed loopback endpoint validation added before SDK construction. | fixed |  | 2026-09-13T16:37:35.184Z | 2026-09-13T16:38:06.612Z |
+| 46 | 07.1 | deviation | src/cacheness/storage/obstore_generation_io.py |  | Mocked-S3 PutResult lacks size; exact HEAD corroborates it before signed transport evidence. | fixed |  | 2026-09-13T17:02:22.540Z | 2026-09-13T17:02:52.564Z |
+| 47 | 07.1 | deviation | src/cacheness/storage/sqlite_lifecycle_authority.py |  | Durable authority adapters implement the metadata CAS required by the expanded runtime protocol. | fixed |  | 2026-09-13T17:02:22.726Z | 2026-09-13T17:02:52.758Z |
 
 ````json
 [
@@ -602,6 +604,30 @@ last_updated: 2026-09-13T16:38:06.612Z
     "reason": "",
     "recorded_at": "2026-09-13T16:37:35.184Z",
     "resolved_at": "2026-09-13T16:38:06.612Z"
+  },
+  {
+    "id": 46,
+    "kind": "deviation",
+    "phase": "07.1",
+    "file": "src/cacheness/storage/obstore_generation_io.py",
+    "line": null,
+    "description": "Mocked-S3 PutResult lacks size; exact HEAD corroborates it before signed transport evidence.",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-09-13T17:02:22.540Z",
+    "resolved_at": "2026-09-13T17:02:52.564Z"
+  },
+  {
+    "id": 47,
+    "kind": "deviation",
+    "phase": "07.1",
+    "file": "src/cacheness/storage/sqlite_lifecycle_authority.py",
+    "line": null,
+    "description": "Durable authority adapters implement the metadata CAS required by the expanded runtime protocol.",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-09-13T17:02:22.726Z",
+    "resolved_at": "2026-09-13T17:02:52.758Z"
   }
 ]
 ````
