@@ -271,7 +271,9 @@ def test_explicit_failure_recompute_retains_the_original_lookup_result(
         cache.close()
 
 
-def test_function_clear_is_exact_truthful_and_namespace_scoped(tmp_path) -> None:
+def test_function_clear_is_exact_truthful_and_namespace_scoped(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Function-scoped clearing returns BlobStore truth without cross-namespace deletion."""
 
     cache = _cache(tmp_path)
@@ -293,6 +295,14 @@ def test_function_clear_is_exact_truthful_and_namespace_scoped(tmp_path) -> None
         assert first(1) == "first:1"
         assert first(2) == "first:2"
         assert second(1) == "second:1"
+        deleted: list[str] = []
+        original_delete = cache.store.delete
+
+        def observed_delete(cache_key: str, *args, **kwargs):
+            deleted.append(cache_key)
+            return original_delete(cache_key, *args, **kwargs)
+
+        monkeypatch.setattr(cache.store, "delete", observed_delete)
 
         report = first.cache_clear()
 
@@ -301,6 +311,7 @@ def test_function_clear_is_exact_truthful_and_namespace_scoped(tmp_path) -> None
         assert report.conflicted == 0
         assert report.failed == 0
         assert report.complete is True
+        assert len(deleted) == 2
         assert second(1) == "second:1"
         assert second_calls == 1
         assert first(1) == "first:1"

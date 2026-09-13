@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from cacheness.cache_policy import CacheOutcome
 from cacheness.config import CacheConfig, CachePolicyConfig, CacheStorageConfig
@@ -67,18 +68,29 @@ def test_array_handler_round_trips_through_the_canonical_store(tmp_path) -> None
         cache.close()
 
 
-def test_expiry_invalidation_and_statistics_use_typed_results(tmp_path) -> None:
+def test_expiry_invalidation_and_statistics_use_typed_results(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Current policy reports outcomes and exact deletion without legacy metadata APIs."""
 
     cache = _cache(tmp_path)
     try:
         key = cache.put("value", request_id="expire").receipt.key
+        deleted: list[str] = []
+        original_delete = cache.store.delete
+
+        def observed_delete(cache_key: str, *args, **kwargs):
+            deleted.append(cache_key)
+            return original_delete(cache_key, *args, **kwargs)
+
+        monkeypatch.setattr(cache.store, "delete", observed_delete)
 
         expired = cache.lookup(cache_key=key, ttl_hours=-1)
 
         assert expired.outcome is CacheOutcome.EXPIRED
         assert expired.removal is not None
         assert expired.removal.removed == 1
+        assert deleted == [key]
         assert cache.lookup(cache_key=key).outcome is CacheOutcome.ABSENT
         assert cache.statistics().expired == 1
         assert cache.statistics().absent == 1

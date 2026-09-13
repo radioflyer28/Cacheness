@@ -166,16 +166,27 @@ def test_malformed_expiry_facts_fail_closed_without_deletion(
         cache.close()
 
 
-def test_single_key_invalidation_returns_a_truthful_report(tmp_path) -> None:
+def test_single_key_invalidation_returns_a_truthful_report(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Single-key removal carries its observed expectation into BlobStore."""
 
     cache = _cache(tmp_path)
     try:
         key = cache.put({"generation": "one"}, request_id="one").receipt.key
+        deleted: list[str] = []
+        original_delete = cache.store.delete
+
+        def observed_delete(cache_key: str, *args, **kwargs):
+            deleted.append(cache_key)
+            return original_delete(cache_key, *args, **kwargs)
+
+        monkeypatch.setattr(cache.store, "delete", observed_delete)
 
         report = cache.invalidate(cache_key=key)
 
         assert report == CacheRemovalReport(attempted=1, removed=1)
+        assert deleted == [key]
         assert cache.lookup(cache_key=key).outcome is CacheOutcome.ABSENT
     finally:
         cache.close()
@@ -275,6 +286,42 @@ def test_predicate_removal_restarts_fresh_bounded_scans_until_complete(
         )
         assert third == CacheRemovalReport(attempted=1, removed=1)
         assert cache.invalidate_where(query, page_size=1, work_cap=1) == CacheRemovalReport()
+    finally:
+        cache.close()
+
+
+def test_predicate_and_global_clear_delegate_exact_removal_to_blob_store(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Policy selection reaches payload removal only through ``BlobStore.delete``."""
+
+    cache = _cache(tmp_path)
+    try:
+        predicate_key = cache.put(
+            {"generation": "predicate"}, prefix="batch", request_id="predicate"
+        ).receipt.key
+        global_key = cache.put(
+            {"generation": "global"}, prefix="other", request_id="global"
+        ).receipt.key
+        deleted: list[str] = []
+        original_delete = cache.store.delete
+
+        def observed_delete(cache_key: str, *args, **kwargs):
+            deleted.append(cache_key)
+            return original_delete(cache_key, *args, **kwargs)
+
+        monkeypatch.setattr(cache.store, "delete", observed_delete)
+
+        predicate = cache.invalidate_where(
+            CatalogQuery(
+                predicates=(CatalogPredicate("cache_prefix", "eq", "batch"),)
+            )
+        )
+        global_clear = cache.clear_all()
+
+        assert predicate == CacheRemovalReport(attempted=1, removed=1)
+        assert global_clear == CacheRemovalReport(attempted=1, removed=1)
+        assert deleted == [predicate_key, global_key]
     finally:
         cache.close()
 
