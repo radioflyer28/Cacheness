@@ -91,7 +91,7 @@ SQLITE_APPLICATION_ID = 0x43414348
 # SQLite's user_version is a database-schema identifier, not the public store
 # format version. Keep it independent so descriptor and payload formats can
 # evolve without implying an implicit SQLite migration.
-SQLITE_USER_VERSION = 8
+SQLITE_USER_VERSION = 9
 # Retained as an import-compatible name for authority diagnostics. It denotes
 # the current SQLite schema only; it is deliberately not STORE_FORMAT_VERSION.
 SCHEMA_VERSION = SQLITE_USER_VERSION
@@ -784,14 +784,15 @@ class SqliteLifecycleAuthority:
                 "CREATE TABLE IF NOT EXISTS entries ("
                 "key TEXT PRIMARY KEY, generation TEXT NOT NULL, locator TEXT NOT NULL, "
                 "manifest BLOB NOT NULL, manifest_digest TEXT NOT NULL, lineage INTEGER NOT NULL, "
-                "revision INTEGER NOT NULL)"
+                "revision INTEGER NOT NULL, transport_evidence BLOB)"
             )
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS mutations ("
                 "operation_id TEXT PRIMARY KEY, key TEXT NOT NULL, generation TEXT NOT NULL, "
                 "locator TEXT NOT NULL, expected_lineage INTEGER, expected_revision INTEGER, "
                 "expected_generation TEXT, expected_manifest_digest TEXT, manifest BLOB NOT NULL, "
-                "verified_digest TEXT, verified_size INTEGER, state TEXT NOT NULL)"
+                "verified_digest TEXT, verified_size INTEGER, transport_evidence BLOB, "
+                "state TEXT NOT NULL)"
             )
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS authority_state ("
@@ -813,7 +814,7 @@ class SqliteLifecycleAuthority:
                 "CHECK (selection IN ('candidate', 'prior')), key TEXT NOT NULL, "
                 "generation TEXT NOT NULL, locator TEXT NOT NULL, manifest BLOB NOT NULL, "
                 "manifest_digest TEXT NOT NULL, lineage INTEGER NOT NULL, "
-                "entry_revision INTEGER NOT NULL, "
+                "entry_revision INTEGER NOT NULL, transport_evidence BLOB, "
                 "PRIMARY KEY (run_id, selection, key))"
             )
             connection.execute(
@@ -831,7 +832,8 @@ class SqliteLifecycleAuthority:
                 "CREATE TABLE IF NOT EXISTS clear_targets ("
                 "run_id TEXT NOT NULL, key TEXT NOT NULL, lineage INTEGER NOT NULL, "
                 "entry_revision INTEGER NOT NULL, generation TEXT NOT NULL, locator TEXT NOT NULL, "
-                "manifest BLOB NOT NULL, manifest_digest TEXT NOT NULL, state TEXT NOT NULL, "
+                "manifest BLOB NOT NULL, manifest_digest TEXT NOT NULL, "
+                "transport_evidence BLOB, state TEXT NOT NULL, "
                 "PRIMARY KEY (run_id, key))"
             )
             connection.execute(
@@ -1215,7 +1217,8 @@ class SqliteLifecycleAuthority:
             if connection is None:
                 return None
             row = connection.execute(
-                "SELECT generation, locator, manifest, manifest_digest, lineage, revision "
+                "SELECT generation, locator, manifest, manifest_digest, lineage, revision, "
+                "transport_evidence "
                 "FROM entries WHERE key = ?",
                 (key,),
             ).fetchone()
@@ -1231,6 +1234,7 @@ class SqliteLifecycleAuthority:
                     row[1],
                     manifest,
                     EntryExpectation(row[4], row[5], row[0], row[3]),
+                    None if row[6] is None else bytes(row[6]),
                 )
             except (TypeError, ValueError) as error:
                 raise CacheBlobBackendError(
@@ -1261,7 +1265,8 @@ class SqliteLifecycleAuthority:
                     "Metadata replacement expectation no longer matches authority"
                 )
             row = connection.execute(
-                "SELECT generation, locator, manifest, manifest_digest, lineage, revision "
+                "SELECT generation, locator, manifest, manifest_digest, lineage, revision, "
+                "transport_evidence "
                 "FROM entries WHERE key = ?",
                 (entry.key,),
             ).fetchone()
@@ -1273,6 +1278,7 @@ class SqliteLifecycleAuthority:
                 row[1],
                 bytes(row[2]),
                 EntryExpectation(row[4], row[5], row[0], row[3]),
+                None if row[6] is None else bytes(row[6]),
             )
             if stored != entry:
                 raise CacheBlobLifecycleConflictError(
@@ -1350,6 +1356,7 @@ class SqliteLifecycleAuthority:
                     stored.generation,
                     manifest_digest,
                 ),
+                transport_evidence=stored.transport_evidence,
             )
 
         return self._transaction(replace_metadata)
@@ -1425,12 +1432,14 @@ class SqliteLifecycleAuthority:
 
         def record(connection: sqlite3.Connection) -> None:
             cursor = connection.execute(
-                "UPDATE mutations SET verified_digest = ?, verified_size = ?, manifest = ? "
+                "UPDATE mutations SET verified_digest = ?, verified_size = ?, manifest = ?, "
+                "transport_evidence = ? "
                 "WHERE operation_id = ? AND state = 'prepared' AND manifest = ?",
                 (
                     proof.digest,
                     proof.byte_size,
                     descriptor,
+                    proof.transport_evidence,
                     prepared.operation_id,
                     prepared.spec.manifest,
                 ),
@@ -1450,15 +1459,16 @@ class SqliteLifecycleAuthority:
         def promote(connection: sqlite3.Connection) -> PromotionResult:
             row = connection.execute(
                 "SELECT key, generation, locator, expected_lineage, expected_revision, "
-                "expected_generation, expected_manifest_digest, manifest, verified_digest, state "
+                "expected_generation, expected_manifest_digest, manifest, verified_digest, "
+                "transport_evidence, state "
                 "FROM mutations WHERE operation_id = ?",
                 (prepared.operation_id,),
             ).fetchone()
             if row is None:
                 raise CacheBlobLifecycleConflictError("Mutation does not exist")
-            if row[9] == "promoted":
+            if row[10] == "promoted":
                 return self._promoted_result(connection, prepared.operation_id)
-            if row[9] != "prepared" or row[8] is None:
+            if row[10] != "prepared" or row[8] is None:
                 raise CacheBlobLifecycleConflictError(
                     "Mutation is not verified and prepared"
                 )
@@ -1487,13 +1497,22 @@ class SqliteLifecycleAuthority:
             self._reach_transaction_boundary("promote.after_lineage")
             manifest_digest = hashlib.sha256(bytes(row[7])).hexdigest()
             connection.execute(
-                "INSERT INTO entries(key, generation, locator, manifest, manifest_digest, lineage, revision) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(key) DO UPDATE SET "
+                "INSERT INTO entries(key, generation, locator, manifest, manifest_digest, lineage, revision, "
+                "transport_evidence) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(key) DO UPDATE SET "
                 "generation=excluded.generation, locator=excluded.locator, "
                 "manifest=excluded.manifest, manifest_digest=excluded.manifest_digest, "
                 "lineage=excluded.lineage, "
-                "revision=excluded.revision",
-                (row[0], row[1], row[2], row[7], manifest_digest, next_lineage, revision),
+                "revision=excluded.revision, transport_evidence=excluded.transport_evidence",
+                (
+                    row[0],
+                    row[1],
+                    row[2],
+                    row[7],
+                    manifest_digest,
+                    next_lineage,
+                    revision,
+                    row[9],
+                ),
             )
             self._reach_transaction_boundary("promote.after_entry")
             self._reach_transaction_boundary("promote.after_descriptor")
@@ -1532,7 +1551,8 @@ class SqliteLifecycleAuthority:
         """Read one already-committed promotion without reapplying it."""
         row = connection.execute(
             "SELECT m.key, e.generation, e.locator, e.manifest, e.manifest_digest, "
-            "e.lineage, e.revision FROM mutations AS m JOIN entries AS e ON e.key = m.key "
+            "e.lineage, e.revision, e.transport_evidence FROM mutations AS m "
+            "JOIN entries AS e ON e.key = m.key "
             "WHERE m.operation_id = ? AND m.state = 'promoted'",
             (operation_id,),
         ).fetchone()
@@ -1553,6 +1573,7 @@ class SqliteLifecycleAuthority:
                 row[2],
                 bytes(row[3]),
                 EntryExpectation(row[5], row[6], row[1], row[4]),
+                None if row[7] is None else bytes(row[7]),
             ),
             tuple(CleanupDebt(*debt_row) for debt_row in debt_rows),
         )
@@ -1566,7 +1587,7 @@ class SqliteLifecycleAuthority:
             row = connection.execute(
                 "SELECT key, generation, locator, expected_lineage, expected_revision, "
                 "expected_generation, expected_manifest_digest, manifest, verified_digest, "
-                "verified_size, state FROM mutations WHERE operation_id = ?",
+                "verified_size, transport_evidence, state FROM mutations WHERE operation_id = ?",
                 (operation_id,),
             ).fetchone()
             if row is None:
@@ -1586,14 +1607,19 @@ class SqliteLifecycleAuthority:
                 proof = (
                     None
                     if row[8] is None
-                    else VerificationProof(row[8], row[9], spec.manifest)
+                    else VerificationProof(
+                        row[8],
+                        row[9],
+                        spec.manifest,
+                        None if row[10] is None else bytes(row[10]),
+                    )
                 )
-                if row[10] == "prepared":
-                    return MutationReplay(prepared, row[10], proof)
-                if row[10] == "promoted":
+                if row[11] == "prepared":
+                    return MutationReplay(prepared, row[11], proof)
+                if row[11] == "promoted":
                     return MutationReplay(
                         prepared,
-                        row[10],
+                        row[11],
                         proof,
                         self._promoted_result(connection, operation_id),
                     )
@@ -1604,7 +1630,7 @@ class SqliteLifecycleAuthority:
                 ) from error
             raise CacheBlobLifecycleConflictError(
                 "SQLite lifecycle operation is not replayable",
-                context={"operation_id": operation_id, "state": row[10]},
+                context={"operation_id": operation_id, "state": row[11]},
             )
 
     def _classify_promoted_mutation(
@@ -1667,7 +1693,8 @@ class SqliteLifecycleAuthority:
             if connection is None:
                 return ()
             rows = connection.execute(
-                "SELECT key, generation, locator, manifest, manifest_digest, lineage, revision "
+                "SELECT key, generation, locator, manifest, manifest_digest, lineage, revision, "
+                "transport_evidence "
                 "FROM entries ORDER BY key"
             ).fetchall()
             return tuple(
@@ -1677,6 +1704,7 @@ class SqliteLifecycleAuthority:
                     row[2],
                     bytes(row[3]),
                     EntryExpectation(row[5], row[6], row[1], row[4]),
+                    None if row[7] is None else bytes(row[7]),
                 )
                 for row in rows
             )
@@ -1754,13 +1782,15 @@ class SqliteLifecycleAuthority:
                     )
                 if cursor is None or cursor.last_key is None:
                     rows = connection.execute(
-                        "SELECT key, generation, locator, manifest, manifest_digest, lineage, revision "
+                        "SELECT key, generation, locator, manifest, manifest_digest, lineage, revision, "
+                        "transport_evidence "
                         "FROM entries ORDER BY key, generation LIMIT ?",
                         (effective_limit + 1,),
                     ).fetchall()
                 else:
                     rows = connection.execute(
-                        "SELECT key, generation, locator, manifest, manifest_digest, lineage, revision "
+                        "SELECT key, generation, locator, manifest, manifest_digest, lineage, revision, "
+                        "transport_evidence "
                         "FROM entries WHERE key > ? OR (key = ? AND generation > ?) "
                         "ORDER BY key, generation LIMIT ?",
                         (
@@ -1782,6 +1812,9 @@ class SqliteLifecycleAuthority:
                             locator=row[2],
                             manifest=bytes(row[3]),
                             expectation=EntryExpectation(row[5], row[6], row[1], row[4]),
+                            transport_evidence=(
+                                None if row[7] is None else bytes(row[7])
+                            ),
                         )
                     except (TypeError, ValueError) as error:
                         raise CacheBlobBackendError(
@@ -1946,10 +1979,22 @@ class SqliteLifecycleAuthority:
                         return receipt
                     if stored == entries[: len(stored)]:
                         for entry in entries[len(stored) :]:
+                            evidence_row = connection.execute(
+                                "SELECT transport_evidence FROM entries "
+                                "WHERE key = ? AND generation = ? AND locator = ? "
+                                "AND manifest_digest = ?",
+                                (
+                                    entry.key,
+                                    entry.generation,
+                                    entry.locator,
+                                    entry.manifest_digest,
+                                ),
+                            ).fetchone()
                             connection.execute(
                                 "INSERT INTO migration_store_entries("
                                 "run_id, selection, key, generation, locator, manifest, manifest_digest, "
-                                "lineage, entry_revision) VALUES (?, 'candidate', ?, ?, ?, ?, ?, 0, ?)",
+                                "lineage, entry_revision, transport_evidence) "
+                                "VALUES (?, 'candidate', ?, ?, ?, ?, ?, 0, ?, ?)",
                                 (
                                     receipt.run_id,
                                     entry.key,
@@ -1958,6 +2003,7 @@ class SqliteLifecycleAuthority:
                                     entry.manifest,
                                     entry.manifest_digest,
                                     receipt.source_revision,
+                                    None if evidence_row is None else evidence_row[0],
                                 ),
                             )
                         connection.execute(
@@ -1975,10 +2021,22 @@ class SqliteLifecycleAuthority:
                     "Migration candidate recording requires an unselected active authority"
                 )
             for entry in entries:
+                evidence_row = connection.execute(
+                    "SELECT transport_evidence FROM entries "
+                    "WHERE key = ? AND generation = ? AND locator = ? "
+                    "AND manifest_digest = ?",
+                    (
+                        entry.key,
+                        entry.generation,
+                        entry.locator,
+                        entry.manifest_digest,
+                    ),
+                ).fetchone()
                 connection.execute(
                     "INSERT INTO migration_store_entries("
                     "run_id, selection, key, generation, locator, manifest, manifest_digest, "
-                    "lineage, entry_revision) VALUES (?, 'candidate', ?, ?, ?, ?, ?, 0, ?)",
+                    "lineage, entry_revision, transport_evidence) "
+                    "VALUES (?, 'candidate', ?, ?, ?, ?, ?, 0, ?, ?)",
                     (
                         receipt.run_id,
                         entry.key,
@@ -1987,6 +2045,7 @@ class SqliteLifecycleAuthority:
                         entry.manifest,
                         entry.manifest_digest,
                         receipt.source_revision,
+                        None if evidence_row is None else evidence_row[0],
                     ),
                 )
             connection.execute(
@@ -2062,7 +2121,7 @@ class SqliteLifecycleAuthority:
                     "Only the exact unactivated migration candidate may be discarded"
                 )
             rows = connection.execute(
-                "SELECT key, generation, locator, manifest, manifest_digest "
+                "SELECT key, generation, locator, manifest, manifest_digest, transport_evidence "
                 "FROM migration_store_entries WHERE run_id = ? AND selection = 'candidate' "
                 "ORDER BY key",
                 (receipt.run_id,),
@@ -2131,29 +2190,34 @@ class SqliteLifecycleAuthority:
                     "Verified migration candidate is not recorded by this authority"
                 )
             candidate_rows = connection.execute(
-                "SELECT key, generation, locator, manifest, manifest_digest "
+                "SELECT key, generation, locator, manifest, manifest_digest, transport_evidence "
                 "FROM migration_store_entries WHERE run_id = ? AND selection = 'candidate' "
                 "ORDER BY key",
                 (receipt.run_id,),
             ).fetchall()
-            stored = self._candidate_entries_from_rows(candidate_rows)
+            stored = self._candidate_entries_from_rows(
+                [row[:5] for row in candidate_rows]
+            )
             if stored != entries:
                 raise CacheBlobLifecycleConflictError(
                     "Recorded migration candidate differs from verified external receipt"
                 )
             current_entries = connection.execute(
-                "SELECT key, generation, locator, manifest, manifest_digest, lineage, revision "
+                "SELECT key, generation, locator, manifest, manifest_digest, lineage, revision, "
+                "transport_evidence "
                 "FROM entries ORDER BY key"
             ).fetchall()
             for prior in current_entries:
                 connection.execute(
                     "INSERT INTO migration_store_entries("
                     "run_id, selection, key, generation, locator, manifest, manifest_digest, "
-                    "lineage, entry_revision) VALUES (?, 'prior', ?, ?, ?, ?, ?, ?, ?)",
+                    "lineage, entry_revision, transport_evidence) "
+                    "VALUES (?, 'prior', ?, ?, ?, ?, ?, ?, ?, ?)",
                     (receipt.run_id, *prior),
                 )
             next_revision = state_row[0] + 1
             connection.execute("DELETE FROM entries")
+            candidate_evidence = {row[0]: row[5] for row in candidate_rows}
             for candidate in entries:
                 previous = connection.execute(
                     "SELECT lineage FROM entry_lineage WHERE key = ?", (candidate.key,)
@@ -2166,7 +2230,7 @@ class SqliteLifecycleAuthority:
                 )
                 connection.execute(
                     "INSERT INTO entries(key, generation, locator, manifest, manifest_digest, "
-                    "lineage, revision) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    "lineage, revision, transport_evidence) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         candidate.key,
                         candidate.generation,
@@ -2175,6 +2239,7 @@ class SqliteLifecycleAuthority:
                         candidate.manifest_digest,
                         lineage,
                         next_revision,
+                        candidate_evidence[candidate.key],
                     ),
                 )
             connection.execute(
@@ -2262,7 +2327,8 @@ class SqliteLifecycleAuthority:
                     "Migration rollback requires the selected offline activation"
                 )
             prior_rows = connection.execute(
-                "SELECT key, generation, locator, manifest, manifest_digest, lineage "
+                "SELECT key, generation, locator, manifest, manifest_digest, lineage, "
+                "transport_evidence "
                 "FROM migration_store_entries WHERE run_id = ? AND selection = 'prior' ORDER BY key",
                 (run_id,),
             ).fetchall()
@@ -2276,8 +2342,8 @@ class SqliteLifecycleAuthority:
                 )
                 connection.execute(
                     "INSERT INTO entries(key, generation, locator, manifest, manifest_digest, "
-                    "lineage, revision) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (*prior, next_revision),
+                    "lineage, revision, transport_evidence) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (*prior[:6], next_revision, prior[6]),
                 )
             connection.execute(
                 "UPDATE authority_state SET revision = ?, projection_dirty = 1, "
@@ -2330,7 +2396,8 @@ class SqliteLifecycleAuthority:
                     "Retained prior entries require the finalized selected migration"
                 )
             rows = connection.execute(
-                "SELECT key, generation, locator, manifest, manifest_digest, lineage, entry_revision "
+                "SELECT key, generation, locator, manifest, manifest_digest, lineage, entry_revision, "
+                "transport_evidence "
                 "FROM migration_store_entries WHERE run_id = ? AND selection = 'prior' "
                 "ORDER BY key, generation",
                 (run_id,),
@@ -2342,6 +2409,7 @@ class SqliteLifecycleAuthority:
                     row[2],
                     bytes(row[3]),
                     EntryExpectation(row[5], row[6], row[1], row[4]),
+                    None if row[7] is None else bytes(row[7]),
                 )
                 for row in rows
             )
@@ -2404,13 +2472,15 @@ class SqliteLifecycleAuthority:
                 )
                 if cursor_identity is None:
                     rows = connection.execute(
-                        "SELECT key, generation, locator, manifest, manifest_digest, lineage, revision "
+                        "SELECT key, generation, locator, manifest, manifest_digest, lineage, revision, "
+                        "transport_evidence "
                         "FROM entries ORDER BY key, generation LIMIT ?",
                         (work_cap + 1,),
                     ).fetchall()
                 else:
                     rows = connection.execute(
-                        "SELECT key, generation, locator, manifest, manifest_digest, lineage, revision "
+                        "SELECT key, generation, locator, manifest, manifest_digest, lineage, revision, "
+                        "transport_evidence "
                         "FROM entries WHERE key > ? OR (key = ? AND generation > ?) "
                         "ORDER BY key, generation LIMIT ?",
                         (
@@ -2427,6 +2497,7 @@ class SqliteLifecycleAuthority:
                         row[2],
                         bytes(row[3]),
                         EntryExpectation(row[5], row[6], row[1], row[4]),
+                        None if row[7] is None else bytes(row[7]),
                     )
                     for row in rows
                 )
@@ -2569,9 +2640,9 @@ class SqliteLifecycleAuthority:
             connection.execute(
                 "INSERT INTO clear_targets("
                 "run_id, key, lineage, entry_revision, generation, locator, manifest, "
-                "manifest_digest, state) "
+                "manifest_digest, transport_evidence, state) "
                 "SELECT ?, key, lineage, revision, generation, locator, manifest, "
-                "manifest_digest, 'pending' FROM entries",
+                "manifest_digest, transport_evidence, 'pending' FROM entries",
                 (token.value,),
             )
             return token
@@ -2590,7 +2661,8 @@ class SqliteLifecycleAuthority:
             if run[0] != "active":
                 return ()
             rows = connection.execute(
-                "SELECT key, generation, locator, manifest, manifest_digest, lineage, entry_revision "
+                "SELECT key, generation, locator, manifest, manifest_digest, lineage, entry_revision, "
+                "transport_evidence "
                 "FROM clear_targets WHERE run_id = ? AND state = 'pending' AND key > ? "
                 "ORDER BY key LIMIT ?",
                 (token.value, run[1], self.lifecycle_limits.manifest_page_size),
@@ -2602,6 +2674,7 @@ class SqliteLifecycleAuthority:
                     row[2],
                     bytes(row[3]),
                     EntryExpectation(row[5], row[6], row[1], row[4]),
+                    None if row[7] is None else bytes(row[7]),
                 )
                 for row in rows
             )

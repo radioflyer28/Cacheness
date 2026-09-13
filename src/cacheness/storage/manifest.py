@@ -71,7 +71,7 @@ MigrationOrRebuildRequired = CacheMigrationOrRebuildRequiredError
 # phase-wide cutover rewires the lifecycle. They are not the current public
 # format contract. These dimensions intentionally vary independently.
 CURRENT_MANIFEST_SCHEMA_VERSION = 3
-CURRENT_SQLITE_USER_VERSION = 8
+CURRENT_SQLITE_USER_VERSION = 9
 CURRENT_STORE_EPOCH = 1
 _CURRENT_MANIFEST_FIELDS = frozenset(
     {

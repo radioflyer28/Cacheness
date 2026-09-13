@@ -266,8 +266,8 @@ def test_sqlite_authority_rejects_malformed_row_values_before_entry_exposure(
     database = _create_database(root)
     connection = sqlite3.connect(database)
     connection.execute(
-        "INSERT INTO entries VALUES (?, ?, ?, ?, ?, ?, ?)",
-        ("bad", "generation", "locator", b"manifest", "0" * 64, -1, 1),
+        "INSERT INTO entries VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        ("bad", "generation", "locator", b"manifest", "0" * 64, -1, 1, None),
     )
     connection.commit()
     connection.close()
