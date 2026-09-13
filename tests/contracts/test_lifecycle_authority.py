@@ -14,7 +14,6 @@ from cacheness.error_handling import (
     CacheBlobLifecycleTimeoutError,
 )
 from cacheness.storage.lifecycle_authority import (
-    EntrySnapshot,
     EntryExpectation,
     MutationSpec,
     VerificationProof,
