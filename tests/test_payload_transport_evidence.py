@@ -105,6 +105,48 @@ def test_malformed_or_unknown_evidence_is_rejected_before_verification(raw: byte
         PayloadTransportEvidence.from_canonical_bytes(raw)
 
 
+@pytest.mark.parametrize(
+    "noncanonical_bytes",
+    (
+        lambda canonical: b" " + canonical,
+        lambda canonical: canonical + b"\n",
+        lambda canonical: json.dumps(
+            dict(reversed(tuple(json.loads(canonical).items()))),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8"),
+        lambda canonical: canonical.replace(b"/", br"\/", 1),
+        lambda canonical: json.dumps(
+            json.loads(canonical),
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8"),
+    ),
+    ids=(
+        "leading-whitespace",
+        "trailing-whitespace",
+        "reordered-fields",
+        "escaped-slash",
+        "escaped-unicode",
+    ),
+)
+def test_noncanonical_transport_evidence_bytes_are_rejected(
+    noncanonical_bytes: Callable[[bytes], bytes],
+) -> None:
+    """Equivalent alternate JSON bytes cannot cross the canonical parser boundary."""
+    evidence = _issue(
+        PayloadTransportObservation(e_tag='"opaque-étag"', byte_size=17, version=None)
+    )
+    canonical = evidence.canonical_bytes()
+    altered = noncanonical_bytes(canonical)
+
+    assert altered != canonical
+    assert json.loads(altered) == json.loads(canonical)
+    with pytest.raises(CacheManifestIntegrityError, match="canonical"):
+        PayloadTransportEvidence.from_canonical_bytes(altered)
+
+
 def test_observation_rejects_oversized_text_and_invalid_size() -> None:
     """Untrusted metadata is bounded before it reaches authenticated encoding."""
     with pytest.raises(CacheManifestIntegrityError):

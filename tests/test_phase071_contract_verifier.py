@@ -96,6 +96,21 @@ def test_source_mutation_cannot_drop_a_reviewed_plan_or_threat() -> None:
     assert verifier.validate_fixed_manifest(REPOSITORY_ROOT)
 
 
+def test_evidence_parser_threat_runs_every_fail_closed_parser_contract() -> None:
+    """T-07.1-05-02 cannot be satisfied by unrelated opaque-ETag evidence."""
+    verifier = _load_verifier()
+
+    assert verifier.THREAT_NODES["T-07.1-05-02"] == (
+        "tests/test_payload_transport_evidence.py::test_tampered_evidence_fails_closed",
+        "tests/test_payload_transport_evidence.py::test_malformed_or_unknown_evidence_is_rejected_before_verification",
+        "tests/test_payload_transport_evidence.py::test_noncanonical_transport_evidence_bytes_are_rejected",
+    )
+    assert (
+        "tests/test_payload_transport_evidence.py::test_opaque_etag_is_preserved_without_digest_interpretation"
+        in verifier.THREAT_NODES["T-07.1-07-02"]
+    )
+
+
 @pytest.mark.parametrize(
     ("source", "filename", "expected"),
     [

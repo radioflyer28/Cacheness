@@ -177,7 +177,9 @@ _REVIEWED_THREAT_NODES = {
         "tests/test_payload_transport_evidence.py::test_signed_observation_verifies_only_for_its_exact_immutable_identity",
     ),
     "T-07.1-05-02": (
-        "tests/test_payload_transport_evidence.py::test_opaque_etag_is_preserved_without_digest_interpretation",
+        "tests/test_payload_transport_evidence.py::test_tampered_evidence_fails_closed",
+        "tests/test_payload_transport_evidence.py::test_malformed_or_unknown_evidence_is_rejected_before_verification",
+        "tests/test_payload_transport_evidence.py::test_noncanonical_transport_evidence_bytes_are_rejected",
     ),
     "T-07.1-05-03": (
         "tests/test_payload_transport_evidence.py::test_transport_comparison_cannot_claim_canonical_payload_verification",
@@ -208,6 +210,7 @@ _REVIEWED_THREAT_NODES = {
     ),
     "T-07.1-07-02": (
         "tests/test_blob_store_read_contract.py::test_transport_comparison_matches_one_committed_generation_without_reading",
+        "tests/test_payload_transport_evidence.py::test_opaque_etag_is_preserved_without_digest_interpretation",
     ),
     "T-07.1-07-03": (
         "tests/test_blob_store_read_contract.py::test_transport_comparison_match_never_bypasses_canonical_read_verification",
