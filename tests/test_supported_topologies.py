@@ -23,6 +23,8 @@ from cacheness.error_handling import CacheBlobBackendError
 
 def test_memory_profile_resolves_before_the_public_store_round_trip(tmp_path) -> None:
     """The supported memory pair uses the existing lifecycle engine unchanged."""
+    from cacheness.storage.obstore_generation_io import ObstoreGenerationIO
+
     topology = StoreTopology(
         payload=BackendRef(name="memory"),
         authority=BackendRef(name="memory"),
@@ -37,6 +39,7 @@ def test_memory_profile_resolves_before_the_public_store_round_trip(tmp_path) ->
 
     with BlobStore(topology, cache_dir=tmp_path / "memory-store") as store:
         assert isinstance(store.lifecycle, AuthorityLifecycleEngine)
+        assert type(store.payload_backend) is ObstoreGenerationIO
         assert store.topology.qualified_profile is profile
         assert store.put({"answer": 42}, key="answer") == "answer"
         assert store.get("answer") == {"answer": 42}

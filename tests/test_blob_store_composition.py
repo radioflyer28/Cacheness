@@ -324,6 +324,72 @@ def test_direct_blob_store_uses_no_legacy_metadata_selector() -> None:
         assert forbidden not in source
 
 
+def test_builtin_payload_factories_materialize_one_obstore_provider(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Named payloads select the shared adapter without changing role identity."""
+    from cacheness.storage.obstore_generation_io import ObstoreGenerationIO
+
+    composition = _composition()
+    registry = composition.RoleRegistry()
+    memory = registry.construct("payload", "memory", {})
+    filesystem = registry.construct(
+        "payload", "filesystem", {"base_dir": tmp_path / "filesystem-payload"}
+    )
+
+    assert type(memory) is ObstoreGenerationIO
+    assert type(filesystem) is ObstoreGenerationIO
+    assert memory.qualification_identity == "memory"
+    assert filesystem.qualification_identity == "filesystem"
+
+    constructed: dict[str, object] = {}
+    sentinel = object()
+
+    def construct_s3(**options: object) -> object:
+        constructed.update(options)
+        return sentinel
+
+    monkeypatch.setattr(composition.ObstoreGenerationIO, "for_s3", construct_s3)
+    assert registry.construct(
+        "payload",
+        "s3",
+        {
+            "bucket": "test-bucket",
+            "prefix": "cacheness/test",
+            "region": "us-east-1",
+            "handler_root": tmp_path / "s3-handler",
+        },
+    ) is sentinel
+    assert constructed == {
+        "bucket": "test-bucket",
+        "prefix": "cacheness/test",
+        "region": "us-east-1",
+        "handler_root": tmp_path / "s3-handler",
+    }
+
+    memory.close()
+    filesystem.close()
+
+
+def test_builtin_payload_composition_has_no_legacy_transport_factory_imports() -> None:
+    """Built-in role construction has no backend selector or boto3 escape hatch."""
+    module = ast.parse(
+        (REPOSITORY_ROOT / "src/cacheness/storage/composition.py").read_text(
+            encoding="utf-8"
+        )
+    )
+    imported_modules = {
+        node.module
+        for node in ast.walk(module)
+        if isinstance(node, ast.ImportFrom) and node.module is not None
+    }
+
+    assert not {
+        "backends.blob_backends",
+        "backends.s3_backend",
+    } & imported_modules
+
+
 def test_memory_tracer_uses_registered_same_process_participants(tmp_path: Path) -> None:
     """The first direct BlobStore slice keeps committed memory bytes in-process."""
     from cacheness.storage.blob_store import BlobStore

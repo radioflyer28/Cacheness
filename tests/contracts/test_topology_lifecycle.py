@@ -163,6 +163,7 @@ def test_local_reference_profiles_share_the_same_engine(
     store = BlobStore(topology, cache_dir=tmp_path / profile)
     try:
         assert type(store.lifecycle) is AuthorityLifecycleEngine
+        assert type(store.payload_backend) is ObstoreGenerationIO
         assert store.put({"generation": "one"}, key="profile-key") == "profile-key"
         assert store.get("profile-key") == {"generation": "one"}
         assert store.put({"generation": "two"}, key="profile-key") == "profile-key"
