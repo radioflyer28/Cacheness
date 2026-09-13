@@ -93,13 +93,16 @@ class _McapHandler:
 class _RecordingStore:
     """Record exact SDK calls while forwarding to one real obstore store."""
 
-    def __init__(self, store: object) -> None:
+    def __init__(self, store: object, *, allow_list: bool = False) -> None:
         self.store = store
         self.calls: list[tuple[str, str]] = []
+        self.put_options: list[dict[str, object]] = []
         self.list_calls = 0
+        self.allow_list = allow_list
 
     def put(self, locator: str, source: object, **kwargs: object) -> object:
         self.calls.append(("put", locator))
+        self.put_options.append(dict(kwargs))
         return self.store.put(locator, source, **kwargs)
 
     def get(self, locator: str) -> object:
@@ -115,9 +118,10 @@ class _RecordingStore:
         return self.store.delete(locators)
 
     def list(self, *args: object, **kwargs: object) -> object:
-        del args, kwargs
         self.list_calls += 1
-        raise AssertionError("generation mechanics must not use listings as authority")
+        if not self.allow_list:
+            raise AssertionError("generation mechanics must not use listings as authority")
+        return self.store.list(*args, **kwargs)
 
 
 class _AcceptedThenRaisedStore(_RecordingStore):
@@ -209,7 +213,7 @@ def moto_s3_provider(
         region=_S3_REGION,
         handler_root=handler_root,
         endpoint=endpoint_url,
-        allow_test_endpoint=True,
+        _allow_test_endpoint=True,
     )
     try:
         yield provider, client
@@ -568,8 +572,11 @@ def test_mocked_s3_collision_and_lost_create_response_settle_only_by_exact_objec
     "invalid_options",
     (
         {"bucket": ""},
+        {"bucket": "bucket/escape"},
         {"region": ""},
+        {"prefix": "../escape"},
         {"endpoint": "https://objects.example.test"},
+        {"endpoint": "http://127.0.0.1:not-a-port"},
         {"expected_bucket_owner": "123456789012"},
     ),
 )
@@ -602,7 +609,7 @@ def test_mocked_s3_enforces_direct_put_bounds_and_preserves_exact_maintenance_sc
     locator = Path("generations") / "mocked-s3" / "bounded.mcap"
     other_key = "contract/s3/generations/mock-scope/unrelated.mcap"
     client.put_object(Bucket=_S3_BUCKET, Key=other_key, Body=b"unrelated")
-    wrapped = _RecordingStore(provider._store)
+    wrapped = _RecordingStore(provider._store, allow_list=True)
     provider._store = wrapped
     provider.max_upload_bytes = 1
 
@@ -615,10 +622,23 @@ def test_mocked_s3_enforces_direct_put_bounds_and_preserves_exact_maintenance_sc
         provider.max_upload_bytes = 128 * 1024 * 1024
         with provider.stage(handler, _McapRecord(b"exact"), config=None) as staged:
             provider.publish_generation(staged, locator)
+        assert wrapped.put_options == [{"mode": "create", "use_multipart": False}]
+        actual_head = wrapped.head
+
+        def opaque_head(_locator: str) -> dict[str, object]:
+            return {
+                "size": len(b"MCAP\x00exact"),
+                "e_tag": '"multipart-looking-opaque-7"',
+                "version": "opaque-version",
+            }
+
+        wrapped.head = opaque_head
         evidence = provider.head_generation(locator)
         assert evidence.byte_size == len(b"MCAP\x00exact")
-        assert evidence.e_tag is not None
+        assert evidence.e_tag == '"multipart-looking-opaque-7"'
+        assert evidence.version == "opaque-version"
         assert not hasattr(evidence, "digest")
+        wrapped.head = actual_head
 
         page = provider.inventory_page(max_objects=1)
         assert page.objects

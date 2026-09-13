@@ -7,8 +7,9 @@ replay, and cleanup debt.
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass
 import hashlib
 from pathlib import Path, PurePosixPath
 import re
@@ -36,7 +37,26 @@ from .guarded_handler_io import GuardedHandlerIO, GuardedStagedArtifact
 
 
 DEFAULT_MAX_TRANSFER_BYTES = 128 * 1024 * 1024
+DEFAULT_MAX_INVENTORY_OBJECTS = 1_000
 _LOCATOR_SEGMENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,255}\Z")
+
+
+@dataclass(frozen=True)
+class ObstoreObjectEvidence:
+    """One exact opaque object observation below the participant boundary."""
+
+    locator: str
+    byte_size: int
+    e_tag: str | None
+    version: str | None
+
+
+@dataclass(frozen=True)
+class ObstoreInventoryPage:
+    """One bounded report-only object inventory page."""
+
+    objects: tuple[ObstoreObjectEvidence, ...]
+    next_offset: str | None
 
 
 class ObstoreGenerationIO:
@@ -59,6 +79,8 @@ class ObstoreGenerationIO:
         qualification_identity: str,
         max_upload_bytes: int = DEFAULT_MAX_TRANSFER_BYTES,
         max_download_bytes: int = DEFAULT_MAX_TRANSFER_BYTES,
+        max_inventory_objects: int = DEFAULT_MAX_INVENTORY_OBJECTS,
+        max_inventory_bytes: int = DEFAULT_MAX_TRANSFER_BYTES,
     ) -> None:
         for method in ("put", "get", "head", "delete"):
             if not callable(getattr(store, method, None)):
@@ -73,6 +95,12 @@ class ObstoreGenerationIO:
         self.max_upload_bytes = self._transfer_limit(max_upload_bytes, "max_upload_bytes")
         self.max_download_bytes = self._transfer_limit(
             max_download_bytes, "max_download_bytes"
+        )
+        self.max_inventory_objects = self._transfer_limit(
+            max_inventory_objects, "max_inventory_objects"
+        )
+        self.max_inventory_bytes = self._transfer_limit(
+            max_inventory_bytes, "max_inventory_bytes"
         )
         self._closed = False
         if qualification_identity == "filesystem":
@@ -101,10 +129,13 @@ class ObstoreGenerationIO:
         region: str,
         handler_root: Path | str,
         endpoint: str | None = None,
-        allow_test_endpoint: bool = False,
+        _allow_test_endpoint: bool = False,
+        expected_bucket_owner: object | None = None,
         max_sdk_retries: int = 1,
         max_upload_bytes: int = DEFAULT_MAX_TRANSFER_BYTES,
         max_download_bytes: int = DEFAULT_MAX_TRANSFER_BYTES,
+        max_inventory_objects: int = DEFAULT_MAX_INVENTORY_OBJECTS,
+        max_inventory_bytes: int = DEFAULT_MAX_TRANSFER_BYTES,
     ) -> "ObstoreGenerationIO":
         """Build the shared participant for explicitly configured Amazon S3.
 
@@ -113,34 +144,39 @@ class ObstoreGenerationIO:
         compatible object stores cannot inherit Amazon S3 qualification.
         """
 
-        if not isinstance(bucket, str) or not bucket.strip():
+        if not isinstance(bucket, str) or not bucket.strip() or "/" in bucket:
             raise CacheConfigurationError("S3 bucket must be a non-empty string")
-        if not isinstance(region, str) or not region.strip():
+        if not isinstance(region, str) or not region.strip() or any(
+            character.isspace() for character in region
+        ):
             raise CacheConfigurationError("S3 region must be a non-empty string")
-        if not isinstance(prefix, str) or not prefix.strip("/"):
-            raise CacheConfigurationError("S3 prefix must be a non-empty string")
+        prefix = cls._validated_s3_prefix(prefix)
+        if expected_bucket_owner is not None:
+            raise CacheConfigurationError(
+                "expected_bucket_owner is unsupported by the obstore S3 participant"
+            )
         if type(max_sdk_retries) is not int or not 0 <= max_sdk_retries <= 3:
             raise CacheConfigurationError(
                 "S3 max_sdk_retries must be an integer between zero and three"
             )
-        if not isinstance(allow_test_endpoint, bool):
-            raise CacheConfigurationError("allow_test_endpoint must be a boolean")
+        if not isinstance(_allow_test_endpoint, bool):
+            raise CacheConfigurationError("_allow_test_endpoint must be a boolean")
 
         store_kwargs: dict[str, Any] = {
-            "prefix": prefix.strip("/"),
+            "prefix": prefix,
             "config": {"region": region.strip(), "conditional_put": "etag"},
             "retry_config": {"max_retries": max_sdk_retries},
         }
         if endpoint is not None:
-            if not allow_test_endpoint or not cls._is_loopback_moto_endpoint(endpoint):
+            if not _allow_test_endpoint or not cls._is_loopback_moto_endpoint(endpoint):
                 raise CacheConfigurationError(
                     "S3 endpoint overrides are allowed only for an explicit loopback moto test"
                 )
             store_kwargs["endpoint"] = endpoint
             store_kwargs["allow_http"] = True
-        elif allow_test_endpoint:
+        elif _allow_test_endpoint:
             raise CacheConfigurationError(
-                "allow_test_endpoint requires an explicit loopback moto endpoint"
+                "_allow_test_endpoint requires an explicit loopback moto endpoint"
             )
 
         from obstore.store import S3Store
@@ -151,6 +187,8 @@ class ObstoreGenerationIO:
             qualification_identity="s3",
             max_upload_bytes=max_upload_bytes,
             max_download_bytes=max_download_bytes,
+            max_inventory_objects=max_inventory_objects,
+            max_inventory_bytes=max_inventory_bytes,
         )
 
     @staticmethod
@@ -159,12 +197,31 @@ class ObstoreGenerationIO:
 
         if not isinstance(endpoint, str) or not endpoint:
             return False
-        parsed = urlparse(endpoint)
-        return (
-            parsed.scheme == "http"
-            and parsed.hostname in {"127.0.0.1", "localhost"}
-            and parsed.port is not None
-        )
+        try:
+            parsed = urlparse(endpoint)
+            return (
+                parsed.scheme == "http"
+                and parsed.hostname in {"127.0.0.1", "localhost"}
+                and parsed.port is not None
+            )
+        except ValueError:
+            return False
+
+    @staticmethod
+    def _validated_s3_prefix(prefix: object) -> str:
+        """Normalize one contained S3 namespace before SDK construction."""
+
+        if not isinstance(prefix, str):
+            raise CacheConfigurationError("S3 prefix must be a non-empty string")
+        text = prefix.strip("/")
+        if not text or "\\" in text or "//" in text:
+            raise CacheConfigurationError("S3 prefix must be a contained canonical path")
+        if any(
+            part in {"", ".", ".."} or not _LOCATOR_SEGMENT.fullmatch(part)
+            for part in text.split("/")
+        ):
+            raise CacheConfigurationError("S3 prefix must be a contained canonical path")
+        return text
 
     @staticmethod
     def _transfer_limit(value: int, field_name: str) -> int:
@@ -319,6 +376,95 @@ class ObstoreGenerationIO:
             context={"operation": "obstore.delete", "stage": "head"},
         )
 
+    def head_generation(self, locator: Path | str) -> ObstoreObjectEvidence:
+        """Observe one exact object without treating it as lifecycle visibility."""
+
+        self._require_open()
+        locator_text = self._validated_locator(locator)
+        try:
+            metadata = self._store.head(locator_text)
+        except (NotFoundError, FileNotFoundError) as error:
+            raise FileNotFoundError("Obstore generation is absent") from error
+        except (ObstoreError, OSError, TypeError, ValueError) as error:
+            raise CacheBlobBackendError(
+                "Obstore generation metadata request failed",
+                context={"operation": "obstore.head", "stage": "head"},
+            ) from error
+        return self._object_evidence(locator_text, metadata, operation="obstore.head")
+
+    def inventory_page(
+        self,
+        continuation: str | None = None,
+        *,
+        max_objects: int | None = None,
+    ) -> ObstoreInventoryPage:
+        """Return one bounded report-only page beneath ``generations/``.
+
+        The continuation remains an opaque transport cursor.  Callers may use
+        the observed entries as maintenance evidence only; neither inventory
+        nor object presence selects catalog membership or visibility.
+        """
+
+        self._require_open()
+        if not callable(getattr(self._store, "list", None)):
+            raise CacheBlobBackendError(
+                "Obstore participant does not support bounded inventory",
+                context={"operation": "obstore.inventory", "stage": "list"},
+            )
+        if continuation is not None:
+            continuation = self._validated_locator(continuation)
+        limit = self.max_inventory_objects if max_objects is None else self._transfer_limit(
+            max_objects, "max_objects"
+        )
+        if limit > self.max_inventory_objects:
+            raise CacheBlobBackendError(
+                "Obstore inventory request exceeds configured object bound",
+                context={"operation": "obstore.inventory", "stage": "budget"},
+            )
+        try:
+            batches = iter(
+                self._store.list(
+                    "generations/",
+                    offset=continuation,
+                    chunk_size=limit,
+                )
+            )
+            raw_objects = next(batches, ())
+        except (ObstoreError, OSError, TypeError, ValueError) as error:
+            raise CacheBlobBackendError(
+                "Obstore bounded inventory request failed",
+                context={"operation": "obstore.inventory", "stage": "list"},
+            ) from error
+        if not isinstance(raw_objects, Sequence) or isinstance(
+            raw_objects, (str, bytes, bytearray)
+        ):
+            raise CacheBlobBackendError(
+                "Obstore inventory response is malformed",
+                context={"operation": "obstore.inventory", "stage": "response"},
+            )
+        if len(raw_objects) > limit:
+            raise CacheBlobBackendError(
+                "Obstore inventory response exceeds its object bound",
+                context={"operation": "obstore.inventory", "stage": "response"},
+            )
+        observations = tuple(
+            self._object_evidence(
+                self._validated_locator(item.get("path"))
+                if isinstance(item, Mapping)
+                else "",
+                item,
+                operation="obstore.inventory",
+            )
+            for item in raw_objects
+        )
+        if sum(item.byte_size for item in observations) > self.max_inventory_bytes:
+            raise CacheBlobBackendError(
+                "Obstore inventory response exceeds its byte bound",
+                context={"operation": "obstore.inventory", "stage": "response"},
+            )
+        next_offset = observations[-1].locator if len(observations) == limit else None
+        return ObstoreInventoryPage(observations, next_offset)
+
     def _settle_ambiguous_publication(
         self,
         staged: GuardedStagedArtifact,
@@ -362,6 +508,40 @@ class ObstoreGenerationIO:
                 "Ambiguous immutable publication disagrees with staged identity"
             ) from publication_error
         return dict(metadata)
+
+    @staticmethod
+    def _object_evidence(
+        locator: str,
+        metadata: object,
+        *,
+        operation: str,
+    ) -> ObstoreObjectEvidence:
+        """Validate one opaque transport observation without parsing an ETag."""
+
+        if not isinstance(metadata, Mapping) or type(metadata.get("size")) is not int:
+            raise CacheBlobBackendError(
+                "Obstore generation metadata lacks a valid byte size",
+                context={"operation": operation, "stage": "response"},
+            )
+        byte_size = metadata["size"]
+        if byte_size < 0:
+            raise CacheBlobBackendError(
+                "Obstore generation metadata has a negative byte size",
+                context={"operation": operation, "stage": "response"},
+            )
+        e_tag = metadata.get("e_tag")
+        version = metadata.get("version")
+        if e_tag is not None and not isinstance(e_tag, str):
+            raise CacheBlobBackendError(
+                "Obstore generation metadata has an invalid ETag",
+                context={"operation": operation, "stage": "response"},
+            )
+        if version is not None and not isinstance(version, str):
+            raise CacheBlobBackendError(
+                "Obstore generation metadata has an invalid version",
+                context={"operation": operation, "stage": "response"},
+            )
+        return ObstoreObjectEvidence(locator, byte_size, e_tag, version)
 
     @staticmethod
     def _staged_digest(staged: GuardedStagedArtifact, expected_size: int) -> str:
@@ -484,4 +664,10 @@ class ObstoreGenerationIO:
         return text
 
 
-__all__ = ["DEFAULT_MAX_TRANSFER_BYTES", "ObstoreGenerationIO"]
+__all__ = [
+    "DEFAULT_MAX_INVENTORY_OBJECTS",
+    "DEFAULT_MAX_TRANSFER_BYTES",
+    "ObstoreGenerationIO",
+    "ObstoreInventoryPage",
+    "ObstoreObjectEvidence",
+]
