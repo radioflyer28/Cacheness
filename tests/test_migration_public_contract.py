@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import ast
+import importlib.util
 import inspect
 import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 
 import numpy as np
 
@@ -60,6 +63,30 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PHASE_DIRECTORY = PROJECT_ROOT / ".planning/phases/07-explicit-migration-and-rebuild-cutover"
 API_COVERAGE_RESULT_START = "<!-- phase7-api-coverage:detector-result:start -->\n```json\n"
 API_COVERAGE_RESULT_END = "\n```\n<!-- phase7-api-coverage:detector-result:end -->"
+LEGACY_PAYLOAD_SYMBOLS = frozenset(
+    {
+        "BlobBackend",
+        "FilesystemBlobBackend",
+        "InMemoryBlobBackend",
+        "InMemoryHandlerIO",
+        "S3BlobBackend",
+        "_S3GenerationIO",
+        "BOTO3_AVAILABLE",
+        "register_blob_backend",
+        "unregister_blob_backend",
+        "get_blob_backend",
+        "list_blob_backends",
+        "write_blob",
+        "read_blob",
+        "delete_blob",
+        "write_blob_stream",
+        "read_blob_stream",
+    }
+)
+LEGACY_PAYLOAD_MODULES = (
+    "cacheness.storage.backends.blob_backends",
+    "cacheness.storage.backends.s3_backend",
+)
 
 
 def _phase7_detector_scope() -> str:
@@ -256,7 +283,6 @@ def test_external_api_coverage_declaration_is_detector_backed() -> None:
     assert "No external API integration:" in normalized_coverage
     for required_reference in (
         "PostgresqlLifecycleAuthority",
-        "S3BlobBackend",
         "tests/contracts/test_postgresql_lifecycle_authority.py",
         "tests/test_migration_remote_contract.py",
         "tests/test_s3_blob_backend.py",
@@ -267,3 +293,68 @@ def test_external_api_coverage_declaration_is_detector_backed() -> None:
     assert "| capability | decision | reason |" not in coverage
     assert "qualifies live PostgreSQL/AWS S3" not in coverage
     assert "supports live PostgreSQL/AWS S3" not in coverage
+
+
+def test_payload_cutover_removes_legacy_runtime_mechanics_and_exports() -> None:
+    """Only the obstore participant remains beneath the storage lifecycle seam."""
+    source_root = PROJECT_ROOT / "src" / "cacheness"
+    defined_or_imported: set[str] = set()
+    imported_modules: set[str] = set()
+    source_text = ""
+
+    for source_path in source_root.rglob("*.py"):
+        text = source_path.read_text(encoding="utf-8")
+        source_text += text
+        tree = ast.parse(text, filename=str(source_path))
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                defined_or_imported.add(node.name)
+            elif isinstance(node, ast.Import):
+                imported_modules.update(alias.name for alias in node.names)
+                defined_or_imported.update(
+                    alias.asname or alias.name.rsplit(".", 1)[-1]
+                    for alias in node.names
+                )
+            elif isinstance(node, ast.ImportFrom) and node.module is not None:
+                imported_modules.add(node.module)
+                defined_or_imported.update(alias.asname or alias.name for alias in node.names)
+
+    assert LEGACY_PAYLOAD_SYMBOLS.isdisjoint(defined_or_imported)
+    assert not any(
+        module == "boto3"
+        or module.startswith("boto3.")
+        or module == "botocore"
+        or module.startswith("botocore.")
+        for module in imported_modules
+    )
+    assert "multipart" not in source_text.lower()
+    assert all(importlib.util.find_spec(module) is None for module in LEGACY_PAYLOAD_MODULES)
+
+    script = """
+import sys
+import cacheness.storage as storage
+import cacheness.storage.backends as backends
+
+legacy = {
+    "BlobBackend", "FilesystemBlobBackend", "InMemoryBlobBackend",
+    "InMemoryHandlerIO", "S3BlobBackend", "BOTO3_AVAILABLE",
+}
+assert legacy.isdisjoint(storage.__all__)
+assert legacy.isdisjoint(backends.__all__)
+assert all(not hasattr(storage, name) for name in legacy)
+assert all(not hasattr(backends, name) for name in legacy)
+assert "boto3" not in sys.modules
+assert "botocore" not in sys.modules
+assert storage.ObstoreGenerationIO is not None
+assert backends.PostgresqlLifecycleAuthority is not None
+"""
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = os.pathsep.join(part for part in sys.path if part)
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+    assert completed.returncode == 0, completed.stderr
