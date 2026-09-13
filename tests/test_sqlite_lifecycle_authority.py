@@ -17,7 +17,11 @@ from cacheness.error_handling import (
     CacheBlobMigrationRequiredError,
     CacheBlobStoreClosedError,
 )
-from cacheness.storage.lifecycle_authority import EntryExpectation, MutationSpec
+from cacheness.storage.lifecycle_authority import (
+    EntryExpectation,
+    MutationSpec,
+    VerificationProof,
+)
 from cacheness.storage.sqlite_lifecycle_authority import (
     AUTHORITY_RELATIVE_PATH,
     SQLITE_APPLICATION_ID,
@@ -79,6 +83,54 @@ def test_sqlite_authority_reads_back_required_pragmas_and_identity(
     assert len(diagnostics["store_identity"]) == 32
     assert diagnostics["integrity_check"] == ("ok",)
     assert diagnostics["foreign_key_check"] == ()
+
+
+def test_sqlite_authority_reopens_exact_transport_evidence(tmp_path: Path) -> None:
+    """One verified proof keeps its signed transport bytes through reopen and replay."""
+    root = tmp_path / "transport-evidence"
+    authority = SqliteLifecycleAuthority.for_root(root)
+    spec = _spec("transport-evidence-operation")
+    proof = VerificationProof(
+        "a" * 64,
+        len(spec.manifest),
+        spec.manifest,
+        b"signed-transport-evidence",
+    )
+    prepared = authority.prepare_mutation(spec)
+    authority.record_verification(prepared, proof)
+    promoted = authority.promote_mutation(prepared)
+    authority.close()
+
+    reopened = SqliteLifecycleAuthority.for_root(root)
+    try:
+        entry = reopened.read_entry(spec.key)
+        replay = reopened.read_mutation(spec.operation_id)
+
+        assert entry is not None
+        assert entry.transport_evidence == proof.transport_evidence
+        assert replay is not None
+        assert replay.verification == proof
+        assert replay.promotion == promoted
+    finally:
+        reopened.close()
+
+
+def test_sqlite_schema_eight_requires_explicit_offline_migration(
+    tmp_path: Path,
+) -> None:
+    """An older development authority remains untouched by an ordinary open."""
+    root = tmp_path / "schema-eight"
+    database = _create_database(root)
+    connection = sqlite3.connect(database)
+    connection.execute("PRAGMA user_version = 8")
+    connection.commit()
+    connection.close()
+    before = database.read_bytes()
+
+    with pytest.raises(CacheBlobMigrationRequiredError):
+        SqliteLifecycleAuthority.for_root(root).read_entry("authority-key")
+
+    assert database.read_bytes() == before
 
 
 @pytest.mark.parametrize("change", ("application_id", "future_version"))

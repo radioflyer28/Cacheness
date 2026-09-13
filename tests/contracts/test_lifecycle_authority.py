@@ -139,7 +139,12 @@ def test_local_authorities_expose_exact_operation_replay_without_new_authority_s
         expected=EntryExpectation.absent(),
         manifest=b"replay-manifest",
     )
-    proof = VerificationProof("b" * 64, 7, spec.manifest)
+    proof = VerificationProof(
+        "b" * 64,
+        7,
+        spec.manifest,
+        b"signed-transport-evidence",
+    )
     try:
         assert authority.read_mutation(spec.operation_id) is None
 
@@ -171,6 +176,7 @@ def test_local_authorities_expose_exact_operation_replay_without_new_authority_s
         assert replayed.state == "promoted"
         assert replayed.verification == proof
         assert replayed.promotion == promoted
+        assert replayed.promotion.entry.transport_evidence == proof.transport_evidence
         assert authority.snapshot_state() == promoted_state
 
         with pytest.raises(CacheBlobLifecycleConflictError):
