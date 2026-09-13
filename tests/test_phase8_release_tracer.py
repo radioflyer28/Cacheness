@@ -186,7 +186,13 @@ def test_non_passing_terminal_states_are_truthful_but_not_qualification() -> Non
         assert not evidence.is_qualification_evidence(envelope, "deterministic")
 
 
-def test_evidence_rejects_terminal_state_and_claim_category_contradictions() -> None:
+@pytest.mark.parametrize(
+    ("claim", "state"),
+    [("performance", "EVIDENCED"), ("progress", "DIAGNOSTIC")],
+)
+def test_evidence_rejects_terminal_state_and_claim_category_contradictions(
+    claim: str, state: str
+) -> None:
     """A PASS cannot relabel a benchmark or contention result as a lifecycle claim."""
     evidence = _load_evidence()
     payload = {
@@ -195,8 +201,8 @@ def test_evidence_rejects_terminal_state_and_claim_category_contradictions() -> 
         "claim_categories": {
             "integrity": "EVIDENCED",
             "recovery": "EVIDENCED",
-            "progress": "EVIDENCED",
-            "performance": "EVIDENCED",
+            "progress": "EVIDENCED" if claim != "progress" else state,
+            "performance": "NOT_QUALIFIED" if claim != "performance" else state,
         },
         "non_qualifying_classes": [
             evidence_class
@@ -206,7 +212,7 @@ def test_evidence_rejects_terminal_state_and_claim_category_contradictions() -> 
         "subjects": list(evidence.QUALIFIED_SUBJECTS),
     }
 
-    with pytest.raises(evidence.EvidenceValidationError, match="performance"):
+    with pytest.raises(evidence.EvidenceValidationError):
         evidence.make_envelope(
             evidence_class="deterministic",
             status="PASS",
@@ -293,10 +299,91 @@ def test_evidence_rejects_unknown_keys_and_contradictory_canonical_json(
     value = envelope.to_mapping()
     mutate(value)
     path = tmp_path / "evidence.json"
-    path.write_text(json.dumps(value, sort_keys=True), encoding="utf-8")
+    path.write_text(
+        json.dumps(value, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+        + "\n",
+        encoding="utf-8",
+    )
 
     with pytest.raises(evidence.EvidenceValidationError):
         evidence.load_envelope(path)
+
+
+def test_evidence_rejects_duplicate_unsafe_and_oversized_file_inputs(
+    tmp_path: Path,
+) -> None:
+    """Evidence loading bounds hostile bytes before later release tooling inspects them."""
+    evidence = _load_evidence()
+    envelope = evidence.make_envelope(
+        evidence_class="deterministic",
+        status="PASS",
+        revision="a" * 40,
+        source_digest="b" * 64,
+        generated_at_utc="2026-09-13T00:00:00+00:00",
+        payload={
+            "command": ["tools/verify_phase071_contracts.py", "--all"],
+            "result": "passed",
+            "claim_categories": {
+                "integrity": "EVIDENCED",
+                "recovery": "EVIDENCED",
+                "progress": "EVIDENCED",
+                "performance": "NOT_QUALIFIED",
+            },
+            "non_qualifying_classes": [
+                evidence_class
+                for evidence_class in evidence.EVIDENCE_CLASSES
+                if evidence_class != "deterministic"
+            ],
+            "subjects": list(evidence.QUALIFIED_SUBJECTS),
+        },
+    )
+    canonical = json.dumps(
+        envelope.to_mapping(), ensure_ascii=True, separators=(",", ":"), sort_keys=True
+    ).encode("utf-8") + b"\n"
+
+    duplicate = tmp_path / "duplicate.json"
+    duplicate.write_bytes(
+        canonical.replace(
+            b'"revision":', b'"revision":"c"' * 40 + b',"revision":', 1
+        )
+    )
+    unsafe = tmp_path / "unsafe.json"
+    unsafe.write_bytes(canonical.replace(b"BlobStore", b"password!", 1))
+    oversized = tmp_path / "oversized.json"
+    oversized.write_bytes(b"x" * (evidence.MAX_EVIDENCE_BYTES + 1))
+
+    for path in (duplicate, unsafe, oversized):
+        with pytest.raises(evidence.EvidenceValidationError):
+            evidence.load_envelope(path)
+
+
+def test_unavailable_evidence_rejects_a_non_unavailable_claim() -> None:
+    """Missing prerequisites cannot silently become a partial claim."""
+    evidence = _load_evidence()
+
+    with pytest.raises(evidence.EvidenceValidationError):
+        evidence.make_envelope(
+            evidence_class="deterministic",
+            status="UNAVAILABLE",
+            revision="a" * 40,
+            source_digest="b" * 64,
+            payload={
+                "command": ["tools/verify_phase071_contracts.py", "--all"],
+                "result": "unavailable",
+                "claim_categories": {
+                    "integrity": "UNAVAILABLE",
+                    "recovery": "UNAVAILABLE",
+                    "progress": "NOT_QUALIFIED",
+                    "performance": "UNAVAILABLE",
+                },
+                "non_qualifying_classes": [
+                    evidence_class
+                    for evidence_class in evidence.EVIDENCE_CLASSES
+                    if evidence_class != "deterministic"
+                ],
+                "subjects": list(evidence.QUALIFIED_SUBJECTS),
+            },
+        )
 
 
 def test_report_names_each_unproduced_evidence_class_as_unavailable(
