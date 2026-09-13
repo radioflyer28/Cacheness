@@ -4,11 +4,11 @@ milestone: v1.0
 current_phase: 07.1
 current_phase_name: obstore-payload-participant-unification
 status: executing
-stopped_at: Completed 07.1-09-PLAN.md
-last_updated: "2026-09-13T18:49:47.867Z"
+stopped_at: Completed 07.1-09 post-wave obstore cutover alignment
+last_updated: "2026-09-13T19:05:46.400Z"
 last_activity: 2026-09-13
 last_activity_desc: Phase 07.1 execution started
-state_head: de3315dd258f0a6c6eb42537f3b3eb9336657559
+state_head: 69f11c05c654f982dcfa88d9e590c4af5361d4d2
 progress:
   total_phases: 9
   completed_phases: 6
@@ -481,6 +481,6 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 
 ## Session Continuity
 
-Last session: 2026-09-13T18:49:47.564Z
-Stopped at: Completed 07.1-09-PLAN.md
+Last session: 2026-09-13T19:05:46.123Z
+Stopped at: Completed 07.1-09 post-wave obstore cutover alignment
 Resume file: None
