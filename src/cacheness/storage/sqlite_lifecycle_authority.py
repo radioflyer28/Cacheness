@@ -1861,6 +1861,11 @@ class SqliteLifecycleAuthority:
         """Reconstruct exact candidate descriptors from authority-owned rows."""
         entries: list[AuthorityInventoryEntry] = []
         for row in rows:
+            if len(row) not in {5, 6}:
+                raise CacheBlobBackendError(
+                    "SQLite migration candidate row is malformed",
+                    context={"operation": "migration_candidate"},
+                )
             try:
                 manifest_bytes = bytes(row[3])
                 manifest = BlobManifest.from_canonical_bytes(manifest_bytes)
@@ -1871,6 +1876,7 @@ class SqliteLifecycleAuthority:
                     manifest=manifest_bytes,
                     payload_digest=manifest.digest,
                     byte_size=manifest.byte_size,
+                    transport_evidence=(None if len(row) == 5 else row[5]),
                 )
             except (TypeError, ValueError) as error:
                 raise CacheBlobBackendError(
@@ -1969,7 +1975,7 @@ class SqliteLifecycleAuthority:
             if state is AuthorityPublicationState.CANDIDATE:
                 if state_row[1] == receipt.run_id and state_row[2] == receipt.plan_digest and state_row[4] == receipt.source_revision:
                     rows = connection.execute(
-                        "SELECT key, generation, locator, manifest, manifest_digest "
+                        "SELECT key, generation, locator, manifest, manifest_digest, transport_evidence "
                         "FROM migration_store_entries WHERE run_id = ? AND selection = 'candidate' "
                         "ORDER BY key",
                         (receipt.run_id,),
@@ -1979,17 +1985,6 @@ class SqliteLifecycleAuthority:
                         return receipt
                     if stored == entries[: len(stored)]:
                         for entry in entries[len(stored) :]:
-                            evidence_row = connection.execute(
-                                "SELECT transport_evidence FROM entries "
-                                "WHERE key = ? AND generation = ? AND locator = ? "
-                                "AND manifest_digest = ?",
-                                (
-                                    entry.key,
-                                    entry.generation,
-                                    entry.locator,
-                                    entry.manifest_digest,
-                                ),
-                            ).fetchone()
                             connection.execute(
                                 "INSERT INTO migration_store_entries("
                                 "run_id, selection, key, generation, locator, manifest, manifest_digest, "
@@ -2003,7 +1998,7 @@ class SqliteLifecycleAuthority:
                                     entry.manifest,
                                     entry.manifest_digest,
                                     receipt.source_revision,
-                                    None if evidence_row is None else evidence_row[0],
+                                    entry.transport_evidence,
                                 ),
                             )
                         connection.execute(
@@ -2021,17 +2016,6 @@ class SqliteLifecycleAuthority:
                     "Migration candidate recording requires an unselected active authority"
                 )
             for entry in entries:
-                evidence_row = connection.execute(
-                    "SELECT transport_evidence FROM entries "
-                    "WHERE key = ? AND generation = ? AND locator = ? "
-                    "AND manifest_digest = ?",
-                    (
-                        entry.key,
-                        entry.generation,
-                        entry.locator,
-                        entry.manifest_digest,
-                    ),
-                ).fetchone()
                 connection.execute(
                     "INSERT INTO migration_store_entries("
                     "run_id, selection, key, generation, locator, manifest, manifest_digest, "
@@ -2045,7 +2029,7 @@ class SqliteLifecycleAuthority:
                         entry.manifest,
                         entry.manifest_digest,
                         receipt.source_revision,
-                        None if evidence_row is None else evidence_row[0],
+                        entry.transport_evidence,
                     ),
                 )
             connection.execute(
@@ -2064,6 +2048,74 @@ class SqliteLifecycleAuthority:
             return receipt
 
         return self._transaction(record)
+
+    def record_candidate_verification(
+        self,
+        *,
+        receipt: VerifiedCandidateReceipt,
+        entries: tuple[AuthorityInventoryEntry, ...],
+    ) -> None:
+        """Persist exact freshly verified transport evidence without activation."""
+        if not isinstance(receipt, VerifiedCandidateReceipt) or not isinstance(entries, tuple):
+            raise TypeError("migration candidate receipt and entries must be immutable values")
+
+        def record(connection: sqlite3.Connection) -> None:
+            identity = self._inventory_identity(connection)
+            self._validate_verified_candidate(identity, receipt, entries)
+            state_row = self._publication_state_row(connection)
+            if (
+                AuthorityPublicationState(state_row[6])
+                is not AuthorityPublicationState.CANDIDATE
+                or state_row[1] != receipt.run_id
+                or state_row[2] != receipt.plan_digest
+                or state_row[3] != receipt.candidate_digest
+            ):
+                raise CacheBlobLifecycleConflictError(
+                    "Migration candidate verification requires its recorded candidate"
+                )
+            rows = connection.execute(
+                "SELECT key, generation, locator, manifest, manifest_digest, transport_evidence "
+                "FROM migration_store_entries WHERE run_id = ? AND selection = 'candidate' "
+                "ORDER BY key",
+                (receipt.run_id,),
+            ).fetchall()
+            stored = self._candidate_entries_from_rows(rows)
+            if len(stored) != len(entries):
+                raise CacheBlobLifecycleConflictError(
+                    "Migration verification entry count changed before recording"
+                )
+            for prior, verified in zip(stored, entries, strict=True):
+                if (
+                    prior.key != verified.key
+                    or prior.generation != verified.generation
+                    or prior.locator != verified.locator
+                    or prior.manifest != verified.manifest
+                    or prior.payload_digest != verified.payload_digest
+                    or prior.byte_size != verified.byte_size
+                    or prior.transport_evidence not in {None, verified.transport_evidence}
+                ):
+                    raise CacheBlobLifecycleConflictError(
+                        "Migration verification does not match the recorded candidate"
+                    )
+                cursor = connection.execute(
+                    "UPDATE migration_store_entries SET transport_evidence = ? "
+                    "WHERE run_id = ? AND selection = 'candidate' AND key = ? "
+                    "AND generation = ? AND locator = ? AND manifest_digest = ?",
+                    (
+                        verified.transport_evidence,
+                        receipt.run_id,
+                        verified.key,
+                        verified.generation,
+                        verified.locator,
+                        verified.manifest_digest,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise CacheBlobLifecycleConflictError(
+                        "Migration verification lost an exact candidate row"
+                    )
+
+        self._transaction(record)
 
     def candidate_entries_for_run(self, *, run_id: str) -> tuple[AuthorityInventoryEntry, ...]:
         """Return only this authority's durably attributed candidate descriptors."""
@@ -2084,7 +2136,7 @@ class SqliteLifecycleAuthority:
                     connection.execute("COMMIT")
                     return ()
                 rows = connection.execute(
-                    "SELECT key, generation, locator, manifest, manifest_digest "
+                    "SELECT key, generation, locator, manifest, manifest_digest, transport_evidence "
                     "FROM migration_store_entries WHERE run_id = ? AND selection = 'candidate' "
                     "ORDER BY key",
                     (run_id,),
@@ -2195,9 +2247,7 @@ class SqliteLifecycleAuthority:
                 "ORDER BY key",
                 (receipt.run_id,),
             ).fetchall()
-            stored = self._candidate_entries_from_rows(
-                [row[:5] for row in candidate_rows]
-            )
+            stored = self._candidate_entries_from_rows(candidate_rows)
             if stored != entries:
                 raise CacheBlobLifecycleConflictError(
                     "Recorded migration candidate differs from verified external receipt"
@@ -2217,7 +2267,6 @@ class SqliteLifecycleAuthority:
                 )
             next_revision = state_row[0] + 1
             connection.execute("DELETE FROM entries")
-            candidate_evidence = {row[0]: row[5] for row in candidate_rows}
             for candidate in entries:
                 previous = connection.execute(
                     "SELECT lineage FROM entry_lineage WHERE key = ?", (candidate.key,)
@@ -2239,7 +2288,7 @@ class SqliteLifecycleAuthority:
                         candidate.manifest_digest,
                         lineage,
                         next_revision,
-                        candidate_evidence[candidate.key],
+                        candidate.transport_evidence,
                     ),
                 )
             connection.execute(

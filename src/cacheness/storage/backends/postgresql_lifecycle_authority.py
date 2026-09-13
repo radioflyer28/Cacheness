@@ -589,12 +589,12 @@ class PostgresqlLifecycleAuthority:
         """Decode exact retained candidate rows without treating objects as authority."""
         entries: list[AuthorityInventoryEntry] = []
         for row in rows:
-            if len(row) != 5:
+            if len(row) not in {5, 6}:
                 raise CacheBlobBackendError(
                     "PostgreSQL migration candidate row is malformed",
                     context={"operation": "migration_candidate"},
                 )
-            key, generation, locator, manifest_bytes, stored_manifest_digest = row
+            key, generation, locator, manifest_bytes, stored_manifest_digest = row[:5]
             try:
                 manifest = BlobManifest.from_canonical_bytes(manifest_bytes)
                 entry = AuthorityInventoryEntry(
@@ -604,6 +604,7 @@ class PostgresqlLifecycleAuthority:
                     manifest=manifest_bytes,
                     payload_digest=manifest.digest,
                     byte_size=manifest.byte_size,
+                    transport_evidence=None if len(row) == 5 else row[5],
                 )
             except (TypeError, ValueError) as error:
                 raise CacheBlobBackendError(
@@ -742,7 +743,7 @@ class PostgresqlLifecycleAuthority:
                 ):
                     cursor.execute(
                         sql.SQL(
-                            "SELECT key, generation, locator, manifest, manifest_digest "
+                            "SELECT key, generation, locator, manifest, manifest_digest, transport_evidence "
                             "FROM {} WHERE run_id = %s AND selection = 'candidate' ORDER BY key"
                         ).format(self._table("migration_store_entries")),
                         (receipt.run_id,),
@@ -752,20 +753,6 @@ class PostgresqlLifecycleAuthority:
                         return receipt
                     if stored == entries[: len(stored)]:
                         for entry in entries[len(stored) :]:
-                            cursor.execute(
-                                sql.SQL(
-                                    "SELECT transport_evidence FROM {} WHERE key = %s "
-                                    "AND generation = %s AND locator = %s "
-                                    "AND manifest_digest = %s"
-                                ).format(self._table("entries")),
-                                (
-                                    entry.key,
-                                    entry.generation,
-                                    entry.locator,
-                                    entry.manifest_digest,
-                                ),
-                            )
-                            evidence_row = cursor.fetchone()
                             cursor.execute(
                                 sql.SQL(
                                     "INSERT INTO {} (run_id, selection, key, generation, locator, manifest, "
@@ -780,7 +767,7 @@ class PostgresqlLifecycleAuthority:
                                     entry.manifest,
                                     entry.manifest_digest,
                                     receipt.source_revision,
-                                    None if evidence_row is None else evidence_row[0],
+                                    entry.transport_evidence,
                                 ),
                             )
                         cursor.execute(
@@ -802,19 +789,6 @@ class PostgresqlLifecycleAuthority:
             for entry in entries:
                 cursor.execute(
                     sql.SQL(
-                        "SELECT transport_evidence FROM {} WHERE key = %s "
-                        "AND generation = %s AND locator = %s AND manifest_digest = %s"
-                    ).format(self._table("entries")),
-                    (
-                        entry.key,
-                        entry.generation,
-                        entry.locator,
-                        entry.manifest_digest,
-                    ),
-                )
-                evidence_row = cursor.fetchone()
-                cursor.execute(
-                    sql.SQL(
                         "INSERT INTO {} (run_id, selection, key, generation, locator, manifest, "
                         "manifest_digest, lineage, entry_revision, transport_evidence) "
                         "VALUES (%s, 'candidate', %s, %s, %s, %s, %s, 0, %s, %s)"
@@ -827,7 +801,7 @@ class PostgresqlLifecycleAuthority:
                         entry.manifest,
                         entry.manifest_digest,
                         receipt.source_revision,
-                        None if evidence_row is None else evidence_row[0],
+                        entry.transport_evidence,
                     ),
                 )
             cursor.execute(
@@ -855,6 +829,77 @@ class PostgresqlLifecycleAuthority:
 
         return self._transaction("record_verified_candidate", record)
 
+    def record_candidate_verification(
+        self,
+        *,
+        receipt: VerifiedCandidateReceipt,
+        entries: tuple[AuthorityInventoryEntry, ...],
+    ) -> None:
+        """Persist exact destination evidence without changing active selection."""
+        if not isinstance(receipt, VerifiedCandidateReceipt) or not isinstance(entries, tuple):
+            raise TypeError("migration candidate receipt and entries must be immutable values")
+
+        def record(cursor: Any) -> None:
+            identity = self._inventory_identity(cursor)
+            self._validate_verified_candidate(identity, receipt, entries)
+            state_row = self._publication_state_row(cursor, lock=True)
+            if (
+                AuthorityPublicationState(state_row[6])
+                is not AuthorityPublicationState.CANDIDATE
+                or state_row[1] != receipt.run_id
+                or state_row[2] != receipt.plan_digest
+                or state_row[3] != receipt.candidate_digest
+            ):
+                raise CacheBlobLifecycleConflictError(
+                    "Migration candidate verification requires its recorded candidate"
+                )
+            cursor.execute(
+                sql.SQL(
+                    "SELECT key, generation, locator, manifest, manifest_digest, transport_evidence "
+                    "FROM {} WHERE run_id = %s AND selection = 'candidate' ORDER BY key"
+                ).format(self._table("migration_store_entries")),
+                (receipt.run_id,),
+            )
+            stored = self._candidate_entries_from_rows(cursor.fetchall())
+            if len(stored) != len(entries):
+                raise CacheBlobLifecycleConflictError(
+                    "Migration verification entry count changed before recording"
+                )
+            for prior, verified in zip(stored, entries, strict=True):
+                if (
+                    prior.key != verified.key
+                    or prior.generation != verified.generation
+                    or prior.locator != verified.locator
+                    or prior.manifest != verified.manifest
+                    or prior.payload_digest != verified.payload_digest
+                    or prior.byte_size != verified.byte_size
+                    or prior.transport_evidence not in {None, verified.transport_evidence}
+                ):
+                    raise CacheBlobLifecycleConflictError(
+                        "Migration verification does not match the recorded candidate"
+                    )
+                cursor.execute(
+                    sql.SQL(
+                        "UPDATE {} SET transport_evidence = %s WHERE run_id = %s "
+                        "AND selection = 'candidate' AND key = %s AND generation = %s "
+                        "AND locator = %s AND manifest_digest = %s"
+                    ).format(self._table("migration_store_entries")),
+                    (
+                        verified.transport_evidence,
+                        receipt.run_id,
+                        verified.key,
+                        verified.generation,
+                        verified.locator,
+                        verified.manifest_digest,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise CacheBlobLifecycleConflictError(
+                        "Migration verification lost an exact candidate row"
+                    )
+
+        self._transaction("record_candidate_verification", record)
+
     def candidate_entries_for_run(self, *, run_id: str) -> tuple[AuthorityInventoryEntry, ...]:
         """Return only this authority's durably attributed candidate descriptors."""
         def read(cursor: Any) -> tuple[AuthorityInventoryEntry, ...]:
@@ -873,9 +918,7 @@ class PostgresqlLifecycleAuthority:
                 ).format(self._table("migration_store_entries")),
                 (run_id,),
             )
-            return self._candidate_entries_from_rows(
-                [row[:5] for row in cursor.fetchall()]
-            )
+            return self._candidate_entries_from_rows(cursor.fetchall())
 
         return self._read_only("candidate_entries_for_run", read)
 
@@ -910,7 +953,7 @@ class PostgresqlLifecycleAuthority:
                 (receipt.run_id,),
             )
             candidate_rows = cursor.fetchall()
-            if self._candidate_entries_from_rows([row[:5] for row in candidate_rows]) != entries:
+            if self._candidate_entries_from_rows(candidate_rows) != entries:
                 raise CacheBlobLifecycleConflictError(
                     "Migration candidate entries changed before discard"
                 )
@@ -1000,13 +1043,13 @@ class PostgresqlLifecycleAuthority:
                 )
             cursor.execute(
                 sql.SQL(
-                    "SELECT key, generation, locator, manifest, manifest_digest "
+                    "SELECT key, generation, locator, manifest, manifest_digest, transport_evidence "
                     "FROM {} WHERE run_id = %s AND selection = 'candidate' ORDER BY key"
                 ).format(self._table("migration_store_entries")),
                 (receipt.run_id,),
             )
             candidate_rows = cursor.fetchall()
-            if self._candidate_entries_from_rows([row[:5] for row in candidate_rows]) != entries:
+            if self._candidate_entries_from_rows(candidate_rows) != entries:
                 raise CacheBlobLifecycleConflictError(
                     "Recorded migration candidate differs from verified external receipt"
                 )
@@ -1028,7 +1071,6 @@ class PostgresqlLifecycleAuthority:
                     (receipt.run_id, *prior),
                 )
             next_revision = state_row[0] + 1
-            candidate_evidence = {row[0]: row[5] for row in candidate_rows}
             cursor.execute(sql.SQL("DELETE FROM {}").format(self._table("entries")))
             for candidate in entries:
                 cursor.execute(
@@ -1060,7 +1102,7 @@ class PostgresqlLifecycleAuthority:
                         candidate.manifest_digest,
                         lineage,
                         next_revision,
-                        candidate_evidence[candidate.key],
+                        candidate.transport_evidence,
                     ),
                 )
             cursor.execute(

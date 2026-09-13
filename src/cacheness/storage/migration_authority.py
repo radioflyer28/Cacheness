@@ -16,6 +16,7 @@ import json
 from typing import Protocol, runtime_checkable
 
 from .lifecycle_authority import EntrySnapshot
+from .transport_evidence import MAX_TRANSPORT_EVIDENCE_BYTES
 
 _MAX_TEXT_BYTES = 512
 _MAX_INVENTORY_PAGE_ENTRIES = 256
@@ -120,6 +121,11 @@ class AuthorityInventoryEntry:
     manifest: bytes
     payload_digest: str
     byte_size: int
+    # Transport evidence is destination-local, authenticated corroboration.
+    # It is deliberately excluded from candidate_digest(): a verification
+    # transition may attach freshly observed evidence without changing the
+    # candidate's immutable payload identity or cutover receipt.
+    transport_evidence: bytes | None = None
 
     def __post_init__(self) -> None:
         for field_name in ("key", "generation", "locator"):
@@ -135,6 +141,12 @@ class AuthorityInventoryEntry:
             raise ValueError("payload_digest must be a SHA-256 hexadecimal value")
         if type(self.byte_size) is not int or self.byte_size < 0:
             raise ValueError("byte_size must be a non-negative integer")
+        if self.transport_evidence is not None and (
+            not isinstance(self.transport_evidence, bytes)
+            or not self.transport_evidence
+            or len(self.transport_evidence) > MAX_TRANSPORT_EVIDENCE_BYTES
+        ):
+            raise ValueError("transport_evidence must be bounded authenticated bytes or None")
 
     @property
     def manifest_digest(self) -> str:
@@ -437,6 +449,13 @@ class MigrationAuthority(Protocol):
         receipt: VerifiedCandidateReceipt,
         entries: tuple[AuthorityInventoryEntry, ...],
     ) -> ActivationReceipt: ...
+
+    def record_candidate_verification(
+        self,
+        *,
+        receipt: VerifiedCandidateReceipt,
+        entries: tuple[AuthorityInventoryEntry, ...],
+    ) -> None: ...
 
 __all__ = [
     "ActivationReceipt",

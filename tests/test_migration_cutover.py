@@ -203,10 +203,11 @@ def _memory_store(root: Path, key_provider: _SharedMemoryKeyProvider) -> BlobSto
 
 def _sqlite_store(root: Path, key_provider: _SharedMemoryKeyProvider) -> BlobStore:
     """Create the supported local durable topology for cutover authority tests."""
-    (root / "handler-stage").mkdir(parents=True)
+    payload_root = root.with_name(f"{root.name}-payloads")
+    (payload_root / "handler-stage").mkdir(parents=True)
     payload = ObstoreGenerationIO(
-        LocalStore(root / "payloads", mkdir=True),
-        GuardedHandlerIO(root / "handler-stage"),
+        LocalStore(payload_root / "objects", mkdir=True),
+        GuardedHandlerIO(payload_root / "handler-stage"),
         qualification_identity="filesystem",
     )
     store = BlobStore(
@@ -875,32 +876,35 @@ def test_uncheckpointed_candidate_orphan_remains_invisible_unadopted_and_outside
         authority = destination.lifecycle_authority
         original_record = authority.record_verified_candidate
         written_locators: list[str] = []
-        original_write = destination.payload_backend.write_blob
+        participant = destination._materialize_authority_store()
+        original_publish = participant.publish_generation
 
-        def capture_write(blob_id: str, payload: bytes) -> str:
-            locator = original_write(blob_id, payload)
-            written_locators.append(locator)
-            return locator
+        def capture_publish(staged, locator):
+            published = original_publish(staged, locator)
+            written_locators.append(published["actual_path"])
+            return published
 
         def fail_before_checkpoint(*, receipt, entries):
             raise RuntimeError("simulated post-publication checkpoint fault")
 
-        monkeypatch.setattr(destination.payload_backend, "write_blob", capture_write)
+        monkeypatch.setattr(participant, "publish_generation", capture_publish)
         monkeypatch.setattr(authority, "record_verified_candidate", fail_before_checkpoint)
         with pytest.raises(RuntimeError, match="post-publication"):
             service.stage(plan)
 
         assert written_locators
+        orphan_locators = tuple(written_locators)
         assert authority.publication_state() is AuthorityPublicationState.IDLE
         assert destination.get("entry") is None
         assert source.get("entry") == {"value": "orphan boundary"}
 
         monkeypatch.setattr(authority, "record_verified_candidate", original_record)
+        monkeypatch.setattr(participant, "publish_generation", original_publish)
         resumed = service.resume(plan, run_id=service.run_id, evidence_path=service.evidence_path)
 
         attributed = authority.candidate_entries_for_run(run_id=service.run_id)
         assert resumed.state is MaintenanceEvidenceState.STAGED
-        assert {entry.locator for entry in attributed}.isdisjoint(written_locators)
+        assert {entry.locator for entry in attributed}.isdisjoint(orphan_locators)
         assert destination.get("entry") is None
         assert source.get("entry") == {"value": "orphan boundary"}
     finally:

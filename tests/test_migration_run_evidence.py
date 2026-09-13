@@ -179,17 +179,32 @@ def test_evidence_never_renders_or_logs_key_material(tmp_path: Path, caplog: pyt
     assert provider.key.decode("ascii") not in caplog.text
 
 
-def _memory_store(root: Path, key_provider: _SentinelKeyProvider) -> BlobStore:
+def _memory_store(
+    root: Path,
+    key_provider: _SentinelKeyProvider,
+    *,
+    qualification_identity: str = "memory",
+) -> BlobStore:
+    authority: BackendRef
+    if qualification_identity == "s3":
+        from cacheness.storage.memory_lifecycle_authority import InMemoryLifecycleAuthority
+
+        class _DeterministicPostgresqlAuthority(InMemoryLifecycleAuthority):
+            qualification_identity = "postgresql"
+
+        authority = BackendRef(instance=_DeterministicPostgresqlAuthority())
+    else:
+        authority = BackendRef(name="memory")
     (root / "handler-stage").mkdir(parents=True)
     payload = ObstoreGenerationIO(
         MemoryStore(),
         GuardedHandlerIO(root / "handler-stage"),
-        qualification_identity="memory",
+        qualification_identity=qualification_identity,
     )
     store = BlobStore(
         StoreTopology(
             payload=BackendRef(instance=payload),
-            authority=BackendRef(name="memory"),
+            authority=authority,
         ),
         cache_dir=root,
         manifest_key_provider=key_provider,
@@ -246,6 +261,45 @@ def test_resume_requires_exact_run_and_evidence_then_revalidates_next_step(tmp_p
         destination.close()
 
 
+def test_verify_replaces_source_transport_evidence_with_destination_observation(
+    tmp_path: Path,
+) -> None:
+    """Republished remote candidates receive fresh, destination-bound evidence."""
+    provider = _SentinelKeyProvider()
+    source = _memory_store(
+        tmp_path / "source", provider, qualification_identity="s3"
+    )
+    destination = _memory_store(
+        tmp_path / "destination", provider, qualification_identity="s3"
+    )
+    try:
+        source.put_entry(np.array([42]), key="entry")
+        source_entry = source.lifecycle_authority.read_entry("entry")
+        assert source_entry is not None and source_entry.transport_evidence is not None
+        service = _service(source, destination, tmp_path / "maintenance")
+        plan = service.plan(service.inspect())
+        service.stage(plan)
+        staged = destination.lifecycle_authority.candidate_entries_for_run(
+            run_id=service.run_id
+        )
+        assert staged[0].transport_evidence is None
+
+        service.verify(plan)
+
+        verified = destination.lifecycle_authority.candidate_entries_for_run(
+            run_id=service.run_id
+        )
+        assert verified[0].transport_evidence is not None
+        assert verified[0].transport_evidence != source_entry.transport_evidence
+        manifest = BlobManifest.from_canonical_bytes(verified[0].manifest)
+        destination.lifecycle._verify_transport_evidence(
+            manifest, verified[0].transport_evidence
+        )
+    finally:
+        source.close()
+        destination.close()
+
+
 def test_resume_refuses_mismatched_output_or_stale_source_without_adoption(tmp_path: Path) -> None:
     """Recorded output validation precedes any next state or authority mutation."""
     provider = _SentinelKeyProvider()
@@ -258,7 +312,9 @@ def test_resume_refuses_mismatched_output_or_stale_source_without_adoption(tmp_p
         service.stage(plan)
         destination_revision = destination.lifecycle_authority.identity_snapshot().revision
         candidate = service._candidate_entries[0]
-        destination.payload_backend.write_blob(candidate.locator, b"forged-candidate")
+        destination._materialize_authority_store()._store.put(
+            candidate.locator, b"forged-candidate"
+        )
 
         restarted = _service(source, destination, tmp_path / "maintenance")
         with pytest.raises(CacheBlobMigrationEvidenceMismatchError, match="candidate"):
@@ -323,11 +379,15 @@ def test_execution_rereads_authenticates_and_rejects_plan_bound_manifest_or_cata
 
         writes: list[object] = []
 
-        def unexpected_candidate_write(*args: object, **kwargs: object) -> str:
+        def unexpected_candidate_write(*args: object, **kwargs: object) -> object:
             writes.append((args, kwargs))
             raise AssertionError("candidate write must follow source-state validation")
 
-        monkeypatch.setattr(destination.payload_backend, "write_blob", unexpected_candidate_write)
+        monkeypatch.setattr(
+            destination._materialize_authority_store(),
+            "publish_generation",
+            unexpected_candidate_write,
+        )
         with pytest.raises(CacheBlobMigrationPlanStaleError, match="source_state_drift"):
             service.stage(stale_plan)
 

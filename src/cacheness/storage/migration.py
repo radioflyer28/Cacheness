@@ -8,6 +8,7 @@ selected migration authority performs the sole whole-store visibility change.
 
 from __future__ import annotations
 
+from contextlib import ExitStack
 from dataclasses import dataclass, field, replace
 from enum import Enum
 import hashlib
@@ -31,6 +32,7 @@ from cacheness.error_handling import (
 )
 
 from .catalog import STORE_FORMAT_VERSION
+from .guarded_handler_io import GuardedHandlerIO, GuardedStagedArtifact
 from .integrity import sha256_and_size
 from .manifest import (
     CURRENT_MANIFEST_SCHEMA_VERSION,
@@ -81,6 +83,117 @@ _DEFAULT_MAX_ENTRIES_PER_RUN = 256
 _DEFAULT_MAX_BYTES_PER_RUN = 64 * 1024 * 1024
 _DEFAULT_MAX_EVIDENCE_BYTES_PER_RUN = 64 * 1024
 _PLAN_REVALIDATION_LOCATOR = "revalidate-at-execution"
+
+
+class _VerifiedSnapshotCopyHandler:
+    """Stage an already-verified private snapshot without buffering its bytes.
+
+    This is maintenance plumbing, not a registered handler.  It preserves the
+    existing path-based staging boundary so the selected participant receives a
+    retained descriptor rather than a backend-specific byte payload.
+    """
+
+    def __init__(
+        self,
+        snapshot_path: Path,
+        *,
+        suffix: str,
+        payload_format: str,
+        payload_format_version: int,
+        metadata: Mapping[str, object],
+        expected_size: int,
+    ) -> None:
+        self._snapshot_path = snapshot_path
+        self._suffix = suffix
+        self._payload_format = payload_format
+        self._payload_format_version = payload_format_version
+        self._metadata = dict(metadata)
+        self._expected_size = expected_size
+
+    def put(self, _value: object, file_path: Path, _config: object) -> dict[str, object]:
+        """Copy through a private stage with a fixed-size streaming check."""
+        target = file_path.with_suffix(self._suffix)
+        observed_size = 0
+        with self._snapshot_path.open("rb") as source, target.open("xb") as destination:
+            while chunk := source.read(64 * 1024):
+                destination.write(chunk)
+                observed_size += len(chunk)
+        if observed_size != self._expected_size:
+            raise CacheBlobMigrationEvidenceMismatchError(
+                "verified source snapshot changed before candidate publication",
+                context={"operation": "migration.stage"},
+            )
+        return {
+            "actual_path": str(target),
+            "file_size": observed_size,
+            "payload_format": self._payload_format,
+            "payload_format_version": self._payload_format_version,
+            "metadata": self._metadata,
+        }
+
+
+class _DeferredCandidateStagingIO:
+    """Let one registered transformer stage exactly one native artifact.
+
+    The transformation contract remains path-based, but publication is delayed
+    until the migration service has validated the transform result and minted
+    its exact immutable generation locator.
+    """
+
+    def __init__(self, participant: object) -> None:
+        self._participant = participant
+        self._stack = ExitStack()
+        self._staged: GuardedStagedArtifact | None = None
+        self._actual_path: str | None = None
+
+    def __enter__(self) -> "_DeferredCandidateStagingIO":
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        self._stack.close()
+
+    def put(self, handler: object, data: object, _key: str, config: object) -> dict[str, object]:
+        """Invoke the registered handler once and retain its guarded artifact."""
+        if self._staged is not None:
+            raise CacheBlobMigrationEvidenceMismatchError(
+                "migration transform may stage exactly one native artifact",
+                context={"operation": "migration.stage"},
+            )
+        stage = getattr(self._participant, "stage", None)
+        if not callable(stage):
+            raise CacheBlobMigrationEvidenceMismatchError(
+                "selected payload participant cannot stage a transformed candidate",
+                context={"operation": "migration.stage"},
+            )
+        staged = self._stack.enter_context(stage(handler, data, config))
+        if not isinstance(staged, GuardedStagedArtifact):
+            raise CacheBlobMigrationEvidenceMismatchError(
+                "selected payload participant returned an invalid transformed stage",
+                context={"operation": "migration.stage"},
+            )
+        actual_path = staged.raw_result.get("actual_path")
+        if not isinstance(actual_path, str) or not actual_path:
+            raise CacheBlobMigrationEvidenceMismatchError(
+                "transformed stage lacks its private native path",
+                context={"operation": "migration.stage"},
+            )
+        self._staged = staged
+        self._actual_path = actual_path
+        return dict(staged.raw_result)
+
+    def staged_result(self, result: Mapping[str, object]) -> GuardedStagedArtifact:
+        """Bind the transform response to the retained private artifact."""
+        if self._staged is None or self._actual_path is None:
+            raise CacheBlobMigrationEvidenceMismatchError(
+                "migration transform did not stage a native artifact",
+                context={"operation": "migration.stage"},
+            )
+        if result.get("actual_path") != self._actual_path:
+            raise CacheBlobMigrationEvidenceMismatchError(
+                "migration transform returned a path outside its guarded artifact",
+                context={"operation": "migration.stage"},
+            )
+        return self._staged
 
 
 class CompatibilityDimension(str, Enum):
@@ -2011,20 +2124,104 @@ class OfflineMigrationService:
         material = "\x00".join(
             (self.run_id, manifest.key, manifest.generation, manifest.digest, uuid4().hex)
         ).encode("utf-8")
-        return f"{hashlib.sha256(material).hexdigest()}{''.join(Path(manifest.locator).suffixes)}"
+        return hashlib.sha256(material).hexdigest()
 
-    def _candidate_locator(self, candidate_id: str) -> str:
-        """Derive the exact backend locator without treating a candidate path as authority."""
-        backend = self.destination.payload_backend
-        remote_locator = getattr(backend, "migration_candidate_locator", None)
-        if callable(remote_locator):
-            return remote_locator(run_id=self.run_id, candidate_id=candidate_id)
-        base_dir = getattr(backend, "base_dir", None)
-        shard_chars = getattr(backend, "shard_chars", None)
-        if isinstance(base_dir, Path) and type(shard_chars) is int:
-            shard = candidate_id[:shard_chars] if shard_chars else ""
-            return str(base_dir / shard / candidate_id) if shard else str(base_dir / candidate_id)
-        return candidate_id
+    def _candidate_locator(self, candidate_id: str, suffix: str) -> str:
+        """Mint one exact contained immutable candidate locator.
+
+        The locator is an external effect only.  The destination authority's
+        exact candidate rows—not this predictable namespace or an inventory—
+        establish run ownership and lifecycle state.
+        """
+        if not isinstance(candidate_id, str) or len(candidate_id) != 64:
+            raise ValueError("candidate identifier must be one SHA-256 value")
+        name = f"{candidate_id}{suffix}"
+        GuardedHandlerIO.native_suffix(name)
+        run_partition = hashlib.sha256(self.run_id.encode("utf-8")).hexdigest()
+        return f"generations/{run_partition}/{name}"
+
+    def _publish_staged_candidate(
+        self,
+        participant: object,
+        staged: GuardedStagedArtifact,
+        *,
+        candidate_id: str,
+        expected_digest: str,
+        expected_size: int,
+    ) -> str:
+        """Publish one verified staged artifact through the selected participant."""
+        locator = self._candidate_locator(candidate_id, staged.suffix)
+        publisher = getattr(participant, "publish_generation", None)
+        if not callable(publisher):
+            raise CacheBlobMigrationEvidenceMismatchError(
+                "selected payload participant cannot publish a migration candidate",
+                context={"operation": "migration.stage", "run_id": self.run_id},
+            )
+        with staged.open() as (source, observed_size):
+            digest = hashlib.sha256()
+            copied = 0
+            while chunk := source.read(64 * 1024):
+                digest.update(chunk)
+                copied += len(chunk)
+        if (digest.hexdigest(), copied, observed_size) != (
+            expected_digest,
+            expected_size,
+            expected_size,
+        ):
+            raise CacheBlobMigrationEvidenceMismatchError(
+                "candidate stage does not match its verified payload identity",
+                context={"operation": "migration.stage", "run_id": self.run_id},
+            )
+        published = publisher(staged, locator)
+        if not isinstance(published, Mapping) or published.get("actual_path") != locator:
+            raise CacheBlobMigrationEvidenceMismatchError(
+                "payload participant returned an unexpected candidate locator",
+                context={"operation": "migration.stage", "run_id": self.run_id},
+            )
+        if published.get("file_size") != expected_size:
+            raise CacheBlobMigrationEvidenceMismatchError(
+                "payload participant returned an unexpected candidate size",
+                context={"operation": "migration.stage", "run_id": self.run_id},
+            )
+        return locator
+
+    def _publish_snapshot_candidate(
+        self,
+        participant: object,
+        snapshot_path: Path,
+        manifest: BlobManifest,
+        *,
+        candidate_id: str,
+    ) -> str:
+        """Stream one authenticated snapshot into a fresh immutable candidate."""
+        suffix = "".join(Path(manifest.locator).suffixes)
+        copier = _VerifiedSnapshotCopyHandler(
+            snapshot_path,
+            suffix=suffix,
+            payload_format=manifest.payload_format,
+            payload_format_version=manifest.payload_format_version,
+            metadata=manifest.handler_metadata,
+            expected_size=manifest.byte_size,
+        )
+        stage = getattr(participant, "stage", None)
+        if not callable(stage):
+            raise CacheBlobMigrationEvidenceMismatchError(
+                "selected payload participant cannot stage a migration candidate",
+                context={"operation": "migration.stage", "run_id": self.run_id},
+            )
+        with stage(copier, None, self.destination.config) as staged:
+            if not isinstance(staged, GuardedStagedArtifact):
+                raise CacheBlobMigrationEvidenceMismatchError(
+                    "selected payload participant returned an invalid migration stage",
+                    context={"operation": "migration.stage", "run_id": self.run_id},
+                )
+            return self._publish_staged_candidate(
+                participant,
+                staged,
+                candidate_id=candidate_id,
+                expected_digest=manifest.digest,
+                expected_size=manifest.byte_size,
+            )
 
     def _write_evidence(self, evidence: MaintenanceRunEvidence) -> MaintenanceRunEvidence:
         if not self.evidence_path.exists():
@@ -3400,53 +3597,12 @@ class OfflineMigrationService:
                             "source payload fails authenticated integrity verification"
                         )
                     if source_identity == target_identity:
-                        payload = source_snapshot.path.read_bytes()
-                        candidate_locator = self._candidate_locator(candidate_id)
-                        remote_candidate_writer = getattr(
-                            destination_io, "write_migration_candidate", None
+                        candidate_locator = self._publish_snapshot_candidate(
+                            destination_io,
+                            source_snapshot.path,
+                            manifest,
+                            candidate_id=candidate_id,
                         )
-                        if callable(remote_candidate_writer):
-                            remote_receipt = remote_candidate_writer(
-                                run_id=self.run_id,
-                                plan_digest=plan.digest,
-                                source_revision=plan.source_identity.revision,
-                                locator=candidate_locator,
-                                payload=payload,
-                                payload_digest=manifest.digest,
-                                byte_size=manifest.byte_size,
-                            )
-                            if (
-                                remote_receipt.run_id != self.run_id
-                                or remote_receipt.plan_digest != plan.digest
-                                or remote_receipt.source_revision
-                                != plan.source_identity.revision
-                                or remote_receipt.locator != candidate_locator
-                                or remote_receipt.payload_digest != manifest.digest
-                                or remote_receipt.byte_size != manifest.byte_size
-                            ):
-                                raise CacheBlobMigrationEvidenceMismatchError(
-                                    "S3 migration candidate receipt does not bind this exact plan",
-                                    context={
-                                        "operation": "migration.stage",
-                                        "run_id": self.run_id,
-                                    },
-                                )
-                            written_locator = remote_receipt.locator
-                        else:
-                            written_locator = self.destination.payload_backend.write_blob(
-                                candidate_id, payload
-                            )
-                        expected_written_locator = candidate_locator
-                        if self.destination.topology.qualified_profile.pair == (
-                            "memory",
-                            "memory",
-                        ):
-                            expected_written_locator = f"memory://{candidate_locator}"
-                        if written_locator != expected_written_locator:
-                            raise CacheBlobMigrationEvidenceMismatchError(
-                                "candidate backend returned an unexpected locator",
-                                context={"operation": "migration.stage", "run_id": self.run_id},
-                            )
                         candidate_manifest = replace(manifest, locator=candidate_locator)
                     else:
                         handler, transformation = (
@@ -3458,44 +3614,54 @@ class OfflineMigrationService:
                                 target_version,
                             )
                         )
-                        result = handler.transform_payload(
-                            source_snapshot,
-                            transformation,
-                            destination_io=destination_io,
-                            key=candidate_id,
-                            config=self.destination.config,
-                        )
-                        if not isinstance(result, Mapping):
-                            raise ValueError("handler transform must return a guarded result mapping")
-                        actual_path = result.get("actual_path")
-                        file_size = result.get("file_size")
-                        payload_format = result.get("payload_format")
-                        payload_format_version = result.get("payload_format_version")
-                        handler_metadata = result.get("metadata")
-                        if (
-                            not isinstance(actual_path, (str, Path))
-                            or type(file_size) is not int
-                            or file_size < 0
-                            or not isinstance(payload_format, str)
-                            or not payload_format
-                            or type(payload_format_version) is not int
-                            or payload_format_version < 1
-                            or not isinstance(handler_metadata, Mapping)
-                        ):
-                            raise ValueError("handler transform returned an incomplete guarded result")
-                        if (payload_format, payload_format_version) != target_identity:
-                            raise CacheManifestUnsupportedVersionError(
-                                "handler transform result does not match its directed target"
+                        with _DeferredCandidateStagingIO(destination_io) as transform_io:
+                            result = handler.transform_payload(
+                                source_snapshot,
+                                transformation,
+                                destination_io=transform_io,
+                                key=candidate_id,
+                                config=self.destination.config,
                             )
-                        with destination_io.open_snapshot(
-                            Path(actual_path), dict(handler_metadata)
-                        ) as target_snapshot:
-                            payload_digest, payload_size = sha256_and_size(target_snapshot.path)
-                        if payload_size != file_size:
-                            raise ValueError(
-                                "handler transform result size disagrees with its guarded payload"
+                            if not isinstance(result, Mapping):
+                                raise ValueError("handler transform must return a guarded result mapping")
+                            staged = transform_io.staged_result(result)
+                            file_size = result.get("file_size")
+                            payload_format = result.get("payload_format")
+                            payload_format_version = result.get("payload_format_version")
+                            handler_metadata = result.get("metadata")
+                            if (
+                                type(file_size) is not int
+                                or file_size < 0
+                                or not isinstance(payload_format, str)
+                                or not payload_format
+                                or type(payload_format_version) is not int
+                                or payload_format_version < 1
+                                or not isinstance(handler_metadata, Mapping)
+                            ):
+                                raise ValueError("handler transform returned an incomplete guarded result")
+                            if (payload_format, payload_format_version) != target_identity:
+                                raise CacheManifestUnsupportedVersionError(
+                                    "handler transform result does not match its directed target"
+                                )
+                            with staged.open() as (target_source, target_size):
+                                digest = hashlib.sha256()
+                                observed_size = 0
+                                while chunk := target_source.read(64 * 1024):
+                                    digest.update(chunk)
+                                    observed_size += len(chunk)
+                            if target_size != file_size or observed_size != file_size:
+                                raise ValueError(
+                                    "handler transform result size disagrees with its guarded payload"
+                                )
+                            payload_digest = digest.hexdigest()
+                            payload_size = observed_size
+                            candidate_locator = self._publish_staged_candidate(
+                                destination_io,
+                                staged,
+                                candidate_id=candidate_id,
+                                expected_digest=payload_digest,
+                                expected_size=payload_size,
                             )
-                        candidate_locator = str(actual_path)
                         candidate_manifest = replace(
                             manifest,
                             versions=replace(
@@ -3663,14 +3829,21 @@ class OfflineMigrationService:
 
     def _verify_candidate_outputs(
         self, candidates: tuple[AuthorityInventoryEntry, ...]
-    ) -> None:
-        """Validate every deterministic completed candidate output before reuse."""
+    ) -> tuple[AuthorityInventoryEntry, ...]:
+        """Verify exact outputs and attach destination-local transport evidence.
+
+        Payload bytes are streamed from the participant snapshot.  Remote
+        evidence is observed and signed by the destination lifecycle only
+        after the manifest's size and digest have been corroborated.  The
+        migration service never trusts or copies source-side evidence.
+        """
+        verified: list[AuthorityInventoryEntry] = []
+        destination_io = self.destination._materialize_authority_store()
         for candidate in candidates:
             manifest = self._authenticated_manifest(candidate.manifest, role="candidate")
-            destination_io = self.destination._materialize_authority_store()
             try:
                 with destination_io.open_snapshot(candidate.locator, {}) as snapshot:
-                    payload = snapshot.path.read_bytes()
+                    payload_digest, byte_size = sha256_and_size(snapshot.path)
             except OSError as exc:
                 raise CacheBlobMigrationEvidenceMismatchError(
                     "candidate output is missing during explicit resume",
@@ -3681,13 +3854,29 @@ class OfflineMigrationService:
                 or manifest.locator != candidate.locator
                 or manifest.digest != candidate.payload_digest
                 or manifest.byte_size != candidate.byte_size
-                or hashlib.sha256(payload).hexdigest() != candidate.payload_digest
-                or len(payload) != candidate.byte_size
+                or payload_digest != candidate.payload_digest
+                or byte_size != candidate.byte_size
             ):
                 raise CacheBlobMigrationEvidenceMismatchError(
                     "candidate output does not match authenticated evidence",
                     context={"operation": "migration.resume", "run_id": self.run_id},
                 )
+            if candidate.transport_evidence is not None:
+                self.destination.lifecycle._verify_transport_evidence(
+                    manifest, candidate.transport_evidence
+                )
+                verified.append(candidate)
+                continue
+            observation = self.destination.lifecycle._exact_transport_observation(manifest)
+            verified.append(
+                replace(
+                    candidate,
+                    transport_evidence=self.destination.lifecycle._sign_transport_evidence(
+                        manifest, observation
+                    ),
+                )
+            )
+        return tuple(verified)
 
     def verify(self, plan: MigrationPlan) -> MigrationStepResult:
         """Verify every candidate payload and descriptor before activation is allowed."""
@@ -3697,7 +3886,7 @@ class OfflineMigrationService:
             evidence = self._expect_evidence(
                 MaintenanceEvidenceState.STAGED, plan_digest=plan.digest
             )
-            self._candidate_from_evidence(evidence, plan)
+            self._candidate_from_evidence(evidence, plan, verify_outputs=False)
             self._write_evidence(
                 self._new_evidence(
                     state=MaintenanceEvidenceState.VERIFYING,
@@ -3714,7 +3903,7 @@ class OfflineMigrationService:
             evidence = self._expect_evidence(
                 MaintenanceEvidenceState.VERIFYING, plan_digest=plan.digest
             )
-            self._candidate_from_evidence(evidence, plan)
+            self._candidate_from_evidence(evidence, plan, verify_outputs=False)
         else:
             raise CacheBlobMigrationEvidenceMismatchError(
                 "maintenance evidence is not ready to verify this plan",
@@ -3722,6 +3911,18 @@ class OfflineMigrationService:
             )
         receipt = evidence.candidate_receipt
         assert receipt is not None
+        verified_candidates = self._verify_candidate_outputs(
+            self._candidate_from_evidence(evidence, plan, verify_outputs=False)
+        )
+        record_verification = getattr(
+            self._destination_authority, "record_candidate_verification", None
+        )
+        if not callable(record_verification):
+            raise CacheBlobMigrationEvidenceMismatchError(
+                "destination authority cannot record verified candidate evidence",
+                context={"operation": "migration.verify", "run_id": self.run_id},
+            )
+        record_verification(receipt=receipt, entries=verified_candidates)
         self._write_evidence(
             self._new_evidence(
                 state=MaintenanceEvidenceState.VERIFIED,

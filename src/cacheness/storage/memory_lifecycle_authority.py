@@ -599,6 +599,7 @@ class InMemoryLifecycleAuthority:
                         generation=candidate.generation,
                         manifest_digest=hashlib.sha256(candidate.manifest).hexdigest(),
                     ),
+                    transport_evidence=candidate.transport_evidence,
                 )
             self._entries = activated
             self._revision = next_revision
@@ -688,6 +689,47 @@ class InMemoryLifecycleAuthority:
             return receipt
 
         return self._transition(record)
+
+    def record_candidate_verification(
+        self,
+        *,
+        receipt: VerifiedCandidateReceipt,
+        entries: tuple[AuthorityInventoryEntry, ...],
+    ) -> None:
+        """Attach only freshly verified destination evidence to one candidate.
+
+        This changes no visibility state and preserves the immutable candidate
+        receipt.  The authority accepts the update only when every descriptor
+        remains the exact candidate it already attributed.
+        """
+        if not isinstance(receipt, VerifiedCandidateReceipt) or not isinstance(entries, tuple):
+            raise TypeError("migration candidate receipt and entries must be immutable values")
+
+        def record() -> None:
+            if (
+                self._migration_state is not AuthorityPublicationState.CANDIDATE
+                or self._migration_receipt != receipt
+                or len(self._migration_candidates) != len(entries)
+            ):
+                raise CacheBlobLifecycleConflictError(
+                    "Migration candidate verification requires its recorded candidate"
+                )
+            for stored, verified in zip(self._migration_candidates, entries, strict=True):
+                if (
+                    stored.key != verified.key
+                    or stored.generation != verified.generation
+                    or stored.locator != verified.locator
+                    or stored.manifest != verified.manifest
+                    or stored.payload_digest != verified.payload_digest
+                    or stored.byte_size != verified.byte_size
+                    or stored.transport_evidence not in {None, verified.transport_evidence}
+                ):
+                    raise CacheBlobLifecycleConflictError(
+                        "Migration verification does not match the recorded candidate"
+                    )
+            self._migration_candidates = entries
+
+        self._transition(record)
 
     def candidate_entries_for_run(self, *, run_id: str) -> tuple[AuthorityInventoryEntry, ...]:
         """Return only exact candidate descriptors already held by this authority."""
