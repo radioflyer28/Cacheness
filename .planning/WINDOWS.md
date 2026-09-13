@@ -2,9 +2,9 @@
 schema_version: 1
 open_count: 6
 waived_count: 0
-fixed_count: 46
-total_count: 52
-last_updated: 2026-09-13T23:15:51.533Z
+fixed_count: 49
+total_count: 55
+last_updated: 2026-09-13T23:41:39.553Z
 ---
 
 # Broken Windows Ledger
@@ -67,6 +67,9 @@ last_updated: 2026-09-13T23:15:51.533Z
 | 50 | 07.1 | deviation | tests/contracts/test_topology_lifecycle.py |  | Remote topology fake and frozen threat selectors lagged unified obstore participant contracts | fixed |  | 2026-09-13T18:33:22.474Z | 2026-09-13T18:33:53.730Z |
 | 51 | 08 | deviation | tools/run_phase8_local_gates.py | 186 | Default child callback captured the original subprocess runner, bypassing test monkeypatches. | fixed |  | 2026-09-13T23:13:15.132Z | 2026-09-13T23:13:34.810Z |
 | 52 | 08 | deviation | .planning/STATE.md |  | The legacy Current Position lacks plan-counter fields, so state.advance-plan could not advance the Phase 8 plan position automatically. | fixed |  | 2026-09-13T23:14:45.016Z | 2026-09-13T23:15:51.533Z |
+| 53 | 08 | deviation | tools/run_phase8_packaging.py |  | Corrected native NPZ metadata assertion to the public nested metadata shape. | fixed |  | 2026-09-13T23:41:18.606Z | 2026-09-13T23:41:39.276Z |
+| 54 | 08 | deviation | tools/phase8_evidence.py |  | Added the packaging-only evidence allow-list required for sanitized package qualification. | fixed |  | 2026-09-13T23:41:18.763Z | 2026-09-13T23:41:39.408Z |
+| 55 | 08 | deviation | tools/run_phase8_packaging.py |  | Preserved reviewed non-live group order in canonical packaging evidence. | fixed |  | 2026-09-13T23:41:18.902Z | 2026-09-13T23:41:39.553Z |
 
 ````json
 [
@@ -693,6 +696,42 @@ last_updated: 2026-09-13T23:15:51.533Z
     "reason": "",
     "recorded_at": "2026-09-13T23:14:45.016Z",
     "resolved_at": "2026-09-13T23:15:51.533Z"
+  },
+  {
+    "id": 53,
+    "kind": "deviation",
+    "phase": "08",
+    "file": "tools/run_phase8_packaging.py",
+    "line": null,
+    "description": "Corrected native NPZ metadata assertion to the public nested metadata shape.",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-09-13T23:41:18.606Z",
+    "resolved_at": "2026-09-13T23:41:39.276Z"
+  },
+  {
+    "id": 54,
+    "kind": "deviation",
+    "phase": "08",
+    "file": "tools/phase8_evidence.py",
+    "line": null,
+    "description": "Added the packaging-only evidence allow-list required for sanitized package qualification.",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-09-13T23:41:18.763Z",
+    "resolved_at": "2026-09-13T23:41:39.408Z"
+  },
+  {
+    "id": 55,
+    "kind": "deviation",
+    "phase": "08",
+    "file": "tools/run_phase8_packaging.py",
+    "line": null,
+    "description": "Preserved reviewed non-live group order in canonical packaging evidence.",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-09-13T23:41:18.902Z",
+    "resolved_at": "2026-09-13T23:41:39.553Z"
   }
 ]
 ````

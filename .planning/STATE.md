@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 08
 current_phase_name: Production Gates and Performance Stabilization
 status: executing
-stopped_at: Completed 08-01-PLAN.md
-last_updated: "2026-09-13T23:15:51.533Z"
+stopped_at: Completed 08-02-PLAN.md
+last_updated: "2026-09-13T23:41:01.298Z"
 last_activity: 2026-09-13
-last_activity_desc: Phase 08 Plan 01 completed; deterministic evidence tracer recorded
-state_head: 1c2700d457be571c9202b22aba2fffb6706aac13
+last_activity_desc: Phase 08 Plan 02 completed; isolated wheel matrix and packaging evidence recorded
+state_head: c09c1865a00975fda62e891b66408ed354288357
 progress:
   total_phases: 9
-  completed_phases: 8
+  completed_phases: 7
   total_plans: 128
-  completed_plans: 116
+  completed_plans: 117
 milestone_name: milestone
 ---
 
@@ -29,9 +29,9 @@ See: .planning/PROJECT.md (updated 2026-09-13)
 ## Current Position
 
 Phase: 08 — Production Gates and Performance Stabilization
-Plan: 02 of 12
-Status: In progress
-Last activity: 2026-09-13 — Phase 08 Plan 01 completed; deterministic evidence tracer recorded
+Plan: 3 of 12
+Status: Ready to execute
+Last activity: 2026-09-13 — Phase 08 Plan 02 completed; isolated wheel matrix and packaging evidence recorded
 
 Phase 07.1 closed with 11/11 plans summarized and an independent 46/46
 must-have verification pass. Built-in filesystem, memory, and S3 payload
@@ -195,6 +195,7 @@ the deliberately superseded Phase 03 plan; do not fabricate its completion.
 | Phase 07.1 P10 | 666s | 2 tasks | 10 files |
 | Phase 07.1 P11 | 24m | 3 tasks | 13 files |
 | Phase 08 P01 | 16m | 2 tasks | 3 files |
+| Phase 08 P02 | 17m | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -465,6 +466,9 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - [Phase 08]: Deterministic PASS evidences integrity, recovery, and progress only; performance remains NOT_QUALIFIED.
 - [Phase 08]: A passing deterministic gate exits 2 while external evidence classes are UNAVAILABLE, preventing a partial release pass.
 - [Phase 08]: Later release tooling must revalidate both the exact Git revision and reviewed-source SHA-256 digest.
+- [Phase 08]: Wheel probes freeze literal public exports and reject source-tree imports.
+- [Phase 08]: Each optional group uses a fresh wheel environment; service-labelled extras remain non-live.
+- [Phase 08]: TensorFlow packaging evidence is UNAVAILABLE outside reviewed stable minors, never a skip-based pass.
 
 ### Pending Todos
 
@@ -494,6 +498,6 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 
 ## Session Continuity
 
-Last session: 2026-09-13T23:14:02.768Z
-Stopped at: Completed 08-01-PLAN.md
+Last session: 2026-09-13T23:41:01.017Z
+Stopped at: Completed 08-02-PLAN.md
 Resume file: None
