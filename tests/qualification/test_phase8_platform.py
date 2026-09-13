@@ -81,10 +81,25 @@ def test_python_advisory_result_cannot_satisfy_or_invalidate_stable_slot(runner)
 def test_python_tensorflow_profile_has_explicit_stable_compatibility(runner) -> None:
     """TensorFlow gaps are nonqualifying results, never skip-based qualification."""
     assert runner.TENSORFLOW_COMPATIBLE_MINORS == ("3.11", "3.12", "3.13")
-    rows = _stable_rows(runner, profile="tensorflow")
+    rows = [
+        runner.build_row(
+            expected_os="Linux",
+            python_minor=minor,
+            feature_profile="tensorflow",
+            command_status="PASS",
+        )
+        for minor in runner.TENSORFLOW_COMPATIBLE_MINORS
+    ]
     assert runner.aggregate_feature_rows(rows)["status"] == "QUALIFIED"
 
-    rows[-1]["command_status"] = "SKIPPED"
+    rows.append(
+        runner.build_row(
+            expected_os="Linux",
+            python_minor="3.14",
+            feature_profile="tensorflow",
+            command_status="SKIPPED",
+        )
+    )
     with pytest.raises(ValueError, match="not compatible"):
         runner.aggregate_feature_rows(rows)
 
@@ -105,5 +120,4 @@ def test_python_runtime_identity_mismatch_is_rejected(runner, tmp_path: Path) ->
     assert exit_code == 2
     evidence = json.loads(output.read_text(encoding="utf-8"))
     assert evidence["status"] == "UNAVAILABLE"
-    assert evidence["reason"] == "runtime_identity_mismatch"
-
+    assert evidence["payload"]["reason"] == "runtime_identity_mismatch"

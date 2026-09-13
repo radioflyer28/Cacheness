@@ -69,6 +69,17 @@ _COMMON_PAYLOAD_KEYS = frozenset(
     {"result", "claim_categories", "non_qualifying_classes", "subjects"}
 )
 _DETERMINISTIC_PAYLOAD_KEYS = _COMMON_PAYLOAD_KEYS | {"command"}
+_PLATFORM_PAYLOAD_KEYS = _COMMON_PAYLOAD_KEYS | {
+    "expected_os",
+    "actual_os",
+    "expected_python_minor",
+    "actual_python_minor",
+    "feature_profile",
+    "role",
+    "advisory",
+    "command_profile",
+    "reason",
+}
 _PACKAGING_PAYLOAD_KEYS = _COMMON_PAYLOAD_KEYS | {
     "wheel_sha256",
     "python",
@@ -248,6 +259,40 @@ def _validate_packaging_payload(payload: Mapping[str, object]) -> dict[str, obje
     }
 
 
+def _validate_platform_payload(payload: Mapping[str, object]) -> dict[str, object]:
+    """Validate one bounded, runtime-bound platform qualification row."""
+    expected_os = _validate_safe_text(payload.get("expected_os"), field="expected_os")
+    actual_os = _validate_safe_text(payload.get("actual_os"), field="actual_os")
+    expected_python_minor = _validate_safe_text(
+        payload.get("expected_python_minor"), field="expected_python_minor"
+    )
+    actual_python_minor = _validate_safe_text(
+        payload.get("actual_python_minor"), field="actual_python_minor"
+    )
+    feature_profile = _validate_safe_text(
+        payload.get("feature_profile"), field="feature_profile"
+    )
+    role = _validate_safe_text(payload.get("role"), field="role")
+    command_profile = _validate_safe_text(
+        payload.get("command_profile"), field="command_profile"
+    )
+    reason = _validate_safe_text(payload.get("reason"), field="reason")
+    advisory = payload.get("advisory")
+    if not isinstance(advisory, bool):
+        raise EvidenceValidationError("invalid advisory")
+    return {
+        "expected_os": expected_os,
+        "actual_os": actual_os,
+        "expected_python_minor": expected_python_minor,
+        "actual_python_minor": actual_python_minor,
+        "feature_profile": feature_profile,
+        "role": role,
+        "advisory": advisory,
+        "command_profile": command_profile,
+        "reason": reason,
+    }
+
+
 def _validate_payload(
     evidence_class: str, status: str, payload: object
 ) -> dict[str, object]:
@@ -255,6 +300,7 @@ def _validate_payload(
         raise EvidenceValidationError("invalid payload")
     allowed = {
         "deterministic": _DETERMINISTIC_PAYLOAD_KEYS,
+        "platform": _PLATFORM_PAYLOAD_KEYS,
         "packaging": _PACKAGING_PAYLOAD_KEYS,
     }.get(evidence_class, _COMMON_PAYLOAD_KEYS)
     if set(payload) != allowed:
@@ -297,7 +343,14 @@ def _validate_payload(
     if evidence_class == "packaging":
         validated.update(_validate_packaging_payload(payload))
 
-    if status == "PASS" and evidence_class not in {"deterministic", "packaging"}:
+    if evidence_class == "platform":
+        validated.update(_validate_platform_payload(payload))
+
+    if status == "PASS" and evidence_class not in {
+        "deterministic",
+        "packaging",
+        "platform",
+    }:
         raise EvidenceValidationError("only implemented evidence producers may pass")
     return validated
 
