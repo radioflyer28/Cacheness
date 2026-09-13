@@ -77,6 +77,19 @@ def test_python_advisory_result_cannot_satisfy_or_invalidate_stable_slot(runner)
     with pytest.raises(ValueError, match="stable row cannot be advisory"):
         runner.aggregate_rows(contradictory)
 
+    unpublished = _stable_rows(runner)
+    unpublished.append(
+        runner.build_row(
+            expected_os="Linux",
+            python_minor="3.16",
+            feature_profile="core",
+            command_status="PASS",
+            advisory=True,
+        )
+    )
+    with pytest.raises(ValueError, match="published advisory"):
+        runner.aggregate_rows(unpublished)
+
 
 def test_python_tensorflow_profile_has_explicit_stable_compatibility(runner) -> None:
     """TensorFlow gaps are nonqualifying results, never skip-based qualification."""
@@ -98,6 +111,27 @@ def test_python_tensorflow_profile_has_explicit_stable_compatibility(runner) -> 
             python_minor="3.14",
             feature_profile="tensorflow",
             command_status="SKIPPED",
+        )
+    )
+    with pytest.raises(ValueError, match="not compatible"):
+        runner.aggregate_feature_rows(rows)
+
+    rows = [
+        runner.build_row(
+            expected_os="Linux",
+            python_minor=minor,
+            feature_profile="tensorflow",
+            command_status="PASS",
+        )
+        for minor in runner.TENSORFLOW_COMPATIBLE_MINORS
+    ]
+    rows.append(
+        runner.build_row(
+            expected_os="Linux",
+            python_minor="3.15",
+            feature_profile="tensorflow",
+            command_status="PASS",
+            advisory=True,
         )
     )
     with pytest.raises(ValueError, match="not compatible"):
