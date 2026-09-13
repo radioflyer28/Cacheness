@@ -177,7 +177,6 @@ dependencies = [
 
 [package.optional-dependencies]
 cloud = [
-    { name = "boto3" },
     { name = "psycopg", extra = ["binary"] },
     { name = "sqlalchemy" },
 ]
@@ -199,9 +198,6 @@ recommended = [
     { name = "pandas" },
     { name = "pyarrow" },
     { name = "sqlalchemy" },
-]
-s3 = [
-    { name = "boto3" },
 ]
 tensorflow = [
     { name = "tensorflow" },
@@ -240,8 +236,6 @@ tensorflow = [
 [package.metadata]
 requires-dist = [
     { name = "blosc2", marker = "extra == 'recommended'", specifier = ">=3.5.1" },
-    { name = "boto3", marker = "extra == 'cloud'", specifier = ">=1.26.0" },
-    { name = "boto3", marker = "extra == 's3'", specifier = ">=1.26.0" },
     { name = "cachetools", specifier = ">=6.1.0" },
     { name = "cryptography", specifier = ">=46.0.3" },
     { name = "dill", marker = "extra == 'recommended'", specifier = ">=0.4.0" },

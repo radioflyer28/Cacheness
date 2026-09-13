@@ -34,15 +34,12 @@ dataframes = [
 tensorflow = [
     "tensorflow>=2.0.0",
 ]
-s3 = [
-    "boto3>=1.26.0",
-]
+s3 = []
 postgresql = [
     "psycopg[binary]>=3.1.0",
     "sqlalchemy>=2.0.0",
 ]
 cloud = [
-    "boto3>=1.26.0",
     "psycopg[binary]>=3.1.0",
     "sqlalchemy>=2.0.0",
 ]

@@ -35,6 +35,7 @@ REQUIRED_CONFIGURATION = (
     "CACHENESS_TEST_POSTGRES_DSN",
     "CACHENESS_TEST_S3_BUCKET",
     "CACHENESS_TEST_MANIFEST_KEY_B64",
+    "CACHENESS_TEST_AWS_REGION",
 )
 LIVE_TEST_MODULES = (
     "tests/integration/test_postgresql_authority.py",
@@ -223,14 +224,9 @@ def resolve_aws_service_identity(environment: Mapping[str, str]) -> AwsServiceId
     except ImportError as error:
         raise QualificationUnavailableError("AWS SDK unavailable") from error
 
-    region = (
-        environment.get("CACHENESS_TEST_AWS_REGION")
-        or environment.get("AWS_REGION")
-        or environment.get("AWS_DEFAULT_REGION")
-        or "unspecified"
-    )
+    region = environment["CACHENESS_TEST_AWS_REGION"]
     try:
-        session = boto3.Session(region_name=None if region == "unspecified" else region)
+        session = boto3.Session(region_name=region)
         credentials = session.get_credentials()
     except Exception as error:
         raise QualificationUnavailableError("AWS credentials unavailable") from error

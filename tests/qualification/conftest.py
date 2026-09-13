@@ -43,8 +43,7 @@ class QualificationConfig:
     postgres_dsn: str
     s3_bucket: str
     manifest_key: bytes
-    region: str | None
-    expected_bucket_owner: str | None
+    region: str
 
 
 @dataclass(frozen=True)
@@ -97,8 +96,12 @@ def qualification_config_from_environment(
         "CACHENESS_TEST_POSTGRES_DSN",
         "CACHENESS_TEST_S3_BUCKET",
         "CACHENESS_TEST_MANIFEST_KEY_B64",
+        "CACHENESS_TEST_AWS_REGION",
     )
-    if any(not environment.get(name) for name in required):
+    missing = tuple(name for name in required if not environment.get(name))
+    if "CACHENESS_TEST_AWS_REGION" in missing:
+        raise QualificationConfigurationError("explicit AWS region is required")
+    if missing:
         raise QualificationConfigurationError("required external configuration is absent")
     try:
         key = base64.b64decode(
@@ -112,12 +115,7 @@ def qualification_config_from_environment(
         postgres_dsn=environment["CACHENESS_TEST_POSTGRES_DSN"],
         s3_bucket=environment["CACHENESS_TEST_S3_BUCKET"],
         manifest_key=key,
-        region=(
-            environment.get("CACHENESS_TEST_AWS_REGION")
-            or environment.get("AWS_REGION")
-            or environment.get("AWS_DEFAULT_REGION")
-        ),
-        expected_bucket_owner=environment.get("CACHENESS_TEST_S3_EXPECTED_BUCKET_OWNER"),
+        region=environment["CACHENESS_TEST_AWS_REGION"],
     )
 
 
@@ -150,24 +148,20 @@ def _owner_marker_payload(namespace: QualificationNamespace) -> bytes:
     )
 
 
-def _s3_owner_request(bucket: str, expected_bucket_owner: str | None) -> dict[str, str]:
-    """Attach the optional account guard without changing exact-prefix scope."""
-    request = {"Bucket": bucket}
-    if expected_bucket_owner:
-        request["ExpectedBucketOwner"] = expected_bucket_owner
-    return request
+def _s3_owner_request(bucket: str) -> dict[str, str]:
+    """Bind fixture administration to the configured exact bucket only."""
+    return {"Bucket": bucket}
 
 
 def _s3_marker_matches(
     client: Any,
     bucket: str,
     namespace: QualificationNamespace,
-    expected_bucket_owner: str | None,
 ) -> bool:
     """Read at most one small exact-key marker before any destructive operation."""
     try:
         response = client.get_object(
-            **_s3_owner_request(bucket, expected_bucket_owner),
+            **_s3_owner_request(bucket),
             Key=namespace.s3_owner_marker_key,
         )
         body = response["Body"]
@@ -184,17 +178,16 @@ def _s3_prefix_has_residue(
     client: Any,
     bucket: str,
     namespace: QualificationNamespace,
-    expected_bucket_owner: str | None,
 ) -> bool:
     """Check only the exact prefix, treating failures as unresolved residue."""
     try:
         objects = client.list_objects_v2(
-            **_s3_owner_request(bucket, expected_bucket_owner),
+            **_s3_owner_request(bucket),
             Prefix=namespace.prefix,
             MaxKeys=1,
         ).get("Contents", [])
         uploads = client.list_multipart_uploads(
-            **_s3_owner_request(bucket, expected_bucket_owner),
+            **_s3_owner_request(bucket),
             Prefix=namespace.prefix,
             MaxUploads=1,
         ).get("Uploads", [])
@@ -207,7 +200,6 @@ def _bounded_delete_prefix(
     client: Any,
     bucket: str,
     namespace: QualificationNamespace,
-    expected_bucket_owner: str | None,
 ) -> bool:
     """Delete only a marker-authorized prefix under fixed page/object/byte bounds."""
     continuation: str | None = None
@@ -218,7 +210,7 @@ def _bounded_delete_prefix(
         if pages >= _MAX_CLEANUP_PAGES:
             return False
         request: dict[str, object] = {
-            **_s3_owner_request(bucket, expected_bucket_owner),
+            **_s3_owner_request(bucket),
             "Prefix": namespace.prefix,
             "MaxKeys": _MAX_DELETE_BATCH,
         }
@@ -258,7 +250,7 @@ def _bounded_delete_prefix(
         if objects:
             try:
                 deleted = client.delete_objects(
-                    **_s3_owner_request(bucket, expected_bucket_owner),
+                    **_s3_owner_request(bucket),
                     Delete={"Objects": objects, "Quiet": True},
                 )
             except Exception:
@@ -278,7 +270,6 @@ def _s3_prefix_contains_only_owner_marker(
     client: Any,
     bucket: str,
     namespace: QualificationNamespace,
-    expected_bucket_owner: str | None,
 ) -> bool:
     """Prove bounded S3 cleanup reached only its exact authorization marker."""
     continuation: str | None = None
@@ -290,7 +281,7 @@ def _s3_prefix_contains_only_owner_marker(
         if pages >= _MAX_CLEANUP_PAGES:
             return False
         request: dict[str, object] = {
-            **_s3_owner_request(bucket, expected_bucket_owner),
+            **_s3_owner_request(bucket),
             "Prefix": namespace.prefix,
             "MaxKeys": _MAX_DELETE_BATCH,
         }
@@ -336,7 +327,7 @@ def _s3_prefix_contains_only_owner_marker(
         if upload_pages >= _MAX_CLEANUP_PAGES:
             return False
         request = {
-            **_s3_owner_request(bucket, expected_bucket_owner),
+            **_s3_owner_request(bucket),
             "Prefix": namespace.prefix,
             "MaxUploads": _MAX_DELETE_BATCH,
         }
@@ -365,12 +356,11 @@ def _delete_s3_owner_marker(
     client: Any,
     bucket: str,
     namespace: QualificationNamespace,
-    expected_bucket_owner: str | None,
 ) -> bool:
     """Delete the exact marker only after bounded cleanup proved it is alone."""
     try:
         client.delete_object(
-            **_s3_owner_request(bucket, expected_bucket_owner),
+            **_s3_owner_request(bucket),
             Key=namespace.s3_owner_marker_key,
         )
     except Exception:
@@ -382,7 +372,6 @@ def _bounded_abort_multipart_uploads(
     client: Any,
     bucket: str,
     namespace: QualificationNamespace,
-    expected_bucket_owner: str | None,
 ) -> bool:
     """Abort only observed uploads under the marker-authorized exact prefix."""
     key_marker: str | None = None
@@ -393,7 +382,7 @@ def _bounded_abort_multipart_uploads(
         if pages >= _MAX_CLEANUP_PAGES:
             return False
         request: dict[str, object] = {
-            **_s3_owner_request(bucket, expected_bucket_owner),
+            **_s3_owner_request(bucket),
             "Prefix": namespace.prefix,
             "MaxUploads": _MAX_DELETE_BATCH,
         }
@@ -426,7 +415,7 @@ def _bounded_abort_multipart_uploads(
                 return False
             try:
                 client.abort_multipart_upload(
-                    **_s3_owner_request(bucket, expected_bucket_owner),
+                    **_s3_owner_request(bucket),
                     Key=key,
                     UploadId=upload_id,
                 )
@@ -445,35 +434,26 @@ def cleanup_s3_run(
     client: Any,
     bucket: str,
     namespace: QualificationNamespace,
-    expected_bucket_owner: str | None = None,
 ) -> str:
     """Clean one exact S3 run or return residue without crossing its prefix."""
-    marker_matches = _s3_marker_matches(
-        client, bucket, namespace, expected_bucket_owner
-    )
+    marker_matches = _s3_marker_matches(client, bucket, namespace)
     if not marker_matches:
         return (
             "CLEAN"
-            if not _s3_prefix_has_residue(
-                client, bucket, namespace, expected_bucket_owner
-            )
+            if not _s3_prefix_has_residue(client, bucket, namespace)
             else "RESIDUE"
         )
-    if not _bounded_abort_multipart_uploads(
-        client, bucket, namespace, expected_bucket_owner
-    ):
+    if not _bounded_abort_multipart_uploads(client, bucket, namespace):
         return "RESIDUE"
-    if not _bounded_delete_prefix(client, bucket, namespace, expected_bucket_owner):
+    if not _bounded_delete_prefix(client, bucket, namespace):
         return "RESIDUE"
-    if not _s3_prefix_contains_only_owner_marker(
-        client, bucket, namespace, expected_bucket_owner
-    ):
+    if not _s3_prefix_contains_only_owner_marker(client, bucket, namespace):
         return "RESIDUE"
-    if not _delete_s3_owner_marker(client, bucket, namespace, expected_bucket_owner):
+    if not _delete_s3_owner_marker(client, bucket, namespace):
         return "RESIDUE"
     return (
         "CLEAN"
-        if not _s3_prefix_has_residue(client, bucket, namespace, expected_bucket_owner)
+        if not _s3_prefix_has_residue(client, bucket, namespace)
         else "RESIDUE"
     )
 
@@ -602,8 +582,6 @@ def _create_s3_owner_marker(client: Any, config: QualificationConfig, namespace:
         "Body": _owner_marker_payload(namespace),
         "ContentType": "application/json",
     }
-    if config.expected_bucket_owner:
-        request["ExpectedBucketOwner"] = config.expected_bucket_owner
     client.put_object(**request)
 
 
@@ -654,12 +632,7 @@ def cleanup_qualification_resources(environment: Mapping[str, str], run_id: str)
     except Exception:
         return "RESIDUE"
     postgres_status = cleanup_postgresql_run(config, namespace)
-    s3_status = cleanup_s3_run(
-        client,
-        config.s3_bucket,
-        namespace,
-        config.expected_bucket_owner,
-    )
+    s3_status = cleanup_s3_run(client, config.s3_bucket, namespace)
     return "CLEAN" if postgres_status == s3_status == "CLEAN" else "RESIDUE"
 
 

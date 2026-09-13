@@ -51,6 +51,26 @@ def _load_verifier():
     return module
 
 
+def test_live_qualification_requires_an_explicit_region_without_owner_pinning() -> None:
+    """Phase 8's live gate keeps D-16's explicit AWS configuration boundary."""
+    fixtures = _load_fixtures()
+    environment = {
+        "CACHENESS_TEST_POSTGRES_DSN": "postgresql://test:password@db/qualification",
+        "CACHENESS_TEST_S3_BUCKET": "qualification-bucket",
+        "CACHENESS_TEST_MANIFEST_KEY_B64": "bW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW0=",
+    }
+
+    with pytest.raises(fixtures.QualificationConfigurationError, match="AWS region"):
+        fixtures.qualification_config_from_environment(environment)
+
+    config = fixtures.qualification_config_from_environment(
+        {**environment, "CACHENESS_TEST_AWS_REGION": "us-east-1"}
+    )
+    assert config.region == "us-east-1"
+    assert not hasattr(config, "expected_bucket_owner")
+    assert "ExpectedBucketOwner" not in FIXTURES_PATH.read_text(encoding="utf-8")
+
+
 def test_missing_configuration_writes_sanitized_unavailable_evidence(
     tmp_path: Path,
 ) -> None:
@@ -66,6 +86,7 @@ def test_missing_configuration_writes_sanitized_unavailable_evidence(
     assert evidence["status"] == "UNAVAILABLE"
     assert evidence["missing_configuration"] == sorted(
         {
+            "CACHENESS_TEST_AWS_REGION",
             "CACHENESS_TEST_MANIFEST_KEY_B64",
             "CACHENESS_TEST_POSTGRES_DSN",
             "CACHENESS_TEST_S3_BUCKET",
@@ -99,6 +120,7 @@ def test_only_a_complete_live_run_and_clean_cleanup_can_qualify(
         "CACHENESS_TEST_POSTGRES_DSN": "postgresql://test:password@db/qualification",
         "CACHENESS_TEST_S3_BUCKET": "qualification-bucket",
         "CACHENESS_TEST_MANIFEST_KEY_B64": "bW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW0=",
+        "CACHENESS_TEST_AWS_REGION": "us-east-1",
     }
 
     exit_code = runner.run_qualification(
@@ -140,7 +162,7 @@ def test_runner_passes_only_the_exact_run_identifier_to_its_live_subprocess(
             "CACHENESS_TEST_POSTGRES_DSN": "postgresql://test:password@db/qualification",
             "CACHENESS_TEST_S3_BUCKET": "qualification-bucket",
             "CACHENESS_TEST_MANIFEST_KEY_B64": "bW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW0=",
-            "AWS_REGION": "us-east-1",
+            "CACHENESS_TEST_AWS_REGION": "us-east-1",
         },
         resolve_aws=lambda _environment: runner.AwsServiceIdentity(
             region="us-east-1", provider="standard"
@@ -175,7 +197,7 @@ def test_frozen_live_suite_loads_the_qualification_fixture_plugin() -> None:
     output = f"{completed.stdout}\n{completed.stderr}"
 
     assert completed.returncode != 0
-    assert "required external configuration is absent" in output
+    assert "explicit AWS region is required" in output
     assert "fixture 'live_qualification_resources' not found" not in output
 
 
@@ -201,6 +223,7 @@ def test_dirty_qualification_source_prevents_live_subprocess_execution(
             "CACHENESS_TEST_POSTGRES_DSN": "postgresql://test:password@db/qualification",
             "CACHENESS_TEST_S3_BUCKET": "qualification-bucket",
             "CACHENESS_TEST_MANIFEST_KEY_B64": "bW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW0=",
+            "CACHENESS_TEST_AWS_REGION": "us-east-1",
         },
         run_tests=should_not_run,
     )
@@ -256,6 +279,7 @@ def test_endpoint_override_is_not_a_live_amazon_s3_configuration(tmp_path: Path)
             "CACHENESS_TEST_POSTGRES_DSN": "postgresql://test:password@db/qualification",
             "CACHENESS_TEST_S3_BUCKET": "qualification-bucket",
             "CACHENESS_TEST_MANIFEST_KEY_B64": "bW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW0=",
+            "CACHENESS_TEST_AWS_REGION": "us-east-1",
             "AWS_ENDPOINT_URL_S3": "http://localhost:4566",
         },
         run_tests=should_not_run,
@@ -377,6 +401,7 @@ def test_fixture_configuration_uses_one_bounded_owned_namespace_and_two_signers(
         "CACHENESS_TEST_POSTGRES_DSN": "postgresql://test:password@db/qualification",
         "CACHENESS_TEST_S3_BUCKET": "qualification-bucket",
         "CACHENESS_TEST_MANIFEST_KEY_B64": "bW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW0=",
+        "CACHENESS_TEST_AWS_REGION": "us-east-1",
     }
 
     config = fixtures.qualification_config_from_environment(environment)

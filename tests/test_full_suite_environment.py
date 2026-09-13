@@ -6,7 +6,9 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
+import tomllib
 from types import SimpleNamespace
 
 
@@ -84,7 +86,6 @@ def test_documented_full_suite_command_uses_locked_extras_and_dev_group():
     assert DOCUMENTED_FULL_SUITE_COMMAND in guide
     assert '"sqlalchemy>=2.0.0"' in pyproject
     assert '"pandas>=2.0.0,<4.0.0"' in pyproject
-    assert '"boto3>=1.26.0"' in pyproject
     assert '"pytest>=8.4.1"' in pyproject
     assert '"ruff>=0.12.8"' in pyproject
     assert TEST_ISOLATION_CLASSIFICATION["bare_collection"]
@@ -92,6 +93,85 @@ def test_documented_full_suite_command_uses_locked_extras_and_dev_group():
         "bare_collection_missing"
     ]
     assert "23 S3/botocore" in TEST_ISOLATION_CLASSIFICATION["mutating_cascade"]
+
+
+def test_phase071_runtime_extras_keep_boto3_in_test_tooling_only():
+    """The obstore cutover has no boto3 production dependency escape hatch."""
+    package = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text("utf-8"))
+    optional = package["project"]["optional-dependencies"]
+    all_runtime_dependencies = [
+        *package["project"]["dependencies"],
+        *(dependency for group in optional.values() for dependency in group),
+    ]
+
+    assert any(
+        dependency.startswith("obstore==0.11.1")
+        for dependency in package["project"]["dependencies"]
+    )
+    assert optional["s3"] == []
+    assert all(
+        "boto3" not in dependency.lower()
+        for dependency in all_runtime_dependencies
+    )
+    assert any(
+        dependency.startswith("moto[s3,server]")
+        for dependency in package["dependency-groups"]["dev"]
+    )
+
+
+def test_phase071_clean_wheel_base_and_selected_extras_cut_over_to_obstore(
+    tmp_path: Path,
+) -> None:
+    """Fresh wheel environments need obstore, never boto3, for current transports."""
+    dist = tmp_path / "dist"
+    subprocess.run(
+        ["uv", "build", "--wheel", "--out-dir", str(dist)],
+        cwd=PROJECT_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    wheel = next(dist.glob("cacheness-*.whl"))
+    memory_round_trip = """
+from cacheness.storage import BackendRef, BlobStore, StoreTopology
+
+store = BlobStore(
+    StoreTopology(
+        payload=BackendRef(name=\"memory\"),
+        authority=BackendRef(name=\"memory\"),
+    )
+)
+store.initialize()
+try:
+    key = store.put({\"answer\": 42}, key=\"wheel-round-trip\")
+    assert store.get(key) == {\"answer\": 42}
+finally:
+    store.close()
+"""
+    for extra in (None, "s3", "cloud"):
+        requirement = str(wheel) if extra is None else f"{wheel}[{extra}]"
+        command = [
+            "uv",
+            "run",
+            "--isolated",
+            "--no-project",
+            "--with",
+            requirement,
+            "python",
+            "-c",
+            "import cacheness, cacheness.storage; "
+            "from importlib.util import find_spec; "
+            "assert find_spec('boto3') is None",
+        ]
+        if extra is None:
+            command[-1] = memory_round_trip
+        subprocess.run(
+            command,
+            cwd=tmp_path,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
 
 
 def test_phase6_local_suite_command_keeps_live_qualification_out_of_local_evidence():
