@@ -12,9 +12,9 @@ provides:
   - ADR 0001 progress classifications preserved in platform evidence aggregation
 affects: [phase-08-release-evidence, ci-platform-matrix, QUAL-03]
 actuals:
-  tokens: 8555.5
+  tokens: 8842.5
   tasks: 2
-  commits: 4
+  commits: 6
 tech-stack:
   added: []
   patterns:
@@ -57,7 +57,7 @@ coverage:
         ref: tests/qualification/test_phase8_platform.py#test_platform_windows_is_non_native_unavailable_without_substitute_execution
         status: pass
     human_judgment: false
-duration: 8m 33s
+duration: 12m 13s
 completed: 2026-09-13
 status: complete
 ---
@@ -68,9 +68,9 @@ status: complete
 
 ## Performance
 
-- **Duration:** 8m 33s
+- **Duration:** 12m 13s
 - **Started:** 2026-09-13T23:44:48Z
-- **Completed:** 2026-09-13T23:53:21Z
+- **Completed:** 2026-09-13T23:57:01Z
 - **Tasks:** 2
 - **Files modified:** 3
 
@@ -89,6 +89,9 @@ status: complete
 2. **Task 2: Separate Linux qualification, macOS boundary smoke, and Windows nonclaim**
    - `d7b16eb` (`test`) — failing platform-role contract
    - `c18d216` (`feat`) — fixed role aggregation and non-native Windows evidence
+3. **Matrix hardening discovered during final verification**
+   - `8715e49` (`test`) — failing advisory-substitution regression coverage
+   - `ddafc6e` (`fix`) — published advisory and TensorFlow compatibility enforcement
 
 ## Files Created/Modified
 
@@ -125,15 +128,24 @@ status: complete
 - **Verification:** `uv run ruff check tools/run_phase8_platform_gates.py tools/phase8_evidence.py tests/qualification/test_phase8_platform.py`
 - **Committed in:** `9c2e1e1`
 
+**3. [Rule 1 - Bug] Rejected advisory matrix substitutions outside published ranges.**
+
+- **Found during:** Final matrix verification
+- **Issue:** An arbitrary non-stable advisory core row, or an advisory TensorFlow row outside 3.11–3.13, could be ignored rather than rejected by aggregation.
+- **Fix:** Allow only the declared 3.15 advisory core row and check TensorFlow compatibility before advisory handling.
+- **Files modified:** `tests/qualification/test_phase8_platform.py`, `tools/run_phase8_platform_gates.py`
+- **Verification:** Focused platform contracts and Ruff pass.
+- **Committed in:** `8715e49`, `ddafc6e`
+
 ---
 
-**Total deviations:** 2 auto-fixed (1 Rule 2, 1 Rule 1).
+**Total deviations:** 3 auto-fixed (1 Rule 2, 2 Rule 1).
 **Impact on plan:** Both changes are required for a trustworthy evidence boundary; neither changes payload storage, portability behavior, or lifecycle coordination.
 
 ## TDD Gate Compliance
 
-- RED commits: `f19a876`, `d7b16eb`
-- GREEN commits: `9c2e1e1`, `c18d216`
+- RED commits: `f19a876`, `d7b16eb`, `8715e49`
+- GREEN commits: `9c2e1e1`, `c18d216`, `ddafc6e`
 - REFACTOR commits: none required
 
 ## Verification
@@ -155,7 +167,7 @@ Later release tooling can consume strict platform row evidence without treating 
 ## Self-Check: PASSED
 
 - All three implementation/test artifacts and this summary exist on disk.
-- All four RED/GREEN task commits resolve in the repository history.
+- All six RED/GREEN and regression-fix commits resolve in the repository history.
 
 ---
 *Phase: 08-production-gates-and-performance-stabilization*
