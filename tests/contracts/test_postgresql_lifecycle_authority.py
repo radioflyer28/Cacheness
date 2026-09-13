@@ -166,6 +166,78 @@ def test_constructor_is_non_materializing_and_initialize_is_explicit() -> None:
     assert factory.connections[0].closed is True
 
 
+def test_schema_five_declares_bounded_transport_evidence_columns() -> None:
+    """The explicit durable cutover materializes evidence only in schema five."""
+    from cacheness.storage.backends.postgresql_lifecycle_authority import (
+        POSTGRESQL_AUTHORITY_CAPABILITY,
+        POSTGRESQL_AUTHORITY_SCHEMA_VERSION,
+        PostgresqlLifecycleAuthority,
+    )
+
+    factory = _Factory()
+    PostgresqlLifecycleAuthority(factory, schema="phase5_authority").initialize()
+
+    statements = [
+        _query_text(query) for query, _ in factory.connections[0].executions
+    ]
+    assert POSTGRESQL_AUTHORITY_SCHEMA_VERSION == 5
+    assert POSTGRESQL_AUTHORITY_CAPABILITY == "postgresql-lifecycle-authority-v5"
+    assert sum("transport_evidence bytea" in statement for statement in statements) == 4
+
+
+def test_postgresql_verification_replays_exact_transport_evidence() -> None:
+    """One verification transition stores and returns signed opaque evidence unchanged."""
+    from cacheness.storage.backends.postgresql_lifecycle_authority import (
+        PostgresqlLifecycleAuthority,
+    )
+
+    spec = MutationSpec.create(
+        operation_id="transport-evidence-operation",
+        key="transport-evidence-key",
+        generation="generation-1",
+        candidate_locator="generations/generation-1.native",
+        expected=EntryExpectation.absent(),
+        manifest=b"transport-evidence-manifest",
+    )
+    proof = VerificationProof(
+        "a" * 64,
+        len(spec.manifest),
+        spec.manifest,
+        b"signed-transport-evidence",
+    )
+    factory = _Factory(
+        scripts=[
+            [(spec.operation_id,)],
+            [
+                (
+                    spec.key,
+                    spec.generation,
+                    spec.candidate_locator,
+                    None,
+                    None,
+                    None,
+                    None,
+                    spec.manifest,
+                    proof.digest,
+                    proof.byte_size,
+                    proof.transport_evidence,
+                    "prepared",
+                )
+            ],
+        ]
+    )
+    authority = PostgresqlLifecycleAuthority(factory, schema="phase5_authority")
+    prepared = PreparedMutation(spec.operation_id, spec)
+
+    authority.record_verification(prepared, proof)
+    replay = authority.read_mutation(spec.operation_id)
+
+    assert replay is not None
+    assert replay.verification == proof
+    record_parameters = factory.connections[0].executions[-1][1]
+    assert proof.transport_evidence in record_parameters
+
+
 def test_blob_store_public_initialize_provisions_a_fresh_postgresql_authority(
     tmp_path,
 ) -> None:
