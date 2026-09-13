@@ -243,19 +243,19 @@ def test_blob_store_public_initialize_provisions_a_fresh_postgresql_authority(
 ) -> None:
     """The public remote boundary creates before it performs read-only validation."""
     from cacheness.storage import BlobStore
-    from cacheness.storage.backends.blob_backends import InMemoryBlobBackend
     from cacheness.storage.backends.postgresql_lifecycle_authority import (
         POSTGRESQL_AUTHORITY_CAPABILITY,
         POSTGRESQL_AUTHORITY_SCHEMA_VERSION,
         PostgresqlLifecycleAuthority,
     )
     from cacheness.storage.composition import BackendRef, StoreTopology
+    from cacheness.storage.obstore_generation_io import ObstoreGenerationIO
 
     class StaticManifestKey:
         def get_key(self) -> bytes:
             return b"r" * 32
 
-    class RemotePayload(InMemoryBlobBackend):
+    class RemotePayload:
         qualification_identity = "s3"
         topology_capabilities = {
             "durable": True,
@@ -265,6 +265,17 @@ def test_blob_store_public_initialize_provisions_a_fresh_postgresql_authority(
             "streaming": True,
             "listing": True,
         }
+
+        def __init__(self) -> None:
+            self._participant = ObstoreGenerationIO.for_memory(
+                handler_root=tmp_path / "remote-payload-handler"
+            )
+
+        def materialize_handler_io(self) -> object:
+            return self._participant.materialize_handler_io()
+
+        def close(self) -> None:
+            self._participant.close()
 
     required_tables = [
         ("authority_meta",),
@@ -334,13 +345,13 @@ def test_fresh_blobstore_initialize_rechecks_activated_offline_after_postgresql_
 ) -> None:
     """A fresh remote worker must fence persisted offline activation before readiness."""
     from cacheness.storage import BlobStore
-    from cacheness.storage.backends.blob_backends import InMemoryBlobBackend
     from cacheness.storage.backends.postgresql_lifecycle_authority import (
         POSTGRESQL_AUTHORITY_CAPABILITY,
         POSTGRESQL_AUTHORITY_SCHEMA_VERSION,
         PostgresqlLifecycleAuthority,
     )
     from cacheness.storage.composition import BackendRef, StoreTopology
+    from cacheness.storage.obstore_generation_io import ObstoreGenerationIO
 
     events: list[str] = []
 
@@ -349,7 +360,7 @@ def test_fresh_blobstore_initialize_rechecks_activated_offline_after_postgresql_
             events.append("manifest_key")
             return b"r" * 32
 
-    class RecordingRemotePayload(InMemoryBlobBackend):
+    class RecordingRemotePayload:
         qualification_identity = "s3"
         topology_capabilities = {
             "durable": True,
@@ -360,9 +371,17 @@ def test_fresh_blobstore_initialize_rechecks_activated_offline_after_postgresql_
             "listing": True,
         }
 
+        def __init__(self) -> None:
+            self._participant = ObstoreGenerationIO.for_memory(
+                handler_root=tmp_path / "recording-remote-payload-handler"
+            )
+
         def materialize_handler_io(self) -> object:
             events.append("materialize")
-            return super().materialize_handler_io()
+            return self._participant.materialize_handler_io()
+
+        def close(self) -> None:
+            self._participant.close()
 
     class RecordingAuthority(PostgresqlLifecycleAuthority):
         qualification_identity = "postgresql"

@@ -237,12 +237,12 @@ def test_contract_markers_are_unique(path: Path, start: str, end: str) -> None:
         ),
         (
             "def publish(authority):\n    authority.promote_mutation(None)\n",
-            "src/cacheness/storage/backends/s3_backend.py",
+            "src/cacheness/storage/obstore_generation_io.py",
             ("payload adapter invokes authority transition: promote_mutation",),
         ),
         (
             "def visible(client):\n    if client.head_object(Bucket='x', Key='y'):\n        return True\n",
-            "src/cacheness/storage/backends/s3_backend.py",
+            "src/cacheness/storage/obstore_generation_io.py",
             ("S3 observation used as visibility authority",),
         ),
         (
@@ -252,17 +252,17 @@ def test_contract_markers_are_unique(path: Path, start: str, end: str) -> None:
         ),
         (
             "client.list_objects_v2(Bucket='bucket', Prefix='prefix')\n",
-            "src/cacheness/storage/backends/s3_backend.py",
+            "src/cacheness/storage/obstore_generation_io.py",
             ("unbounded S3 listing: list_objects_v2",),
         ),
         (
             "if response['ETag'] == manifest.digest:\n    return True\n",
-            "src/cacheness/storage/backends/s3_backend.py",
+            "src/cacheness/storage/obstore_generation_io.py",
             ("ETag used as integrity authority",),
         ),
         (
             "MANIFEST_SECRET = 'do-not-commit'\n",
-            "src/cacheness/storage/backends/s3_backend.py",
+            "src/cacheness/storage/obstore_generation_io.py",
             ("inline secret assignment: MANIFEST_SECRET",),
         ),
     ],

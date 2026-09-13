@@ -28,7 +28,7 @@ EXPECTED_PRODUCTION_PATHS = (
     "src/cacheness/storage/projections.py",
     "src/cacheness/storage/sqlite_lifecycle_authority.py",
     "src/cacheness/storage/backends/postgresql_lifecycle_authority.py",
-    "src/cacheness/storage/backends/s3_backend.py",
+    "src/cacheness/storage/obstore_generation_io.py",
     "docs/STORAGE_MIGRATION.md",
     "docs/STORAGE_INITIALIZATION.md",
     "docs/BACKEND_SELECTION.md",

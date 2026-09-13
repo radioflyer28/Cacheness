@@ -97,7 +97,6 @@ def test_registered_unqualified_names_do_not_become_supported_topologies() -> No
 
 def test_blob_store_rejects_unqualified_application_roles_from_its_topology_registry() -> None:
     """Constructibility through a registry never creates a support profile."""
-    from cacheness.storage.backends.blob_backends import InMemoryBlobBackend
     from cacheness.storage.blob_store import BlobStore
     from cacheness.storage.catalog import CatalogField, CatalogQuery, CatalogSchema
     from cacheness.storage.memory_lifecycle_authority import InMemoryLifecycleAuthority
@@ -109,10 +108,19 @@ def test_blob_store_rejects_unqualified_application_roles_from_its_topology_regi
         schema_id="application-roles",
     )
 
-    class RecordingPayload(InMemoryBlobBackend):
+    class RecordingPayload:
+        qualification_identity = "memory"
+        topology_capabilities = {
+            "immutable_generations": True,
+            "streaming": True,
+            "listing": True,
+        }
+
         def __init__(self, *, label: str) -> None:
-            super().__init__()
             self.label = label
+
+        def materialize_handler_io(self) -> object:
+            raise AssertionError("unqualified application payload must not initialize")
 
     class RecordingAuthority(InMemoryLifecycleAuthority):
         def __init__(self, *, label: str) -> None:
@@ -419,14 +427,15 @@ def test_memory_tracer_uses_registered_same_process_participants(tmp_path: Path)
 
 def test_memory_tracer_keeps_exact_injected_instances_caller_owned(tmp_path: Path) -> None:
     """Injected memory participants survive the store close unless ownership transfers."""
-    from cacheness.storage.backends.blob_backends import InMemoryBlobBackend
     from cacheness.storage.blob_store import BlobStore
     from cacheness.storage.memory_lifecycle_authority import InMemoryLifecycleAuthority
+    from cacheness.storage.obstore_generation_io import ObstoreGenerationIO
 
     composition = _composition()
-    payload = InMemoryBlobBackend()
+    payload = ObstoreGenerationIO.for_memory(
+        handler_root=tmp_path / "injected-memory-handler"
+    )
     authority = InMemoryLifecycleAuthority()
-    payload.qualification_identity = "memory"
     authority.qualification_identity = "memory"
     store = BlobStore(
         composition.StoreTopology(payload=payload, authority=authority),
@@ -439,8 +448,12 @@ def test_memory_tracer_keeps_exact_injected_instances_caller_owned(tmp_path: Pat
     finally:
         store.close()
 
-    assert authority.read_entry("memory-injected") is not None
-    assert payload.exists("memory://generations") is False
+    try:
+        assert authority.read_entry("memory-injected") is not None
+        assert payload.materialize_handler_io() is payload
+    finally:
+        authority.close()
+        payload.close()
 
 
 def test_sqlite_tracer_reopens_one_signed_canonical_descriptor(tmp_path: Path) -> None:
@@ -493,15 +506,17 @@ def test_selected_filesystem_participant_supplies_generation_io_at_its_own_root(
     tmp_path: Path,
 ) -> None:
     """An injected filesystem participant, not BlobStore.cache_dir, owns bytes."""
-    from cacheness.storage.backends.blob_backends import FilesystemBlobBackend
     from cacheness.storage.blob_store import BlobStore
     from cacheness.storage.catalog import CatalogField, CatalogSchema
     from cacheness.storage.composition import BackendRef, StoreTopology
+    from cacheness.storage.obstore_generation_io import ObstoreGenerationIO
 
     root_a = tmp_path / "selected-payload"
     root_b = tmp_path / "unselected-cache-dir"
-    payload = FilesystemBlobBackend(root_a)
-    payload.qualification_identity = "filesystem"
+    handler_root = tmp_path / "selected-payload-handler"
+    payload = ObstoreGenerationIO.for_filesystem(
+        base_dir=root_a, handler_root=handler_root
+    )
     schema = CatalogSchema(
         fields=(CatalogField("rank", "integer", default=0, queryable=True),),
         schema_id="participant-root",
@@ -526,7 +541,7 @@ def test_selected_filesystem_participant_supplies_generation_io_at_its_own_root(
             expected=receipt.expectation,
         )
         assert updated is not None
-        assert store.guarded_handler_io.root == payload.base_dir
+        assert store.guarded_handler_io.root == handler_root
         assert any((root_a / "generations").rglob("*"))
         assert not (root_b / "generations").exists()
         assert store.capabilities.durable is True

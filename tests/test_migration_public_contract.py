@@ -303,7 +303,7 @@ def test_external_api_coverage_declaration_is_detector_backed() -> None:
         "PostgresqlLifecycleAuthority",
         "tests/contracts/test_postgresql_lifecycle_authority.py",
         "tests/test_migration_remote_contract.py",
-        "tests/test_s3_blob_backend.py",
+            "tests/contracts/test_s3_generation_io.py",
         "do not qualify live PostgreSQL/AWS S3",
         "Phase 8 alone",
     ):

@@ -463,16 +463,15 @@ def test_public_catalog_put_update_query_and_reopen(
     """Public BlobStore calls own catalog validation and authority promotion."""
     from cacheness.storage.blob_store import BlobStore
     from cacheness.storage.composition import BackendRef, StoreTopology
-    from cacheness.storage.backends.blob_backends import InMemoryBlobBackend
     from cacheness.storage.memory_lifecycle_authority import InMemoryLifecycleAuthority
+    from cacheness.storage.obstore_generation_io import ObstoreGenerationIO
 
     catalog = _catalog()
     root = tmp_path / authority_name
     resources: tuple[object, ...] = ()
     if authority_name == "memory":
-        payload = InMemoryBlobBackend()
+        payload = ObstoreGenerationIO.for_memory()
         authority = InMemoryLifecycleAuthority()
-        payload.qualification_identity = "memory"
         authority.qualification_identity = "memory"
         topology = StoreTopology(
             payload=BackendRef(instance=payload), authority=BackendRef(instance=authority)

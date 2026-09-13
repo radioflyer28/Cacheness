@@ -43,7 +43,7 @@ _PHASE7_REVIEWED_PRODUCTION_PATHS = (
     "src/cacheness/storage/projections.py",
     "src/cacheness/storage/sqlite_lifecycle_authority.py",
     "src/cacheness/storage/backends/postgresql_lifecycle_authority.py",
-    "src/cacheness/storage/backends/s3_backend.py",
+    "src/cacheness/storage/obstore_generation_io.py",
     "docs/STORAGE_MIGRATION.md",
     "docs/STORAGE_INITIALIZATION.md",
     "docs/BACKEND_SELECTION.md",
@@ -409,7 +409,7 @@ PHASE7_RUFF_PATHS = (
     "src/cacheness/storage/projections.py",
     "src/cacheness/storage/sqlite_lifecycle_authority.py",
     "src/cacheness/storage/backends/postgresql_lifecycle_authority.py",
-    "src/cacheness/storage/backends/s3_backend.py",
+    "src/cacheness/storage/obstore_generation_io.py",
     *PHASE7_TEST_NODES,
     "tests/test_phase7_contract_verifier.py",
 )
@@ -821,10 +821,10 @@ def audit_coverage_document(coverage: str) -> tuple[str, ...]:
     required = (
         "No external API integration:",
         "PostgresqlLifecycleAuthority",
-        "S3BlobBackend",
+        "ObstoreGenerationIO",
         "tests/contracts/test_postgresql_lifecycle_authority.py",
         "tests/test_migration_remote_contract.py",
-        "tests/test_s3_blob_backend.py",
+        "tests/contracts/test_s3_generation_io.py",
         "do not qualify live PostgreSQL/AWS S3",
         "Phase 8 alone",
     )

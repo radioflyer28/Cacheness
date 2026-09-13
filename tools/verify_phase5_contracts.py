@@ -83,7 +83,7 @@ ARCHITECTURE_SOURCE_MODULES = (
     "src/cacheness/storage/lifecycle.py",
     "src/cacheness/storage/blob_store.py",
     "src/cacheness/storage/composition.py",
-    "src/cacheness/storage/backends/s3_backend.py",
+    "src/cacheness/storage/obstore_generation_io.py",
     "src/cacheness/storage/backends/postgresql_lifecycle_authority.py",
 )
 
@@ -250,7 +250,7 @@ class _ArchitectureVisitor(ast.NodeVisitor):
 
     @property
     def _is_payload_adapter(self) -> bool:
-        return self.filename.endswith("/backends/s3_backend.py")
+        return self.filename.endswith("/obstore_generation_io.py")
 
     def _add(self, finding: str) -> None:
         if finding not in self.findings:

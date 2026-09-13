@@ -64,7 +64,7 @@ matrix substitute was used.
 <!-- phase7-api-coverage:detector-result:end -->
 
 No external API integration: Phase 7 adds offline maintenance over the existing
-`PostgresqlLifecycleAuthority` and `S3BlobBackend` adapters; it adds no external
+`PostgresqlLifecycleAuthority` and `ObstoreGenerationIO` adapters; it adds no external
 service capability.
 
 The detector's one `api` surface signal is the Phase 7 Python-library public
@@ -76,7 +76,7 @@ describing the phase's actual work.
 Phase 7 retains deterministic adapter coverage in
 `tests/contracts/test_postgresql_lifecycle_authority.py`,
 `tests/test_migration_remote_contract.py`, and
-`tests/test_s3_blob_backend.py`. These tests exercise existing authority and
+`tests/contracts/test_s3_generation_io.py`. These tests exercise existing authority and
 payload-adapter contracts only; they do not qualify live PostgreSQL/AWS S3.
 Phase 8 alone owns real PostgreSQL/AWS S3 service qualification, compatible
 service scope, Windows evidence, and performance qualification.

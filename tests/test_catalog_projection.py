@@ -199,11 +199,11 @@ def test_checkpoint_binds_the_complete_canonical_snapshot_identity() -> None:
 
 
 def test_post_commit_projection_failure_preserves_the_authority_receipt() -> None:
-    from cacheness.storage.backends.blob_backends import InMemoryBlobBackend
     from cacheness.storage.blob_store import BlobStore
     from cacheness.storage.catalog import CatalogField, CatalogQuery, CatalogSchema
     from cacheness.storage.composition import StoreTopology
     from cacheness.storage.memory_lifecycle_authority import InMemoryLifecycleAuthority
+    from cacheness.storage.obstore_generation_io import ObstoreGenerationIO
 
     class FailingSink:
         projection_name = "external-index"
@@ -221,25 +221,29 @@ def test_post_commit_projection_failure_preserves_the_authority_receipt() -> Non
         def load_projection_checkpoint(self) -> None:
             return None
 
-    payload = InMemoryBlobBackend()
+    payload = ObstoreGenerationIO.for_memory()
     authority = InMemoryLifecycleAuthority()
-    payload.qualification_identity = "memory"
     authority.qualification_identity = "memory"
     store = BlobStore(StoreTopology(payload, authority, (FailingSink(),)))
-    store.initialize()
+    try:
+        store.initialize()
 
-    receipt = store.put_entry({"value": 1}, key="committed-key")
+        receipt = store.put_entry({"value": 1}, key="committed-key")
 
-    assert receipt.projection_outcomes["external-index"].status.value == "dirty"
-    assert store.get_entry_info("committed-key") is not None
+        assert receipt.projection_outcomes["external-index"].status.value == "dirty"
+        assert store.get_entry_info("committed-key") is not None
+    finally:
+        store.close()
+        authority.close()
+        payload.close()
 
 
 def test_named_rebuild_uses_its_own_sink_capabilities(tmp_path) -> None:
-    from cacheness.storage.backends.blob_backends import InMemoryBlobBackend
     from cacheness.storage.blob_store import BlobStore
     from cacheness.storage.catalog import CatalogField, CatalogQuery, CatalogSchema
     from cacheness.storage.composition import StoreTopology
     from cacheness.storage.memory_lifecycle_authority import InMemoryLifecycleAuthority
+    from cacheness.storage.obstore_generation_io import ObstoreGenerationIO
 
     class _RebuildSink:
         projection_query = CatalogQuery()
@@ -277,9 +281,8 @@ def test_named_rebuild_uses_its_own_sink_capabilities(tmp_path) -> None:
 
     capable = _RebuildSink("capable", can_rebuild=True)
     incapable = _RebuildSink("incapable", can_rebuild=False)
-    payload = InMemoryBlobBackend()
+    payload = ObstoreGenerationIO.for_memory()
     authority = InMemoryLifecycleAuthority()
-    payload.qualification_identity = "memory"
     authority.qualification_identity = "memory"
     store = BlobStore(
         StoreTopology(payload, authority, (capable, incapable)),
@@ -294,6 +297,8 @@ def test_named_rebuild_uses_its_own_sink_capabilities(tmp_path) -> None:
         assert capable.published is not None
     finally:
         store.close()
+        authority.close()
+        payload.close()
 
 
 def test_receipt_outcomes_are_named_and_immutable() -> None:
