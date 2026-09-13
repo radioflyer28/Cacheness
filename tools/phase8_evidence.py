@@ -69,6 +69,24 @@ _COMMON_PAYLOAD_KEYS = frozenset(
     {"result", "claim_categories", "non_qualifying_classes", "subjects"}
 )
 _DETERMINISTIC_PAYLOAD_KEYS = _COMMON_PAYLOAD_KEYS | {"command"}
+_PACKAGING_PAYLOAD_KEYS = _COMMON_PAYLOAD_KEYS | {
+    "wheel_sha256",
+    "python",
+    "platform",
+    "probes",
+    "optional_groups",
+    "compatibility",
+    "non_live_groups",
+}
+_PACKAGING_OPTIONAL_GROUPS = (
+    "recommended",
+    "dataframes",
+    "tensorflow",
+    "s3",
+    "postgresql",
+    "cloud",
+)
+_PACKAGING_NON_LIVE_GROUPS = ("s3", "postgresql", "cloud")
 _RESULTS_BY_STATUS = {
     "PASS": frozenset({"passed"}),
     "UNAVAILABLE": frozenset({"unavailable"}),
@@ -93,6 +111,7 @@ _CLAIM_STATES_BY_STATUS = {
     "UNAVAILABLE": dict.fromkeys(CLAIM_CATEGORIES, "UNAVAILABLE"),
     "NOT_QUALIFIED": dict.fromkeys(CLAIM_CATEGORIES, "NOT_QUALIFIED"),
 }
+_PACKAGING_PASS_CLAIMS = dict.fromkeys(CLAIM_CATEGORIES, "NOT_QUALIFIED")
 
 
 class EvidenceValidationError(ValueError):
@@ -179,16 +198,65 @@ def _validate_claim_categories(value: object) -> dict[str, str]:
     return claims
 
 
+def _expected_claim_categories(evidence_class: str, status: str) -> dict[str, str]:
+    """Return the exact claim boundary for one implemented evidence producer."""
+    if status == "PASS" and evidence_class == "packaging":
+        return _PACKAGING_PASS_CLAIMS
+    return _CLAIM_STATES_BY_STATUS[status]
+
+
+def _validate_packaging_payload(payload: Mapping[str, object]) -> dict[str, object]:
+    """Validate bounded package evidence without accepting resolver diagnostics."""
+    wheel_sha256 = payload.get("wheel_sha256")
+    if not isinstance(wheel_sha256, str) or not _DIGEST_PATTERN.fullmatch(wheel_sha256):
+        raise EvidenceValidationError("invalid wheel_sha256")
+    python = _validate_safe_text(payload.get("python"), field="python")
+    platform = _validate_safe_text(payload.get("platform"), field="platform")
+    probes = _validate_text_list(payload.get("probes"), field="probes")
+    if len(set(probes)) != len(probes):
+        raise EvidenceValidationError("invalid probes")
+    optional_groups = _validate_text_list(
+        payload.get("optional_groups"), field="optional_groups"
+    )
+    if optional_groups != list(_PACKAGING_OPTIONAL_GROUPS):
+        raise EvidenceValidationError("invalid optional_groups")
+    compatibility = _validate_text_list(
+        payload.get("compatibility"), field="compatibility"
+    )
+    expected_compatibility_prefixes = [
+        f"{group}:" for group in _PACKAGING_OPTIONAL_GROUPS
+    ]
+    if len(compatibility) != len(expected_compatibility_prefixes) or any(
+        not value.startswith(prefix)
+        or value.removeprefix(prefix) not in {"COMPATIBLE", "INCOMPATIBLE"}
+        for value, prefix in zip(compatibility, expected_compatibility_prefixes)
+    ):
+        raise EvidenceValidationError("invalid compatibility")
+    non_live_groups = _validate_text_list(
+        payload.get("non_live_groups"), field="non_live_groups"
+    )
+    if non_live_groups != list(_PACKAGING_NON_LIVE_GROUPS):
+        raise EvidenceValidationError("invalid non_live_groups")
+    return {
+        "wheel_sha256": wheel_sha256,
+        "python": python,
+        "platform": platform,
+        "probes": probes,
+        "optional_groups": optional_groups,
+        "compatibility": compatibility,
+        "non_live_groups": non_live_groups,
+    }
+
+
 def _validate_payload(
     evidence_class: str, status: str, payload: object
 ) -> dict[str, object]:
     if not isinstance(payload, Mapping) or len(payload) > MAX_OBJECT_KEYS:
         raise EvidenceValidationError("invalid payload")
-    allowed = (
-        _DETERMINISTIC_PAYLOAD_KEYS
-        if evidence_class == "deterministic"
-        else _COMMON_PAYLOAD_KEYS
-    )
+    allowed = {
+        "deterministic": _DETERMINISTIC_PAYLOAD_KEYS,
+        "packaging": _PACKAGING_PAYLOAD_KEYS,
+    }.get(evidence_class, _COMMON_PAYLOAD_KEYS)
     if set(payload) != allowed:
         raise EvidenceValidationError("payload violates the exact allow-list")
 
@@ -197,7 +265,7 @@ def _validate_payload(
         raise EvidenceValidationError("terminal status contradicts payload result")
 
     claims = _validate_claim_categories(payload.get("claim_categories"))
-    if claims != _CLAIM_STATES_BY_STATUS[status]:
+    if claims != _expected_claim_categories(evidence_class, status):
         raise EvidenceValidationError("terminal status contradicts claim_categories")
     non_qualifying_classes = _validate_text_list(
         payload.get("non_qualifying_classes"), field="non_qualifying_classes"
@@ -226,7 +294,10 @@ def _validate_payload(
             raise EvidenceValidationError("invalid deterministic command")
         validated["command"] = command
 
-    if status == "PASS" and evidence_class != "deterministic":
+    if evidence_class == "packaging":
+        validated.update(_validate_packaging_payload(payload))
+
+    if status == "PASS" and evidence_class not in {"deterministic", "packaging"}:
         raise EvidenceValidationError("only implemented evidence producers may pass")
     return validated
 
