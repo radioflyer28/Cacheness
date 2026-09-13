@@ -18,7 +18,10 @@ import pytest
 from moto.server import ThreadedMotoServer
 from obstore.exceptions import (
     AlreadyExistsError,
+    GenericError,
+    InvalidPathError,
     NotFoundError,
+    PermissionDeniedError,
     UnknownConfigurationKeyError,
 )
 from obstore.store import LocalStore, MemoryStore, S3Store
@@ -191,3 +194,48 @@ def test_sdk_error_types_keep_collision_absence_and_configuration_distinct(
 
     assert AlreadyExistsError is not NotFoundError
     assert not issubclass(UnknownConfigurationKeyError, NotFoundError)
+
+
+def test_error_classification_keeps_known_absence_narrow() -> None:
+    """Only documented absence types may become an absent-object result."""
+    assert _is_known_absence_type(NotFoundError)
+    assert _is_known_absence_type(FileNotFoundError)
+
+    for error_type in (
+        AlreadyExistsError,
+        GenericError,
+        InvalidPathError,
+        PermissionDeniedError,
+        UnknownConfigurationKeyError,
+        RuntimeError,
+        ValueError,
+    ):
+        assert not _is_known_absence_type(error_type)
+
+
+def test_invalid_local_locator_is_not_absence(tmp_path: Path) -> None:
+    """Invalid locator input stays distinguishable from an absent object."""
+    store = LocalStore(tmp_path / "objects", mkdir=True)
+
+    with pytest.raises(ValueError, match="Could not parse path") as error_info:
+        store.head("../escape")
+
+    assert not _is_known_absence_type(type(error_info.value))
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "is_allowed"),
+    [
+        ("http://127.0.0.1:5000", True),
+        ("http://localhost:5000", True),
+        ("https://s3.us-east-1.amazonaws.com", False),
+        ("https://objects.example.test", False),
+        ("http://192.0.2.10:5000", False),
+    ],
+)
+def test_http_endpoint_override_is_limited_to_local_moto(
+    endpoint: str,
+    is_allowed: bool,
+) -> None:
+    """Only the deterministic loopback moto fixture may override the endpoint."""
+    assert _is_test_only_moto_endpoint(endpoint) is is_allowed
