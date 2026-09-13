@@ -2,9 +2,9 @@
 schema_version: 1
 open_count: 6
 waived_count: 0
-fixed_count: 44
-total_count: 50
-last_updated: 2026-09-13T18:33:53.730Z
+fixed_count: 46
+total_count: 52
+last_updated: 2026-09-13T23:15:51.533Z
 ---
 
 # Broken Windows Ledger
@@ -65,6 +65,8 @@ last_updated: 2026-09-13T18:33:53.730Z
 | 48 | 07.1 | deviation | tests/test_sqlite_lifecycle_authority.py |  | Updated durable-authority test rows for the new nullable evidence column | open |  | 2026-09-13T17:31:57.763Z |  |
 | 49 | 07.1 | deviation | src/cacheness/storage/migration_authority.py |  | Candidate transport evidence required an exact authority-owned verification update before activation. | fixed |  | 2026-09-13T18:21:20.367Z | 2026-09-13T18:21:50.443Z |
 | 50 | 07.1 | deviation | tests/contracts/test_topology_lifecycle.py |  | Remote topology fake and frozen threat selectors lagged unified obstore participant contracts | fixed |  | 2026-09-13T18:33:22.474Z | 2026-09-13T18:33:53.730Z |
+| 51 | 08 | deviation | tools/run_phase8_local_gates.py | 186 | Default child callback captured the original subprocess runner, bypassing test monkeypatches. | fixed |  | 2026-09-13T23:13:15.132Z | 2026-09-13T23:13:34.810Z |
+| 52 | 08 | deviation | .planning/STATE.md |  | The legacy Current Position lacks plan-counter fields, so state.advance-plan could not advance the Phase 8 plan position automatically. | fixed |  | 2026-09-13T23:14:45.016Z | 2026-09-13T23:15:51.533Z |
 
 ````json
 [
@@ -667,6 +669,30 @@ last_updated: 2026-09-13T18:33:53.730Z
     "reason": "",
     "recorded_at": "2026-09-13T18:33:22.474Z",
     "resolved_at": "2026-09-13T18:33:53.730Z"
+  },
+  {
+    "id": 51,
+    "kind": "deviation",
+    "phase": "08",
+    "file": "tools/run_phase8_local_gates.py",
+    "line": 186,
+    "description": "Default child callback captured the original subprocess runner, bypassing test monkeypatches.",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-09-13T23:13:15.132Z",
+    "resolved_at": "2026-09-13T23:13:34.810Z"
+  },
+  {
+    "id": 52,
+    "kind": "deviation",
+    "phase": "08",
+    "file": ".planning/STATE.md",
+    "line": null,
+    "description": "The legacy Current Position lacks plan-counter fields, so state.advance-plan could not advance the Phase 8 plan position automatically.",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-09-13T23:14:45.016Z",
+    "resolved_at": "2026-09-13T23:15:51.533Z"
   }
 ]
 ````

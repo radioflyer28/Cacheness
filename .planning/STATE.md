@@ -3,17 +3,17 @@ gsd_state_version: 1.0
 milestone: v1.0
 current_phase: 08
 current_phase_name: Production Gates and Performance Stabilization
-status: planning
-stopped_at: Phase 08 context gathered
-last_updated: "2026-09-13T21:14:21.749Z"
+status: executing
+stopped_at: Completed 08-01-PLAN.md
+last_updated: "2026-09-13T23:15:51.533Z"
 last_activity: 2026-09-13
-last_activity_desc: Phase 07.1 complete, transitioned to Phase 08
-state_head: 19a4a17b4952f5959446485f5d478c9ccf65ee39
+last_activity_desc: Phase 08 Plan 01 completed; deterministic evidence tracer recorded
+state_head: 1c2700d457be571c9202b22aba2fffb6706aac13
 progress:
   total_phases: 9
   completed_phases: 8
-  total_plans: 116
-  completed_plans: 115
+  total_plans: 128
+  completed_plans: 116
 milestone_name: milestone
 ---
 
@@ -29,9 +29,9 @@ See: .planning/PROJECT.md (updated 2026-09-13)
 ## Current Position
 
 Phase: 08 — Production Gates and Performance Stabilization
-Plan: Not started
-Status: Ready to plan
-Last activity: 2026-09-13 — Phase 07.1 complete, transitioned to Phase 08
+Plan: 02 of 12
+Status: In progress
+Last activity: 2026-09-13 — Phase 08 Plan 01 completed; deterministic evidence tracer recorded
 
 Phase 07.1 closed with 11/11 plans summarized and an independent 46/46
 must-have verification pass. Built-in filesystem, memory, and S3 payload
@@ -62,8 +62,9 @@ that closed phase merely to repair the counter.
 Phase numbering, order, dependencies, requirement ownership, and milestone scope
 are unchanged. Phases 4 through 7 subsequently completed the catalog,
 supported-topology, cache-policy, and explicit maintenance work. Phase 8 is the
-only remaining milestone phase and is intentionally unplanned pending discussion.
-GSD's raw disk count still includes superseded 03-19 and may call Phase 3 partial;
+only remaining milestone phase. Plan 01 established the deterministic exact-commit
+evidence tracer; its remaining release-evidence classes stay unavailable until their
+dedicated qualification plans complete. GSD's raw disk count still includes superseded 03-19 and may call Phase 3 partial;
 the canonical 24/24 disposition and direct qualification ledger remain controlling.
 Do not fabricate a 03-19 completion or reopen the closed gaps to repair that count.
 
@@ -193,6 +194,7 @@ the deliberately superseded Phase 03 plan; do not fabricate its completion.
 | Phase 07.1 P09 | 537 | 3 tasks | 12 files |
 | Phase 07.1 P10 | 666s | 2 tasks | 10 files |
 | Phase 07.1 P11 | 24m | 3 tasks | 13 files |
+| Phase 08 P01 | 16m | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -460,6 +462,9 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - [Phase 07.1]: Runtime S3/cloud extras contain no boto3; moto remains test-only qualification tooling.
 - [Phase 07.1]: D-16 uses explicit bucket/region, stable-name/IAM/policy controls and no owner pinning or production endpoint override.
 - [Phase 07.1]: Phase 07.1 evidence is fixed and fail-closed; Phase 8 gates remain explicitly unqualified.
+- [Phase 08]: Deterministic PASS evidences integrity, recovery, and progress only; performance remains NOT_QUALIFIED.
+- [Phase 08]: A passing deterministic gate exits 2 while external evidence classes are UNAVAILABLE, preventing a partial release pass.
+- [Phase 08]: Later release tooling must revalidate both the exact Git revision and reviewed-source SHA-256 digest.
 
 ### Pending Todos
 
@@ -489,6 +494,6 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 
 ## Session Continuity
 
-Last session: 2026-09-13T21:14:21.387Z
-Stopped at: Phase 08 context gathered
-Resume file: .planning/phases/08-production-gates-and-performance-stabilization/08-CONTEXT.md
+Last session: 2026-09-13T23:14:02.768Z
+Stopped at: Completed 08-01-PLAN.md
+Resume file: None

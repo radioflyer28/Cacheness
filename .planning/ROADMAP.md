@@ -587,11 +587,11 @@ Plans:
   5. Inventory, reconciliation, statistics, clear, and aggregate operations demonstrate bounded memory and backend-call behavior without accidental N+1 access patterns.
   6. Qualify exact commits in isolated environments and retain failed-run evidence plus migration fixtures for deliberately supported source versions. Phase 5's PostgreSQL/Amazon-S3 candidate remains unqualified until its non-substitutable real-service gate passes here; unavailable services never count as passes. Historical compatibility tests may remain as evidence but are not release blockers for removed pre-production APIs/layouts. Windows remains UNAVAILABLE/NOT_QUALIFIED until Phase 999.1 supplies native evidence. Optimization must preserve one authority and may not introduce a projection-repair prerequisite for canonical operations.
 
-**Plans**: 12 plans
+**Plans**: 1/12 plans executed
 
 Plans:
 
-- [ ] 08-01-PLAN.md — Establish strict evidence classes and the deterministic exact-commit tracer.
+- [x] 08-01-PLAN.md — Establish strict evidence classes and the deterministic exact-commit tracer.
 - [ ] 08-02-PLAN.md — Qualify the base wheel and every optional group in isolated environments.
 - [ ] 08-03-PLAN.md — Encode supported Python/platform evidence and truthful Windows nonclaims.
 - [ ] 08-04-PLAN.md — Close named lifecycle and cache-policy coverage gaps.
@@ -616,7 +616,7 @@ Plans:
 | 6. UnifiedCache Policy Composition | 11/11 | Complete    | 2026-09-09 |
 | 7. Explicit Migration and Rebuild Cutover | 24/24 | Complete    | 2026-09-11 |
 | 07.1. Obstore Payload Participant Unification | 11/11 | Complete | 2026-09-13 |
-| 8. Production Gates and Performance Stabilization | 0/11 | Not started | - |
+| 8. Production Gates and Performance Stabilization | 1/12 | In Progress|  |
 
 ## Backlog
 
