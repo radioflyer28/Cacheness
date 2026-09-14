@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import importlib
 from pathlib import Path
+import re
 import sys
 
 import pytest
@@ -184,3 +185,38 @@ def test_baseline_capture_and_recalibration_are_explicit_and_atomic(tmp_path: Pa
         justification="controlled runner kernel update",
     )
     assert destination.read_bytes() != b""
+
+
+def test_controlled_workflow_requires_exact_sha_and_named_linux_runner() -> None:
+    """Only a detached exact SHA on the reviewed runner can block performance."""
+    workflow = (
+        Path(__file__).parents[2] / ".github" / "workflows" / "performance.yml"
+    ).read_text(encoding="utf-8")
+
+    assert "workflow_dispatch:" in workflow
+    assert re.search(r"candidate_sha:\s*\n\s*description:.*\n\s*required: true", workflow)
+    assert "cacheness-perf-linux-x64" in workflow
+    assert "environment: controlled-performance" in workflow
+    assert "ref: ${{ inputs.candidate_sha }}" in workflow
+    assert 'ACTUAL_SHA="$(git rev-parse HEAD)"' in workflow
+    assert '"$ACTUAL_SHA" = "$CANDIDATE_SHA"' in workflow
+    assert "--verify-baseline benchmarks/phase8_baseline.json" in workflow
+    assert "--all-workloads" in workflow
+    assert "--runner-identity cacheness-perf-linux-x64" in workflow
+    assert "remote PostgreSQL/S3 timing" in workflow
+    assert "ordinary macOS timing" in workflow
+
+
+def test_controlled_workflow_pins_actions_and_uploads_one_sanitized_envelope() -> None:
+    """The qualifying artifact has a fixed name and bounded diagnostic retention."""
+    workflow = (
+        Path(__file__).parents[2] / ".github" / "workflows" / "performance.yml"
+    ).read_text(encoding="utf-8")
+
+    action_references = re.findall(r"uses:\s+[^@\s]+@([^\s]+)", workflow)
+    assert action_references
+    assert all(re.fullmatch(r"[0-9a-f]{40}", reference) for reference in action_references)
+    assert "name: controlled-performance-envelope" in workflow
+    assert "retention-days: 30" in workflow
+    assert "build/phase8/controlled-performance.json" in workflow
+    assert "build/phase8/raw-performance.json" in workflow
