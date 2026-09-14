@@ -7,7 +7,7 @@ pattern.
 
 from __future__ import annotations
 
-import importlib.util
+import importlib
 from pathlib import Path
 import sys
 
@@ -15,11 +15,8 @@ import pytest
 
 
 _RUNNER_PATH = Path(__file__).parents[2] / "tools" / "run_phase8_scale_gates.py"
-_RUNNER_SPEC = importlib.util.spec_from_file_location("phase8_scale_gates", _RUNNER_PATH)
-assert _RUNNER_SPEC is not None and _RUNNER_SPEC.loader is not None
-_RUNNER = importlib.util.module_from_spec(_RUNNER_SPEC)
-sys.modules[_RUNNER_SPEC.name] = _RUNNER
-_RUNNER_SPEC.loader.exec_module(_RUNNER)
+sys.path.insert(0, str(_RUNNER_PATH.parent))
+_RUNNER = importlib.import_module("run_phase8_scale_gates")
 
 CallCounters = _RUNNER.CallCounters
 ScaleObservation = _RUNNER.ScaleObservation

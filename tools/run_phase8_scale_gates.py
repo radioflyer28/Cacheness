@@ -13,8 +13,14 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass, fields
 import argparse
 import json
+import multiprocessing
 from pathlib import Path
+import resource
+import subprocess
+import sys
 from typing import Any
+
+import phase8_evidence
 
 
 @dataclass
@@ -259,14 +265,389 @@ def structural_payload(observations: list[ScaleObservation]) -> dict[str, object
     }
 
 
+def _structural_observation(
+    *,
+    operation: str,
+    seeded_entries: int,
+    page_size: int,
+    work_cap: int,
+    selected_entries: int,
+    workload_bytes: int,
+    peak_rss_bytes: int,
+    counters: CallCounters,
+) -> dict[str, object]:
+    """Build one exact evidence observation from already-validated test facts."""
+
+    return {
+        "operation": operation,
+        "seeded_entries": seeded_entries,
+        "page_size": page_size,
+        "work_cap": work_cap,
+        "selected_entries": selected_entries,
+        "workload_bytes": workload_bytes,
+        "peak_rss_bytes": peak_rss_bytes,
+        "counters": counters.values(),
+    }
+
+
+class MemoryProbeError(RuntimeError):
+    """Raised when isolated RSS evidence is absent, malformed, or unbounded."""
+
+
+@dataclass(frozen=True)
+class MemoryObservation:
+    """One child-process peak-RSS observation with normalized byte units."""
+
+    operation: str
+    cardinality: int
+    workload_bytes: int
+    peak_rss_bytes: int
+    resource_peak_rss_bytes: int
+    proc_peak_rss_bytes: int | None
+    unit: str
+    platform: str
+    child_exit_code: int
+
+    @classmethod
+    def from_child_message(
+        cls, message: object, *, expected_operation: str
+    ) -> "MemoryObservation":
+        """Validate a complete child observation rather than guessing missing facts."""
+
+        if not isinstance(message, dict):
+            raise MemoryProbeError("missing child result")
+        if message.get("operation") != expected_operation:
+            raise MemoryProbeError("child result has an unexpected operation")
+        if message.get("unit") != "bytes":
+            raise MemoryProbeError("child result has an invalid RSS unit")
+        integer_fields = (
+            "cardinality",
+            "workload_bytes",
+            "peak_rss_bytes",
+            "resource_peak_rss_bytes",
+            "child_exit_code",
+        )
+        for field_name in integer_fields:
+            value = message.get(field_name)
+            if type(value) is not int:
+                raise MemoryProbeError(f"child result has invalid {field_name}")
+        proc_peak = message.get("proc_peak_rss_bytes")
+        if proc_peak is not None and type(proc_peak) is not int:
+            raise MemoryProbeError("child result has invalid proc_peak_rss_bytes")
+        if (
+            message["cardinality"] < 0
+            or message["workload_bytes"] < 0
+            or message["peak_rss_bytes"] <= 0
+            or message["resource_peak_rss_bytes"] <= 0
+            or (proc_peak is not None and proc_peak <= 0)
+            or message["child_exit_code"] != 0
+        ):
+            raise MemoryProbeError("child result has invalid peak RSS facts")
+        child_platform = message.get("platform")
+        if not isinstance(child_platform, str) or not child_platform:
+            raise MemoryProbeError("child result has invalid platform")
+        if child_platform.startswith("linux") and proc_peak is None:
+            raise MemoryProbeError("Linux child result is missing /proc peak RSS")
+        return cls(
+            operation=expected_operation,
+            cardinality=message["cardinality"],
+            workload_bytes=message["workload_bytes"],
+            peak_rss_bytes=message["peak_rss_bytes"],
+            resource_peak_rss_bytes=message["resource_peak_rss_bytes"],
+            proc_peak_rss_bytes=proc_peak,
+            unit="bytes",
+            platform=child_platform,
+            child_exit_code=message["child_exit_code"],
+        )
+
+
+def _proc_peak_rss_bytes() -> int | None:
+    """Read Linux VmHWM in bytes, returning no value only off Linux."""
+
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        for line in Path("/proc/self/status").read_text(encoding="utf-8").splitlines():
+            if not line.startswith("VmHWM:"):
+                continue
+            fields = line.split()
+            if len(fields) != 3 or fields[2] != "kB" or not fields[1].isdigit():
+                raise MemoryProbeError("Linux /proc peak RSS has an invalid unit")
+            value = int(fields[1]) * 1024
+            if value <= 0:
+                raise MemoryProbeError("Linux /proc peak RSS is invalid")
+            return value
+    except OSError as error:
+        raise MemoryProbeError("Linux /proc peak RSS is unavailable") from error
+    raise MemoryProbeError("Linux /proc peak RSS is unavailable")
+
+
+def _resource_peak_rss_bytes() -> int:
+    """Normalize resource peak RSS to bytes using the documented OS units."""
+
+    raw_peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    if type(raw_peak) not in {int, float} or raw_peak <= 0:
+        raise MemoryProbeError("resource peak RSS is invalid")
+    # Linux reports KiB.  Darwin reports bytes; other platforms are kept as
+    # diagnostic child evidence and do not stand in for controlled Linux proof.
+    multiplier = 1024 if sys.platform.startswith("linux") else 1
+    return int(raw_peak * multiplier)
+
+
+def synthetic_bounded_probe(cardinality: int, workload_bytes: int) -> None:
+    """Exercise child measurement with a bounded page-sized synthetic workload."""
+
+    if type(cardinality) is not int or cardinality < 0:
+        raise ValueError("cardinality must be a non-negative integer")
+    if type(workload_bytes) is not int or workload_bytes < 0:
+        raise ValueError("workload_bytes must be a non-negative integer")
+    # The probe deliberately models one page, not a retained whole inventory.
+    bytearray(min(workload_bytes, 4_096))
+
+
+def synthetic_failing_probe(_cardinality: int, _workload_bytes: int) -> None:
+    """Exercise the fail-closed child-error path without touching storage."""
+
+    raise RuntimeError("synthetic memory probe failure")
+
+
+def _run_child_probe(
+    connection: Any,
+    operation: str,
+    cardinality: int,
+    workload_bytes: int,
+    probe: Callable[[int, int], None],
+) -> None:
+    """Execute exactly one probe in a child and send only normalized facts."""
+
+    try:
+        probe(cardinality, workload_bytes)
+        resource_peak = _resource_peak_rss_bytes()
+        proc_peak = _proc_peak_rss_bytes()
+        peak = max(resource_peak, proc_peak or 0)
+        connection.send(
+            {
+                "operation": operation,
+                "cardinality": cardinality,
+                "workload_bytes": workload_bytes,
+                "peak_rss_bytes": peak,
+                "resource_peak_rss_bytes": resource_peak,
+                "proc_peak_rss_bytes": proc_peak,
+                "unit": "bytes",
+                "platform": sys.platform,
+                "child_exit_code": 0,
+            }
+        )
+    except BaseException as error:
+        connection.send(
+            {
+                "operation": operation,
+                "error_type": type(error).__name__,
+                "unit": "bytes",
+                "child_exit_code": 1,
+            }
+        )
+    finally:
+        connection.close()
+
+
+def run_isolated_peak_probe(
+    *,
+    operation: str,
+    cardinality: int,
+    workload_bytes: int,
+    probe: Callable[[int, int], None],
+    timeout_seconds: float = 30.0,
+) -> MemoryObservation:
+    """Measure one structural workload in a fresh process and fail closed."""
+
+    if not isinstance(operation, str) or not operation:
+        raise ValueError("operation must be a non-empty string")
+    if type(cardinality) is not int or cardinality < 0:
+        raise ValueError("cardinality must be a non-negative integer")
+    if type(workload_bytes) is not int or workload_bytes < 0:
+        raise ValueError("workload_bytes must be a non-negative integer")
+    if type(timeout_seconds) not in {int, float} or timeout_seconds <= 0:
+        raise ValueError("timeout_seconds must be positive")
+    parent, child = multiprocessing.get_context("spawn").Pipe(duplex=False)
+    process = multiprocessing.get_context("spawn").Process(
+        target=_run_child_probe,
+        args=(child, operation, cardinality, workload_bytes, probe),
+    )
+    try:
+        process.start()
+        child.close()
+        process.join(timeout_seconds)
+        if process.is_alive():
+            process.terminate()
+            process.join()
+            raise MemoryProbeError("child probe exceeded its bounded timeout")
+        if process.exitcode != 0 or not parent.poll():
+            raise MemoryProbeError("missing child result")
+        message = parent.recv()
+        if isinstance(message, dict) and "error_type" in message:
+            raise MemoryProbeError("child probe failed")
+        return MemoryObservation.from_child_message(message, expected_operation=operation)
+    finally:
+        parent.close()
+        if process.is_alive():
+            process.terminate()
+            process.join()
+
+
+def assert_peak_memory_formula(
+    smaller: MemoryObservation,
+    larger: MemoryObservation,
+    *,
+    max_growth_ratio: float,
+) -> None:
+    """Reject cardinality-proportional RSS growth without reading a clock."""
+
+    if smaller.operation != larger.operation:
+        raise MemoryProbeError("memory observations have different operations")
+    if smaller.unit != "bytes" or larger.unit != "bytes":
+        raise MemoryProbeError("memory observations must use byte units")
+    if (
+        larger.cardinality <= smaller.cardinality
+        or larger.workload_bytes <= smaller.workload_bytes
+    ):
+        raise MemoryProbeError("memory observations must compare growing workloads")
+    if type(max_growth_ratio) not in {int, float} or max_growth_ratio < 1:
+        raise ValueError("max_growth_ratio must be at least one")
+    if larger.peak_rss_bytes > smaller.peak_rss_bytes * max_growth_ratio:
+        raise MemoryProbeError("peak RSS grows with store cardinality beyond the page bound")
+
+
+def _source_identity() -> tuple[str, str]:
+    """Bind output to the exact source inventory used by this runner."""
+
+    root = Path(__file__).resolve().parents[1]
+    completed = subprocess.run(
+        ("git", "rev-parse", "HEAD"),
+        cwd=root,
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    revision = completed.stdout.strip()
+    if completed.returncode != 0 or len(revision) != 40:
+        raise MemoryProbeError("cannot determine the evidence revision")
+    source_digest = phase8_evidence.relevant_source_digest(
+        root,
+        (
+            "tools/run_phase8_scale_gates.py",
+            "tools/phase8_evidence.py",
+            "tests/performance",
+        ),
+    )
+    return revision, source_digest
+
+
+def write_structural_evidence(
+    output: Path,
+    *,
+    call_observations: list[ScaleObservation],
+    memory_observations: list[MemoryObservation],
+    revision: str | None = None,
+    source_digest: str | None = None,
+) -> None:
+    """Write exact-commit structural evidence without adding timing claims."""
+
+    if revision is None or source_digest is None:
+        revision, source_digest = _source_identity()
+    observations = [
+        _structural_observation(
+            operation=observation.operation,
+            seeded_entries=observation.seeded_entries,
+            page_size=observation.page_size,
+            work_cap=observation.work_cap,
+            selected_entries=observation.selected_entries,
+            workload_bytes=0,
+            peak_rss_bytes=0,
+            counters=observation.counters,
+        )
+        for observation in call_observations
+    ]
+    observations.extend(
+        _structural_observation(
+            operation=observation.operation,
+            seeded_entries=observation.cardinality,
+            page_size=1,
+            work_cap=1,
+            selected_entries=0,
+            workload_bytes=observation.workload_bytes,
+            peak_rss_bytes=observation.peak_rss_bytes,
+            counters=CallCounters(),
+        )
+        for observation in memory_observations
+    )
+    payload = {
+        "result": "passed",
+        "claim_categories": {
+            "integrity": "EVIDENCED",
+            "recovery": "EVIDENCED",
+            "progress": "EVIDENCED",
+            "performance": "NOT_QUALIFIED",
+        },
+        "non_qualifying_classes": [
+            evidence_class
+            for evidence_class in phase8_evidence.EVIDENCE_CLASSES
+            if evidence_class != "structural"
+        ],
+        "subjects": list(phase8_evidence.QUALIFIED_SUBJECTS),
+        "environment": {"os": sys.platform, "rss_unit": "bytes"},
+        "observations": observations,
+    }
+    envelope = phase8_evidence.make_envelope(
+        evidence_class="structural",
+        status="PASS",
+        revision=revision,
+        source_digest=source_digest,
+        payload=payload,
+    )
+    phase8_evidence.write_envelope(output, envelope)
+
+
 def main() -> int:
-    """Write caller-supplied observations only; production probes stay in tests."""
+    """Refuse to produce evidence without explicit measured observations."""
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--observations",
+        type=Path,
+        required=True,
+        help="Canonical structural observations prepared by the fixed test probes",
+    )
     args = parser.parse_args()
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(structural_payload([]), sort_keys=True) + "\n")
+    try:
+        raw = json.loads(args.observations.read_text(encoding="utf-8"))
+        call_observations = [
+            ScaleObservation(
+                operation=item["operation"],
+                seeded_entries=item["seeded_entries"],
+                page_size=item["page_size"],
+                work_cap=item["work_cap"],
+                selected_entries=item["selected_entries"],
+                counters=CallCounters(**item["counters"]),
+            )
+            for item in raw["call_observations"]
+        ]
+        memory_observations = [
+            MemoryObservation.from_child_message(
+                item, expected_operation=item["operation"]
+            )
+            for item in raw["memory_observations"]
+        ]
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError, MemoryProbeError) as error:
+        parser.error(f"invalid structural observations: {error}")
+    if not call_observations or not memory_observations:
+        parser.error("structural observations must include call and memory evidence")
+    write_structural_evidence(
+        args.output,
+        call_observations=call_observations,
+        memory_observations=memory_observations,
+    )
     return 0
 
 

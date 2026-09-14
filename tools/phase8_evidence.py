@@ -90,6 +90,32 @@ _PACKAGING_PAYLOAD_KEYS = _COMMON_PAYLOAD_KEYS | {
     "compatibility",
     "non_live_groups",
 }
+_STRUCTURAL_PAYLOAD_KEYS = _COMMON_PAYLOAD_KEYS | {"environment", "observations"}
+_STRUCTURAL_COUNTER_KEYS = frozenset(
+    {
+        "authority_pages",
+        "authority_reads",
+        "authority_writes",
+        "participant_head",
+        "participant_open",
+        "participant_delete",
+        "participant_list",
+    }
+)
+_STRUCTURAL_OBSERVATION_KEYS = frozenset(
+    {
+        "operation",
+        "seeded_entries",
+        "page_size",
+        "work_cap",
+        "selected_entries",
+        "workload_bytes",
+        "peak_rss_bytes",
+        "counters",
+    }
+)
+_STRUCTURAL_ENVIRONMENT_KEYS = frozenset({"os", "rss_unit"})
+_MAX_STRUCTURAL_OBSERVATIONS = 64
 _PACKAGING_OPTIONAL_GROUPS = (
     "recommended",
     "dataframes",
@@ -260,6 +286,74 @@ def _validate_packaging_payload(payload: Mapping[str, object]) -> dict[str, obje
     }
 
 
+def _validate_structural_payload(payload: Mapping[str, object]) -> dict[str, object]:
+    """Validate finite call-count and RSS facts without accepting timing data."""
+
+    environment = payload.get("environment")
+    if not isinstance(environment, Mapping) or set(environment) != _STRUCTURAL_ENVIRONMENT_KEYS:
+        raise EvidenceValidationError("invalid structural environment")
+    operating_system = _validate_safe_text(environment.get("os"), field="os")
+    if environment.get("rss_unit") != "bytes":
+        raise EvidenceValidationError("invalid structural RSS unit")
+
+    observations = payload.get("observations")
+    if (
+        not isinstance(observations, list)
+        or not observations
+        or len(observations) > _MAX_STRUCTURAL_OBSERVATIONS
+    ):
+        raise EvidenceValidationError("invalid structural observations")
+    validated_observations: list[dict[str, object]] = []
+    for observation in observations:
+        if (
+            not isinstance(observation, Mapping)
+            or set(observation) != _STRUCTURAL_OBSERVATION_KEYS
+        ):
+            raise EvidenceValidationError("invalid structural observation")
+        operation = _validate_safe_text(observation.get("operation"), field="operation")
+        integers: dict[str, int] = {}
+        for field_name in (
+            "seeded_entries",
+            "page_size",
+            "work_cap",
+            "selected_entries",
+            "workload_bytes",
+            "peak_rss_bytes",
+        ):
+            value = observation.get(field_name)
+            if type(value) is not int or value < 0:
+                raise EvidenceValidationError("invalid structural observation")
+            integers[field_name] = value
+        if (
+            integers["page_size"] <= 0
+            or integers["work_cap"] <= 0
+            or integers["page_size"] > integers["work_cap"]
+            or integers["selected_entries"]
+            > min(
+                integers["seeded_entries"],
+                integers["page_size"],
+                integers["work_cap"],
+            )
+        ):
+            raise EvidenceValidationError("invalid structural work bounds")
+        counters = observation.get("counters")
+        if not isinstance(counters, Mapping) or set(counters) != _STRUCTURAL_COUNTER_KEYS:
+            raise EvidenceValidationError("invalid structural counters")
+        validated_counters: dict[str, int] = {}
+        for counter_name in sorted(_STRUCTURAL_COUNTER_KEYS):
+            value = counters[counter_name]
+            if type(value) is not int or value < 0 or value > 4_096:
+                raise EvidenceValidationError("invalid structural counters")
+            validated_counters[counter_name] = value
+        validated_observations.append(
+            {"operation": operation, **integers, "counters": validated_counters}
+        )
+    return {
+        "environment": {"os": operating_system, "rss_unit": "bytes"},
+        "observations": validated_observations,
+    }
+
+
 def _validate_platform_payload(payload: Mapping[str, object]) -> dict[str, object]:
     """Validate one bounded, runtime-bound platform qualification row."""
     expected_os = _validate_safe_text(payload.get("expected_os"), field="expected_os")
@@ -307,6 +401,7 @@ def _validate_payload(
         "deterministic": _DETERMINISTIC_PAYLOAD_KEYS,
         "platform": _PLATFORM_PAYLOAD_KEYS,
         "packaging": _PACKAGING_PAYLOAD_KEYS,
+        "structural": _STRUCTURAL_PAYLOAD_KEYS,
     }.get(evidence_class, _COMMON_PAYLOAD_KEYS)
     if set(payload) != allowed:
         raise EvidenceValidationError("payload violates the exact allow-list")
@@ -351,10 +446,14 @@ def _validate_payload(
     if evidence_class == "platform":
         validated.update(_validate_platform_payload(payload))
 
+    if evidence_class == "structural":
+        validated.update(_validate_structural_payload(payload))
+
     if status == "PASS" and evidence_class not in {
         "deterministic",
         "packaging",
         "platform",
+        "structural",
     }:
         raise EvidenceValidationError("only implemented evidence producers may pass")
     return validated
