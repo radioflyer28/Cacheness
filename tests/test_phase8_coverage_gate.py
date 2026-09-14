@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 from pathlib import Path
+import sys
 
 import pytest
 
@@ -18,6 +19,7 @@ def _load_verifier():
     if spec is None or spec.loader is None:
         raise RuntimeError("could not load Phase 8 coverage verifier")
     module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 
@@ -26,7 +28,11 @@ def _write_json(path: Path, payload: dict[str, object]) -> None:
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
-def _coverage_report(*, missing_branch: bool = False) -> dict[str, object]:
+def _coverage_report(
+    *,
+    missing_branch: bool = False,
+    critical_paths: tuple[str, ...] = ("src/cacheness/core.py",),
+) -> dict[str, object]:
     summary: dict[str, object] = {
         "covered_lines": 90,
         "num_statements": 100,
@@ -39,7 +45,7 @@ def _coverage_report(*, missing_branch: bool = False) -> dict[str, object]:
     return {
         "meta": {"version": "7.0", "branch_coverage": True},
         "files": {
-            "src/cacheness/core.py": {
+            path: {
                 "summary": {
                     "covered_lines": 9,
                     "num_statements": 10,
@@ -47,6 +53,7 @@ def _coverage_report(*, missing_branch: bool = False) -> dict[str, object]:
                     "num_branches": 4,
                 }
             }
+            for path in critical_paths
         },
         "totals": summary,
     }
@@ -56,8 +63,13 @@ def _baseline() -> dict[str, object]:
     return {
         "schema_version": 1,
         "source_revision": "a" * 40,
-        "environment": {"python": "3.13", "platform": "test"},
+        "environment": {
+            "implementation": "CPython",
+            "python": "3.13",
+            "platform": "test",
+        },
         "command": "uv run pytest --cov-branch",
+        "justification": "Phase 8 initial ratchet establishment",
         "named_selectors": [
             "tests/test_phase8_lifecycle_coverage.py::test_postgresql_error_classification",
             "tests/test_phase8_lifecycle_coverage.py::test_postgresql_replay",
@@ -115,6 +127,20 @@ def test_rejects_any_regressed_total_or_critical_dimension() -> None:
         verifier.compare_to_baseline(current, baseline)
 
 
+def test_rejects_critical_scope_shrink_even_if_coverage_rate_rises() -> None:
+    verifier = _load_verifier()
+    baseline = _baseline()
+    current = _baseline()
+    current["critical"] = {
+        **current["critical"],
+        "total_branches": 3,
+        "branch_rate": 1.0,
+    }
+
+    with pytest.raises(verifier.CoverageGateError, match="critical branch total"):
+        verifier.compare_to_baseline(current, baseline)
+
+
 def test_requires_literal_postgresql_selector_families() -> None:
     verifier = _load_verifier()
 
@@ -126,6 +152,17 @@ def test_requires_literal_postgresql_selector_families() -> None:
                 if "postgresql_replay" not in selector
             ]
         )
+
+
+def test_rejects_baseline_with_an_omitted_named_contract(tmp_path: Path) -> None:
+    verifier = _load_verifier()
+    baseline_path = tmp_path / "baseline.json"
+    baseline = _baseline()
+    baseline["named_selectors"] = list(verifier.NAMED_SELECTORS[:-1])
+    baseline_path.write_bytes(verifier._canonical_json(baseline))
+
+    with pytest.raises(verifier.CoverageGateError, match="named selector inventory"):
+        verifier.load_baseline(baseline_path)
 
 
 def test_verify_mode_does_not_rewrite_baseline(tmp_path: Path) -> None:
@@ -142,15 +179,40 @@ def test_verify_mode_does_not_rewrite_baseline(tmp_path: Path) -> None:
     assert baseline_path.read_bytes() == original
 
 
+def test_capture_does_not_write_when_named_selector_preflight_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    verifier = _load_verifier()
+    report_path = tmp_path / "coverage.json"
+    baseline_path = tmp_path / "baseline.json"
+    _write_json(
+        report_path,
+        _coverage_report(critical_paths=verifier.CRITICAL_SOURCE_FILES),
+    )
+    baseline_path.write_text("unchanged baseline", encoding="utf-8")
+
+    def fail_preflight() -> None:
+        raise verifier.CoverageGateError("postgresql_replay did not pass")
+
+    monkeypatch.setattr(verifier, "_preflight_named_selectors", fail_preflight)
+    with pytest.raises(verifier.CoverageGateError, match="postgresql_replay"):
+        verifier.capture(
+            report_path,
+            baseline_path,
+            justification="Phase 8 initial ratchet establishment",
+            command="pytest --cov-branch",
+        )
+
+    assert baseline_path.read_text(encoding="utf-8") == "unchanged baseline"
+
+
 def test_ruff_scope_is_bounded_and_contains_fixed_critical_inventory(
     tmp_path: Path,
 ) -> None:
     verifier = _load_verifier()
     changed = tmp_path / "changed.txt"
     changed.write_text(
-        "src/cacheness/core.py\n"
-        "../escape.py\n"
-        "non-python.txt\n",
+        "src/cacheness/core.py\n../escape.py\nnon-python.txt\n",
         encoding="utf-8",
     )
 
