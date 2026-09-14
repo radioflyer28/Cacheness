@@ -35,14 +35,15 @@ def test_workloads_inventory_is_representative_without_topology_cross_product() 
         "sqlite-filesystem",
     }
 
-    canonical_sizes = {
-        workload.name: workload.canonical_size_bytes for workload in workloads
-    }
+    canonical_sizes = {workload.name: workload.canonical_size for workload in workloads}
+    canonical_units = {workload.name: workload.size_unit for workload in workloads}
     assert canonical_sizes["small-generic-object"] == 4 * 1024
     assert canonical_sizes["numpy-npz-medium"] == 16 * 1024 * 1024
     assert canonical_sizes["numpy-npz-large"] == 128 * 1024 * 1024
     assert canonical_sizes["pandas-parquet"] == 100_000
     assert canonical_sizes["polars-parquet"] == 100_000
+    assert canonical_units["numpy-npz-large"] == "bytes"
+    assert canonical_units["pandas-parquet"] == "rows"
     assert all("blosc2" not in workload.name for workload in workloads)
 
 
