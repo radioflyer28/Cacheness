@@ -5,9 +5,12 @@ from __future__ import annotations
 import hashlib
 import importlib
 import json
+import os
 from pathlib import Path
 import re
 import sys
+from copy import deepcopy
+from types import SimpleNamespace
 
 import pytest
 
@@ -28,6 +31,78 @@ build_baseline_document = _BENCHMARKS.build_baseline_document
 distribution = _BENCHMARKS.distribution
 measure_hashes = _BENCHMARKS.measure_hashes
 verify_baseline = _BENCHMARKS.verify_baseline
+
+
+def _eligible_preflight_fingerprint() -> dict[str, object]:
+    """Return a schema-valid, deliberately non-identifying runner fingerprint."""
+    return {
+        "os": {"system": "Linux", "release": "6.8.0", "machine": "x86_64"},
+        "cpu": {
+            "model": "Generic x86 CPU",
+            "logical_cpus": 8,
+            "scaling_governors": ["performance"],
+        },
+        "filesystem": {"type": "ext4"},
+        "python": {"implementation": "CPython", "version": "3.13.0"},
+        "uv": {"version": "0.9.0"},
+        "sqlite": {"library_version": "3.50.0"},
+    }
+
+
+def _preflight_arguments(*, revision: str = "a" * 40) -> list[str]:
+    return [
+        "--preflight-runner",
+        "--expect-label",
+        "cacheness-perf-linux-x64",
+        "--revision",
+        revision,
+        "--runner-identity",
+        "cacheness-perf-linux-x64",
+    ]
+
+
+def _install_eligible_preflight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> dict[str, object]:
+    """Install deterministic read-only probes for CLI contract tests."""
+    fingerprint = _eligible_preflight_fingerprint()
+    monkeypatch.setattr(_BENCHMARKS, "_machine_fingerprint", lambda: fingerprint)
+    monkeypatch.setattr(
+        _BENCHMARKS,
+        "_repository_preflight",
+        lambda revision: {"head_state": "detached", "worktree_state": "clean"},
+    )
+    monkeypatch.setattr(_BENCHMARKS, "_validate_controlled_platform", lambda: None)
+    return fingerprint
+
+
+def _tree_snapshot(root: Path) -> dict[str, tuple[int, int, str]]:
+    """Capture the bounded Git/worktree surface used by the preflight contract."""
+    tracked = [root / "benchmarks" / "phase8_benchmarks.py"]
+    git_path = root / ".git"
+    if git_path.is_file():
+        tracked.append(git_path)
+    else:
+        tracked.extend(
+            path
+            for path in (
+                git_path / "HEAD",
+                git_path / "index",
+                git_path / "config",
+                git_path / "packed-refs",
+            )
+            if path.exists()
+        )
+    snapshot: dict[str, tuple[int, int, str]] = {}
+    for path in tracked:
+        if path.is_file():
+            stat = path.stat()
+            snapshot[str(path)] = (
+                stat.st_mode,
+                stat.st_mtime_ns,
+                hashlib.sha256(path.read_bytes()).hexdigest(),
+            )
+    return snapshot
 
 
 def test_workloads_inventory_is_representative_without_topology_cross_product() -> None:
@@ -225,3 +300,205 @@ def test_controlled_workflow_pins_actions_and_uploads_one_sanitized_envelope() -
     assert "retention-days: 30" in workflow
     assert "build/phase8/controlled-performance.json" in workflow
     assert "build/phase8/raw-performance.json" in workflow
+
+
+def test_preflight_runner_emits_only_the_bounded_eligibility_record(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A successful preflight is identity evidence, never a timing document."""
+    fingerprint = _install_eligible_preflight(monkeypatch)
+
+    assert _BENCHMARKS.main(_preflight_arguments()) == 0
+
+    record = json.loads(capsys.readouterr().out)
+    assert set(record) == {
+        "schema",
+        "status",
+        "revision",
+        "runner_label",
+        "repository",
+        "machine_fingerprint",
+        "machine_fingerprint_sha256",
+    }
+    assert record["schema"] == "cacheness.phase8.runner-preflight.v1"
+    assert record["status"] == "eligible"
+    assert record["revision"] == "a" * 40
+    assert record["runner_label"] == "cacheness-perf-linux-x64"
+    assert record["repository"] == {
+        "head_state": "detached",
+        "worktree_state": "clean",
+    }
+    assert record["machine_fingerprint"] == fingerprint
+    assert record["machine_fingerprint_sha256"] == _BENCHMARKS.machine_fingerprint_digest(
+        fingerprint
+    )
+    assert _BENCHMARKS.validate_preflight_record(record) == record
+
+
+def test_preflight_runner_canonical_fingerprint_rejects_drift_and_disclosure() -> None:
+    """Every allowed family contributes to a canonical bounded digest only."""
+    fingerprint = _eligible_preflight_fingerprint()
+    expected = _BENCHMARKS.machine_fingerprint_digest(fingerprint)
+    reordered = {
+        "sqlite": fingerprint["sqlite"],
+        "uv": fingerprint["uv"],
+        "python": fingerprint["python"],
+        "filesystem": fingerprint["filesystem"],
+        "cpu": fingerprint["cpu"],
+        "os": fingerprint["os"],
+    }
+    assert _BENCHMARKS.machine_fingerprint_digest(reordered) == expected
+
+    drifted_fingerprints = []
+    for family, replacement in (
+        ("os", {"system": "Linux", "release": "6.9.0", "machine": "x86_64"}),
+        (
+            "cpu",
+            {
+                "model": "Generic x86 CPU v2",
+                "logical_cpus": 8,
+                "scaling_governors": ["performance"],
+            },
+        ),
+        ("filesystem", {"type": "xfs"}),
+        ("python", {"implementation": "CPython", "version": "3.13.1"}),
+        ("uv", {"version": "0.9.1"}),
+        ("sqlite", {"library_version": "3.50.1"}),
+    ):
+        changed = deepcopy(fingerprint)
+        changed[family] = replacement
+        drifted_fingerprints.append(changed)
+    assert all(
+        _BENCHMARKS.machine_fingerprint_digest(changed) != expected
+        for changed in drifted_fingerprints
+    )
+
+    malformed = deepcopy(fingerprint)
+    malformed["hostname"] = "never-allowed"
+    with pytest.raises(BaselineVerificationError, match="machine fingerprint keys"):
+        _BENCHMARKS.machine_fingerprint_digest(malformed)
+
+    malformed = deepcopy(fingerprint)
+    malformed["os"] = {"system": "Linux", "release": "\u2603", "machine": "x86_64"}
+    with pytest.raises(BaselineVerificationError, match="release"):
+        _BENCHMARKS.machine_fingerprint_digest(malformed)
+
+    malformed = deepcopy(fingerprint)
+    malformed["cpu"]["scaling_governors"] = ["performance", "performance"]
+    with pytest.raises(BaselineVerificationError, match="scaling governors"):
+        _BENCHMARKS.machine_fingerprint_digest(malformed)
+
+    malformed = deepcopy(fingerprint)
+    malformed["cpu"]["model"] = "x" * 257
+    with pytest.raises(BaselineVerificationError, match="CPU model"):
+        _BENCHMARKS.machine_fingerprint_digest(malformed)
+
+    record = {
+        "schema": "cacheness.phase8.runner-preflight.v1",
+        "status": "eligible",
+        "revision": "a" * 40,
+        "runner_label": "cacheness-perf-linux-x64",
+        "repository": {"head_state": "detached", "worktree_state": "clean"},
+        "machine_fingerprint": fingerprint,
+        "machine_fingerprint_sha256": expected,
+    }
+    hostile = deepcopy(record)
+    hostile["environment"] = {"TOKEN": "never-allowed"}
+    with pytest.raises(BaselineVerificationError, match="preflight record keys"):
+        _BENCHMARKS.validate_preflight_record(hostile)
+
+
+def test_preflight_runner_uses_optional_lock_free_git_reads_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Git source checks are bounded reads and never surface command diagnostics."""
+    calls: list[tuple[str, ...]] = []
+
+    def fake_run(command: list[str], **kwargs: object) -> SimpleNamespace:
+        calls.append(tuple(command))
+        assert kwargs["check"] is False
+        assert kwargs["capture_output"] is True
+        assert kwargs["text"] is True
+        assert kwargs["timeout"] == _BENCHMARKS.PREFLIGHT_GIT_TIMEOUT_SECONDS
+        if command[-2:] == ["rev-parse", "HEAD"]:
+            return SimpleNamespace(returncode=0, stdout="a" * 40 + "\n", stderr="")
+        if command[-3:] == ["symbolic-ref", "-q", "HEAD"]:
+            return SimpleNamespace(returncode=1, stdout="", stderr="")
+        assert command[-2:] == ["status", "--porcelain=v1"]
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(_BENCHMARKS.subprocess, "run", fake_run)
+
+    assert _BENCHMARKS._repository_preflight("a" * 40) == {
+        "head_state": "detached",
+        "worktree_state": "clean",
+    }
+    assert len(calls) == 3
+    assert all("--no-optional-locks" in command for command in calls)
+    assert all("-C" in command for command in calls)
+
+
+def test_preflight_runner_never_measures_or_mutates(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Both accepted and rejected runner checks leave repository state untouched."""
+    _install_eligible_preflight(monkeypatch)
+    before = _tree_snapshot(Path(__file__).parents[2])
+
+    def fail_if_called(*args: object, **kwargs: object) -> object:
+        raise AssertionError("preflight must not enter a measurement or write seam")
+
+    monkeypatch.setattr(_BENCHMARKS, "_measurement_document", fail_if_called)
+    monkeypatch.setattr(_BENCHMARKS, "atomic_replace_baseline", fail_if_called)
+    monkeypatch.setattr(_BENCHMARKS, "verify_baseline", fail_if_called)
+
+    assert _BENCHMARKS.main(_preflight_arguments()) == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "eligible"
+    assert _tree_snapshot(Path(__file__).parents[2]) == before
+
+    monkeypatch.setattr(
+        _BENCHMARKS,
+        "_repository_preflight",
+        lambda revision: (_ for _ in ()).throw(
+            BaselineVerificationError("repository state is not eligible")
+        ),
+    )
+    assert _BENCHMARKS.main(_preflight_arguments()) == 2
+    assert capsys.readouterr().out == ""
+    assert _tree_snapshot(Path(__file__).parents[2]) == before
+
+
+@pytest.mark.parametrize(
+    ("arguments", "reason"),
+    [
+        (_preflight_arguments(revision="A" * 40), "requested revision is invalid"),
+        (
+            [
+                "--preflight-runner",
+                "--expect-label",
+                "ordinary-linux",
+                "--revision",
+                "a" * 40,
+                "--runner-identity",
+                "ordinary-linux",
+            ],
+            "runner label is not eligible",
+        ),
+    ],
+)
+def test_preflight_runner_rejects_uncontrolled_input_without_success_record(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    arguments: list[str],
+    reason: str,
+) -> None:
+    """Malformed revision and any non-fixed runner label fail with safe diagnostics."""
+    _install_eligible_preflight(monkeypatch)
+
+    assert _BENCHMARKS.main(arguments) == 2
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.strip() == f"runner preflight rejected: {reason}"

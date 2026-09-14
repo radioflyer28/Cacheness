@@ -17,7 +17,7 @@ VERIFIER_PATH = REPOSITORY_ROOT / "tools" / "verify_phase8_contracts.py"
 EXPECTED_PLAN_PATHS = tuple(
     ".planning/phases/08-production-gates-and-performance-stabilization/"
     f"08-{number:02d}-PLAN.md"
-    for number in range(1, 13)
+    for number in range(1, 14)
 )
 EXPECTED_DECISIONS = {f"D-{number:02d}" for number in range(1, 23)}
 EXPECTED_REQUIREMENTS = {
@@ -59,6 +59,16 @@ def test_fixed_manifest_covers_full_phase_decision_requirement_and_threat_sets()
     assert set(verifier.DECISION_NODES) == EXPECTED_DECISIONS
     assert set(verifier.PHASE8_REQUIREMENTS) == EXPECTED_REQUIREMENTS
     assert set(verifier.THREAT_NODES) == set(verifier.PHASE8_THREATS)
+    assert {
+        threat: verifier.THREAT_NODES[threat]
+        for threat in ("T-08-13-01", "T-08-13-02", "T-08-13-03")
+    } == {
+        threat: (
+            "tests/performance/test_phase8_benchmarks.py::"
+            "test_preflight_runner_emits_only_the_bounded_eligibility_record",
+        )
+        for threat in ("T-08-13-01", "T-08-13-02", "T-08-13-03")
+    }
     assert verifier.validate_fixed_manifest(REPOSITORY_ROOT) == ()
     assert not hasattr(verifier, "discover_tests")
 
