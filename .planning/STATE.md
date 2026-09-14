@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 08
 current_phase_name: Production Gates and Performance Stabilization
 status: executing
-stopped_at: Completed 08-07-PLAN.md
-last_updated: "2026-09-14T00:48:00.781Z"
-last_activity: 2026-09-13
-last_activity_desc: Phase 08 Plan 02 completed; isolated wheel matrix and packaging evidence recorded
-state_head: 353be851fcc8b682b7133c87960dba6323bddfaf
+stopped_at: Completed 08-08-PLAN.md
+last_updated: "2026-09-14T01:05:48.648Z"
+last_activity: 2026-09-14
+last_activity_desc: Phase 08 Plan 08 completed; protected real PostgreSQL/Amazon-S3 qualification machinery recorded
+state_head: 928fc42578f485591fc1a18b9cf28bf24e6a5155
 progress:
   total_phases: 9
   completed_phases: 7
   total_plans: 128
-  completed_plans: 121
+  completed_plans: 122
 milestone_name: milestone
 ---
 
@@ -29,9 +29,9 @@ See: .planning/PROJECT.md (updated 2026-09-13)
 ## Current Position
 
 Phase: 08 — Production Gates and Performance Stabilization
-Plan: 7 of 12
+Plan: 8 of 12
 Status: Ready to execute
-Last activity: 2026-09-13 — Phase 08 Plan 02 completed; isolated wheel matrix and packaging evidence recorded
+Last activity: 2026-09-14 — Phase 08 Plan 08 completed; protected real PostgreSQL/Amazon-S3 qualification machinery recorded
 
 Phase 07.1 closed with 11/11 plans summarized and an independent 46/46
 must-have verification pass. Built-in filesystem, memory, and S3 payload
@@ -200,6 +200,7 @@ the deliberately superseded Phase 03 plan; do not fabricate its completion.
 | Phase 08 P04 | 12m 14s | 2 tasks | 2 files |
 | Phase 08 P06 | 12m 10s | 2 tasks | 4 files |
 | Phase 08 P07 | 680s | 3 tasks | 4 files |
+| Phase 08 P08 | 838s | 3 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -483,6 +484,9 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - [Phase 08]: Phase 08 Plan 07: Canonical performance evidence measures native NPZ current writes; legacy Blosc2 remains input-only compatibility and is not fabricated as a current write path.
 - [Phase 08]: Phase 08 Plan 07: Only cacheness-perf-linux-x64 may verify reviewed p50/p99 envelopes; remote/macOS timing stays diagnostic and benchmark envelopes never become runtime deadlines.
 - [Phase 08]: Phase 08 Plan 07: SHA-256 plus size remains canonical persisted integrity; XXH3 is comparative evidence only.
+- [Phase 08]: Phase 08 Plan 08: only release_candidate live evidence can be QUALIFIED; scheduled diagnostics remain non-qualifying.
+- [Phase 08]: Phase 08 Plan 08: Phase 8 qualification uses exact q8 marker-owned namespaces while preserving Phase 5 fixture compatibility.
+- [Phase 08]: Phase 08 Plan 08: real-service source identity includes fixed live tests, active obstore/authority code, tools, and workflows.
 
 ### Pending Todos
 
@@ -512,6 +516,6 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 
 ## Session Continuity
 
-Last session: 2026-09-14T00:48:00.490Z
-Stopped at: Completed 08-07-PLAN.md
+Last session: 2026-09-14T01:05:48.359Z
+Stopped at: Completed 08-08-PLAN.md
 Resume file: None
