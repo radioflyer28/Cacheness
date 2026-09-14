@@ -55,9 +55,18 @@ QUALIFICATION_SOURCE_PATHS = (
     "src/cacheness/storage/backends/postgresql_lifecycle_authority.py",
     "tests/qualification/conftest.py",
     "tests/qualification/test_phase8_evidence.py",
+    "tests/qualification/test_phase8_live_workflow.py",
     *LIVE_TEST_MODULES,
     "tools/phase8_evidence.py",
+    "tools/run_phase8_local_gates.py",
+    "tools/run_phase8_packaging.py",
+    "tools/run_phase8_platform_gates.py",
+    "tools/run_phase8_scale_gates.py",
     "tools/run_phase8_qualification.py",
+    "tools/verify_phase8_contracts.py",
+    "tools/verify_phase8_release.py",
+    ".github/workflows/performance.yml",
+    ".github/workflows/quality.yml",
     ".github/workflows/live_qualification.yml",
 )
 DEFAULT_TIMEOUT_SECONDS = 900
@@ -71,6 +80,7 @@ _ALLOWED_EVIDENCE_KEYS = frozenset(
         "revision",
         "source_digest",
         "generated_at_utc",
+        "run_role",
         "run_namespace",
         "missing_configuration",
         "services",
@@ -97,6 +107,7 @@ _RESULT_VALUES = frozenset(
     {"not_run", "passed", "failed", "incomplete", "configuration_error"}
 )
 _CLEANUP_VALUES = frozenset({"NOT_ATTEMPTED", "CLEAN", "RESIDUE", "ERROR"})
+_RUN_ROLES = frozenset({"release_candidate", "scheduled_diagnostic"})
 _FORBIDDEN_VALUE_PATTERN = re.compile(
     r"://|access[_-]?key|credential|password|secret|token|private[_-]?key|payload",
     re.IGNORECASE,
@@ -295,6 +306,7 @@ def make_evidence(
     result: str,
     cleanup_status: str,
     source_identity: SourceIdentity | None = None,
+    run_role: str = "release_candidate",
 ) -> dict[str, object]:
     """Build the exact sanitized evidence record before it reaches disk."""
     services: dict[str, object] = {
@@ -318,6 +330,7 @@ def make_evidence(
         "revision": source_identity.revision if source_identity else "unavailable",
         "source_digest": source_identity.digest if source_identity else "unavailable",
         "generated_at_utc": datetime.now(UTC).isoformat(),
+        "run_role": run_role,
         "run_namespace": _redacted_namespace(run_namespace),
         "missing_configuration": list(missing_configuration),
         "services": services,
@@ -377,6 +390,8 @@ def validate_evidence(evidence: Mapping[str, object]) -> None:
             raise ValueError("evidence timestamp is invalid")
     except ValueError as error:
         raise ValueError("evidence timestamp is invalid") from error
+    if evidence.get("run_role") not in _RUN_ROLES:
+        raise ValueError("evidence run role is invalid")
     namespace = evidence.get("run_namespace")
     if not isinstance(namespace, str) or not re.fullmatch(r"sha256:[0-9a-f]{16}", namespace):
         raise ValueError("evidence namespace is invalid")
@@ -403,7 +418,7 @@ def validate_evidence(evidence: Mapping[str, object]) -> None:
         raise ValueError("evidence fixed suite is invalid")
     if fixed_suite.get("modules") != list(LIVE_TEST_MODULES) or fixed_suite.get("marker_expression") != LIVE_MARKER_EXPRESSION or not isinstance(fixed_suite.get("complete"), bool):
         raise ValueError("evidence fixed suite is invalid")
-    for value in (evidence["schema"], evidence["status"], timestamp, namespace, evidence["result"], evidence["cleanup_status"]):
+    for value in (evidence["schema"], evidence["status"], timestamp, evidence["run_role"], namespace, evidence["result"], evidence["cleanup_status"]):
         _validate_safe_text(value)
 
     status = evidence["status"]
@@ -417,6 +432,7 @@ def validate_evidence(evidence: Mapping[str, object]) -> None:
         and _REVISION_PATTERN.fullmatch(revision)
         and isinstance(source_digest, str)
         and _DIGEST_PATTERN.fullmatch(source_digest)
+        and evidence["run_role"] == "release_candidate"
     )
     if status == "QUALIFIED" and not complete_proof:
         raise ValueError("qualified evidence contradicts its required service proof")
@@ -536,41 +552,44 @@ def _is_complete_pass(completed: subprocess.CompletedProcess[str]) -> bool:
     return completed.returncode == 0 and not any(marker in output for marker in incomplete_markers) and re.search(r"\b[1-9][0-9]* passed\b", output) is not None
 
 
-def _write_terminal_evidence(*, output: Path, status: str, missing_configuration: Sequence[str], run_namespace: str, aws_identity: AwsServiceIdentity | None, result: str, cleanup_status: str, forbidden_fragments: Sequence[str], source_identity: SourceIdentity | None = None) -> None:
+def _write_terminal_evidence(*, output: Path, status: str, missing_configuration: Sequence[str], run_namespace: str, aws_identity: AwsServiceIdentity | None, result: str, cleanup_status: str, forbidden_fragments: Sequence[str], source_identity: SourceIdentity | None = None, run_role: str = "release_candidate") -> None:
     write_evidence(
         output,
         make_evidence(
             status=status, missing_configuration=missing_configuration,
             run_namespace=run_namespace, aws_identity=aws_identity, result=result,
             cleanup_status=cleanup_status, source_identity=source_identity,
+            run_role=run_role,
         ),
         forbidden_fragments=forbidden_fragments,
     )
 
 
-def run_qualification(*, output: Path, environment: Mapping[str, str] | None = None, run_tests: Callable[[Sequence[str], int], subprocess.CompletedProcess[str]] | None = None, resolve_aws: Callable[[Mapping[str, str]], AwsServiceIdentity] = resolve_aws_service_identity, cleanup: Callable[[Mapping[str, str], str], str] = _cleanup_from_fixtures, run_namespace: str | None = None) -> int:
+def run_qualification(*, output: Path, environment: Mapping[str, str] | None = None, run_tests: Callable[[Sequence[str], int], subprocess.CompletedProcess[str]] | None = None, resolve_aws: Callable[[Mapping[str, str]], AwsServiceIdentity] = resolve_aws_service_identity, cleanup: Callable[[Mapping[str, str], str], str] = _cleanup_from_fixtures, run_namespace: str | None = None, run_role: str = "release_candidate") -> int:
     """Write one terminal record and return 0, 1, or 2 for its fixed status."""
     supplied_environment = dict(os.environ if environment is None else environment)
+    if run_role not in _RUN_ROLES:
+        raise ValueError("invalid qualification run role")
     namespace = run_namespace or _new_run_namespace()
     forbidden_fragments = _supplied_secret_fragments(supplied_environment)
     missing = _missing_configuration(supplied_environment)
     if missing:
-        _write_terminal_evidence(output=output, status="UNAVAILABLE", missing_configuration=missing, run_namespace=namespace, aws_identity=None, result="not_run", cleanup_status="NOT_ATTEMPTED", forbidden_fragments=forbidden_fragments)
+        _write_terminal_evidence(output=output, status="UNAVAILABLE", missing_configuration=missing, run_namespace=namespace, aws_identity=None, result="not_run", cleanup_status="NOT_ATTEMPTED", forbidden_fragments=forbidden_fragments, run_role=run_role)
         return 2
     try:
         _validate_external_configuration(supplied_environment)
         timeout = _timeout_seconds(supplied_environment)
     except ValueError:
-        _write_terminal_evidence(output=output, status="NOT_QUALIFIED", missing_configuration=(), run_namespace=namespace, aws_identity=None, result="configuration_error", cleanup_status="NOT_ATTEMPTED", forbidden_fragments=forbidden_fragments)
+        _write_terminal_evidence(output=output, status="NOT_QUALIFIED", missing_configuration=(), run_namespace=namespace, aws_identity=None, result="configuration_error", cleanup_status="NOT_ATTEMPTED", forbidden_fragments=forbidden_fragments, run_role=run_role)
         return 1
     source_identity = _qualification_source_identity()
     if source_identity is None:
-        _write_terminal_evidence(output=output, status="NOT_QUALIFIED", missing_configuration=(), run_namespace=namespace, aws_identity=None, result="not_run", cleanup_status="NOT_ATTEMPTED", forbidden_fragments=forbidden_fragments)
+        _write_terminal_evidence(output=output, status="NOT_QUALIFIED", missing_configuration=(), run_namespace=namespace, aws_identity=None, result="not_run", cleanup_status="NOT_ATTEMPTED", forbidden_fragments=forbidden_fragments, run_role=run_role)
         return 1
     try:
         aws_identity = resolve_aws(supplied_environment)
     except QualificationUnavailableError:
-        _write_terminal_evidence(output=output, status="UNAVAILABLE", missing_configuration=(), run_namespace=namespace, aws_identity=None, result="not_run", cleanup_status="NOT_ATTEMPTED", forbidden_fragments=forbidden_fragments, source_identity=source_identity)
+        _write_terminal_evidence(output=output, status="UNAVAILABLE", missing_configuration=(), run_namespace=namespace, aws_identity=None, result="not_run", cleanup_status="NOT_ATTEMPTED", forbidden_fragments=forbidden_fragments, source_identity=source_identity, run_role=run_role)
         return 2
 
     completed: subprocess.CompletedProcess[str] | None = None
@@ -588,13 +607,18 @@ def run_qualification(*, output: Path, environment: Mapping[str, str] | None = N
             cleanup_status = "ERROR"
     complete = completed is not None and _is_complete_pass(completed)
     source_stable = _qualification_source_identity() == source_identity
-    qualified = complete and cleanup_status == "CLEAN" and source_stable
+    qualified = (
+        complete
+        and cleanup_status == "CLEAN"
+        and source_stable
+        and run_role == "release_candidate"
+    )
     _write_terminal_evidence(
         output=output, status="QUALIFIED" if qualified else "NOT_QUALIFIED",
         missing_configuration=(), run_namespace=namespace, aws_identity=aws_identity,
         result="passed" if complete and source_stable else "incomplete" if completed is None or not source_stable else "failed",
         cleanup_status=cleanup_status, forbidden_fragments=forbidden_fragments,
-        source_identity=source_identity,
+        source_identity=source_identity, run_role=run_role,
     )
     return 0 if qualified else 1
 
@@ -603,7 +627,9 @@ def main(arguments: Sequence[str] | None = None) -> int:
     """Parse one output location without permitting selector substitution."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
-    return run_qualification(output=parser.parse_args(arguments).output)
+    parser.add_argument("--role", choices=sorted(_RUN_ROLES), default="release_candidate")
+    parsed = parser.parse_args(arguments)
+    return run_qualification(output=parsed.output, run_role=parsed.role)
 
 
 if __name__ == "__main__":

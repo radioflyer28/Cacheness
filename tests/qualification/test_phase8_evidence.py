@@ -341,3 +341,29 @@ def test_secret_safe_evidence_and_cleanup_exception_remain_nonqualifying(
         run_namespace="phase8-" + "d" * 32,
     ) == 1
     assert runner.load_evidence(output)["cleanup_status"] == "ERROR"
+
+
+def test_scheduled_diagnostic_role_cannot_emit_release_candidate_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A healthy scheduled service probe remains diagnostic rather than QUALIFIED."""
+    runner = _load_runner()
+    identity = runner.SourceIdentity(revision="a" * 40, digest="b" * 64)
+    monkeypatch.setattr(runner, "_qualification_source_identity", lambda: identity)
+
+    assert runner.run_qualification(
+        output=tmp_path / "scheduled.json",
+        environment=_configured_environment(),
+        run_tests=lambda _arguments, _timeout: subprocess.CompletedProcess([], 0, "4 passed", ""),
+        resolve_aws=lambda _environment: runner.AwsServiceIdentity("us-east-1", "standard"),
+        cleanup=lambda _environment, _run_id: "CLEAN",
+        run_namespace="phase8-" + "e" * 32,
+        run_role="scheduled_diagnostic",
+    ) == 1
+
+    evidence = runner.load_evidence(tmp_path / "scheduled.json")
+    assert evidence["run_role"] == "scheduled_diagnostic"
+    assert evidence["result"] == "passed"
+    assert evidence["cleanup_status"] == "CLEAN"
+    assert evidence["status"] == "NOT_QUALIFIED"
+    runner.validate_evidence(evidence)
