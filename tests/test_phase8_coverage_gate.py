@@ -251,3 +251,9 @@ def test_default_measurement_command_excludes_every_live_service_marker() -> Non
         f"-m '{verifier.NON_LIVE_MARKER_EXPRESSION}'"
         in verifier.DEFAULT_MEASUREMENT_COMMAND
     )
+
+
+def test_changed_python_paths_accepts_the_documented_parent_ref() -> None:
+    verifier = _load_verifier()
+
+    assert isinstance(verifier.changed_python_paths("HEAD^"), tuple)

@@ -29,6 +29,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 BASELINE_SCHEMA_VERSION = 1
 _REVISION_PATTERN = re.compile(r"[0-9a-f]{40}")
 _SAFE_GIT_REF_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]*")
+DEFAULT_BASE_REF = "HEAD^"
 
 # These are the released architecture's lifecycle authority, payload, and
 # cache-policy sources.  The set is literal so a deleted critical path cannot
@@ -562,7 +563,9 @@ def changed_python_paths(
 ) -> tuple[str, ...]:
     """Obtain a NUL-delimited merge-base diff without shell interpolation."""
 
-    if not _SAFE_GIT_REF_PATTERN.fullmatch(base_ref) or base_ref.startswith("-"):
+    if base_ref != DEFAULT_BASE_REF and (
+        not _SAFE_GIT_REF_PATTERN.fullmatch(base_ref) or base_ref.startswith("-")
+    ):
         raise CoverageGateError(f"unsafe base revision: {base_ref}")
     merge_base = subprocess.run(
         ["git", "merge-base", base_ref, "HEAD"],
@@ -723,7 +726,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--ruff", action="store_true", help="run direct lint and format checks"
     )
     parser.add_argument(
-        "--base-ref", default="HEAD^", help="Git ref used to construct changed scope"
+        "--base-ref",
+        default=DEFAULT_BASE_REF,
+        help="Git ref used to construct changed scope",
     )
     arguments = parser.parse_args(argv)
 
