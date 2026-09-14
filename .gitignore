@@ -20,6 +20,7 @@ cache/
 *.json
 !.planning/config.json
 !benchmarks/lifecycle_authority_baseline.json
+!tests/qualification/phase8_coverage_baseline.json
 *.pkl
 *.pkl.*
 *.b2nd
