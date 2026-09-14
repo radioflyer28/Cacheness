@@ -4,6 +4,26 @@
 **Domain:** Python package release qualification, live-service evidence, coverage ratchets, and controlled performance gates
 **Confidence:** HIGH
 
+## 2026-09-14 Support-Surface Supersession
+
+The user has removed native TensorFlow support from the release scope. This is a
+pre-production support-surface cutover, not a packaging compatibility exception.
+Plan 08-13 removes the dependency groups and lock graph, runtime handler/config/
+registry/export identifiers, dedicated tests and guides, and packaging/platform/
+evidence rows. The remaining literal optional groups are `recommended`,
+`dataframes`, `s3`, `postgresql`, and `cloud`; NumPy remains core and Blosc2 plus
+Parquet retain their existing roles.
+
+Historical TensorFlow findings and recommendations below explain the state that
+Plans 08-02 and 08-03 implemented before this decision. They are superseded as
+current guidance. In particular, no TensorFlow-compatible interpreter subset,
+`UNAVAILABLE` TensorFlow evidence, dormant handler, compatibility reader, or
+migration is retained. An authority manifest naming `tensorflow_tensor` must use
+the existing unsupported versioned-handler failure path before handler I/O. The
+generic custom-handler seam remains unchanged for application-owned out-of-tree
+formats. This revision does not change ADR 0001, `BlobStore` lifecycle ownership,
+or any payload publication/recovery semantics.
+
 <user_constraints>
 ## User Constraints (from CONTEXT.md)
 
@@ -20,6 +40,7 @@
 - **D-06:** Run the full supported-Python matrix on Linux. Run boundary smoke tests on macOS using the oldest and newest supported Python minors. Windows remains `UNAVAILABLE`/`NOT_QUALIFIED` until Phase 999.1 supplies eligible native evidence.
 - **D-07:** NumPy remains a core dependency. A clean base wheel must prove guaranteed public imports, a generic-object round trip, and retained NumPy handler round trips using pickle and native NPZ/Blosc2 formats as applicable.
 - **D-08:** Dataframe support remains optional and uses the retained Parquet handlers. Every advertised optional dependency group must install in a clean isolated environment, import its guaranteed public surface, and complete a representative existing handler or backend round trip. This is qualification of retained behavior, not a new format or handler redesign.
+- **D-23:** Native TensorFlow support is removed from this release. The TensorFlow-specific qualification work completed by Plans 08-02 and 08-03 is historical and superseded; Plan 08-13 removes the shipped surface and makes the final evidence inventories prove its absence. Unknown stored `tensorflow_tensor` contracts fail through the existing unsupported versioned-handler contract. The generic custom-handler seam, NumPy, Blosc2, and dataframe/Parquet behavior remain supported.
 
 ### Live PostgreSQL and Amazon S3 qualification
 - **D-09:** Run deterministic backend and topology contracts on every pull request. Run real PostgreSQL and real Amazon S3 qualification on protected release candidates and on a schedule for service/API drift detection.
@@ -71,7 +92,7 @@
 
 Phase 8 should be planned as an evidence pipeline around the architecture that already exists. `BlobStore` and `AuthorityLifecycleEngine` remain the only lifecycle authority; `ObstoreGenerationIO` remains a mechanics-only payload participant; `UnifiedCache` observes that storage lifecycle and adds policy. The ADR explicitly distinguishes integrity, deterministic recovery, bounded/typed progress, measured performance, and the ACID boundary of a single transactional resource. Nothing in a benchmark, coverage report, or live-service run authorizes a new lock, queue, lease, retry loop, metadata mirror, or coordinator. [VERIFIED: `docs/adr/0001-topology-specific-storage-guarantees.md:30-68`; `.planning/phases/07.1-obstore-payload-participant-unification/07.1-VERIFICATION.md:64-79,127-152`]
 
-The major planning work is therefore release orchestration: a branch-aware coverage ratchet, direct Ruff scope gates, clean-wheel feature probes, a supported-version/platform matrix, exact-commit live evidence, and a replacement performance suite on a controlled Linux runner. The current deterministic suite is green when the three live modules are excluded, but the measured baseline is only 75.29% statement and 58.82% branch coverage, there are no checked-in CI workflow files, all six TensorFlow behavior tests are unconditionally skipped, and the checked-in lifecycle benchmark rejects its own baseline because production SQLite schema version `9` does not match baseline version `1`. [VERIFIED: local test/coverage/benchmark probes, 2026-09-13; `tests/test_tensorflow_handler.py:7-24,36-39,56-59,94-97,122-125,170-173,188-191`; `src/cacheness/storage/sqlite_lifecycle_authority.py:90-97`; `benchmarks/lifecycle_authority_baseline.json:1-31`; `benchmarks/lifecycle_authority_benchmark.py:562-567`]
+The major planning work is therefore release orchestration: a branch-aware coverage ratchet, direct Ruff scope gates, clean-wheel feature probes, a supported-version/platform matrix, exact-commit live evidence, and a replacement performance suite on a controlled Linux runner. The current deterministic suite is green when the three live modules are excluded, but the measured baseline is only 75.29% statement and 58.82% branch coverage, there are no checked-in CI workflow files, the now-superseded TensorFlow tests were unconditionally skipped, and the checked-in lifecycle benchmark rejects its own baseline because production SQLite schema version `9` does not match baseline version `1`. Plan 08-13 removes that dormant support surface rather than converting skipped tests into qualification evidence. [VERIFIED: local test/coverage/benchmark probes, 2026-09-13; `tests/test_tensorflow_handler.py:7-24,36-39,56-59,94-97,122-125,170-173,188-191`; `src/cacheness/storage/sqlite_lifecycle_authority.py:90-97`; `benchmarks/lifecycle_authority_baseline.json:1-31`; `benchmarks/lifecycle_authority_benchmark.py:562-567`]
 
 **Primary recommendation:** Build one fail-closed Phase 8 release manifest that references independent deterministic, packaging, coverage, controlled-performance, platform, and live-service evidence for the exact commit; keep the evidence classes and their blocking rules separate. [VERIFIED: `08-CONTEXT.md` D-03, D-09 through D-13, D-20 through D-22]
 
@@ -127,6 +148,12 @@ Plan 04 therefore owns the test-first closure and Plan 05 owns the later measure
 Named gaps should be executable behaviors: integrity before handler deserialization, prepared/verified/promotion response loss, cleanup-debt recovery, stale/foreign continuation rejection, every cache invalidation mode, fail-closed live evidence, clean-wheel public barrels, every optional-group round trip, and PostgreSQL error classification. Percentage movement without those selectors does not satisfy D-15. [VERIFIED: `08-CONTEXT.md` D-14 and D-15; `.planning/phases/07.1-obstore-payload-participant-unification/07.1-VERIFICATION.md:81-87,207-223`]
 
 ### Packaging and Platform Gap
+
+**Superseded scope note:** the TensorFlow-specific observations in this subsection
+record the pre-D-23 state. They do not define the final release matrix. Plan 08-13
+removes that optional group and feature profile entirely; the final packaging and
+platform evidence validates only the remaining advertised groups and general Python/
+platform roles.
 
 The wheel test currently builds once, probes base, `s3`, and `cloud`, and performs a memory round trip only for base. It does not independently prove `recommended`, `dataframes`, `tensorflow`, or `postgresql`, nor a representative round trip for every group. [VERIFIED: `tests/test_full_suite_environment.py:122-174`; `pyproject.toml:18-45`]
 
@@ -358,13 +385,13 @@ For clear/reconciliation, assert separate authority-read, authority-write, parti
 
 ## Common Pitfalls
 
-### Pitfall 1: Treating Python 3.14 as an All-Extras Job
+### Pitfall 1: Retaining a Removed TensorFlow Compatibility Exception (superseded)
 
 **What goes wrong:** Dependency resolution fails on the TensorFlow extra or the job silently excludes it, making the support claim ambiguous. [CITED: https://pypi.org/project/tensorflow/]
 
 **Why it happens:** Project core metadata is open-ended at Python `>=3.11`, while current TensorFlow wheels stop at 3.13. [VERIFIED: `pyproject.toml:9,34-36`; CITED: https://pypi.org/project/tensorflow/]
 
-**How to avoid:** Publish a feature-aware compatibility table, gate core/non-TensorFlow groups on 3.11-3.14, and gate TensorFlow on 3.11-3.13. A missing dependency wheel is not a test skip. [ASSUMED]
+**Current resolution:** D-23 removes the optional group, handler, and feature profile entirely. Gate core plus every remaining advertised group on the supported matrix; reject any stale TensorFlow row rather than recording compatibility or skip state.
 
 **Warning signs:** `uv sync --all-extras` fails only on 3.14, or a “full” matrix shows TensorFlow selectors as skipped. [ASSUMED]
 
@@ -524,7 +551,7 @@ The discrete values `"QUALIFIED"` and `"CLEAN"` are quoted verbatim from `_STATU
 **Deprecated/outdated:**
 
 - `benchmarks/lifecycle_authority_benchmark.py` as the release entry point: it calls removed constructor syntax and rejects the checked baseline. Retain it only as labeled historical evidence or extract still-valid workload concepts into the new suite. [VERIFIED: `benchmarks/lifecycle_authority_benchmark.py:257-290,562-567`; local benchmark probe, 2026-09-13]
-- The existing all-TensorFlow skip as qualification evidence: six behavior tests are deliberately disabled, so a new Linux subprocess round trip is required. [VERIFIED: `tests/test_tensorflow_handler.py:7-24`]
+- The existing all-TensorFlow skip and the subsequently implemented compatible-minor probe are both superseded by D-23; Plan 08-13 deletes the native support surface instead of converting either into release evidence. [VERIFIED: `tests/test_tensorflow_handler.py:7-24`; `08-02-SUMMARY.md`; `08-03-SUMMARY.md`]
 - The Phase 5 artifact pathname/schema as a final release gate: reuse its validation logic, but the current default writes under Phase 5 and fingerprints only the Phase 5 source set. [VERIFIED: `tools/run_phase5_qualification.py:27-55`]
 
 ## Deterministic Work vs Environmental/Human Prerequisites
@@ -533,7 +560,7 @@ The discrete values `"QUALIFIED"` and `"CLEAN"` are quoted verbatim from `_STATU
 
 1. Add Phase 8 gate definitions, fixed selectors, self-tests, branch coverage config, coverage verifier, package-matrix runner, benchmark harness/schema tests, and workflow files. [ASSUMED]
 2. Adapt the existing qualification runner/evidence schema to Phase 8 and obstore service metadata while retaining redaction, source binding, no-skip, standard-AWS, and exact-cleanup behavior. [VERIFIED: `tools/run_phase5_qualification.py:27-103,291-491`]
-3. Add independent wheel probes for the literal six optional groups and a complete base public import plus generic/NumPy round trip. [VERIFIED: `pyproject.toml:18-45`; `08-CONTEXT.md` D-07 and D-08]
+3. Retain independent wheel probes for the five post-D-23 optional groups and a complete base public import plus generic/NumPy round trip; remove every TensorFlow-specific package/platform/evidence slot. [VERIFIED: `pyproject.toml:18-45`; `08-CONTEXT.md` D-07, D-08, and D-23]
 4. Close named coverage gaps, run the deterministic suite, then record total and critical-scope statement/branch baselines. [VERIFIED: `08-CONTEXT.md` D-14 and D-15]
 5. Add call-count and peak-memory contracts at fixed scale tiers without changing production lifecycle coordination. [VERIFIED: `08-CONTEXT.md` D-21; `docs/adr/0001-topology-specific-storage-guarantees.md:125-151`]
 6. Replace the canonical benchmark entry point, preserve historical evidence, and document baseline recalibration review rules. [VERIFIED: `08-CONTEXT.md` the agent's Discretion; `benchmarks/lifecycle_authority_benchmark.py:1-9`]
@@ -561,7 +588,7 @@ The discrete values `"QUALIFIED"` and `"CLEAN"` are quoted verbatim from `_STATU
 | A12 | Count authority reads/writes and participant head/open/delete/list separately at fixed scale tiers. | Structural Complexity Contracts | Existing spy interfaces or seeding cost may require equivalent counters/tiers. |
 | A14 | Optional-group qualification should use public `BlobStore`/`UnifiedCache` round trips rather than handler-internal file calls. | Packaging Pitfall | A public route may not expose every handler format selector without a small test-only fixture seam. |
 
-The removed assumptions (TensorFlow matrix, 30-day diagnostic retention, exact controlled-runner label, GitHub Actions/immutable release system, centralized exact-commit aggregation, protected environment, and validation layout) are settled Phase 8 design choices in Plans 01-12. Their external availability is handled by the checkpoints below; it is not assumed.
+The 30-day diagnostic retention, exact controlled-runner label, GitHub Actions/immutable release system, centralized exact-commit aggregation, protected environment, and validation layout are settled Phase 8 design choices in Plans 01-12. The former TensorFlow matrix choice is explicitly superseded by D-23 and Plan 08-13. External availability for the remaining prerequisites is handled by the checkpoints below; it is not assumed.
 
 ## Open Questions — RESOLVED FOR PLANNING
 
@@ -572,10 +599,10 @@ No design question remains open. The five prior questions are resolved into dete
    - **External prerequisite/owner:** a repository/infrastructure maintainer must provision and register the physical runner. No machine identity is asserted by this research.
    - **Preflight/checkpoint:** before baseline capture, Plan 11 Task 1 verifies the exact label, Linux x86-64 identity, stable fingerprint/noise, clean worktree, and candidate SHA. If unavailable or unstable, QUAL-06 stays unqualified and there is no local/macOS fallback. [VERIFIED: `08-CONTEXT.md` D-20]
 
-2. **RESOLVED — TensorFlow support messaging**
-   - **Settled design:** advertise and gate base/core plus installable non-TensorFlow groups on stable Python 3.11-3.14; qualify the TensorFlow extra on Python 3.11-3.13; explicitly record TensorFlow-on-3.14 as dependency-incompatible and never silently skip it. [VERIFIED: `08-02-PLAN.md` and `08-03-PLAN.md`; CITED: https://devguide.python.org/versions/; CITED: https://pypi.org/project/tensorflow/]
-   - **Owner:** Plans 02-03 own the compatibility manifest, fresh-environment wheel probes, platform workflow, and public support table.
-   - **Preflight/checkpoint:** each matrix row builds/installs from the exact lock/source in a fresh environment and either passes its representative public round trip or records a nonqualifying incompatibility. No human decision is needed unless upstream availability changes.
+2. **SUPERSEDED — TensorFlow support messaging**
+   - **Historical design:** Plans 08-02/08-03 implemented a compatible-minor subset and explicit incompatibility evidence. D-23 replaces that decision with complete removal from the shipped and qualified surface.
+   - **Current owner:** Plan 08-13 removes the group/profile/handler/docs/lock graph and binds the absence contract into final verification.
+   - **Current preflight:** final package/platform evidence must contain no TensorFlow row or compatibility state; the remaining advertised groups still install and round-trip independently.
 
 3. **RESOLVED — coverage floors**
    - **Settled design:** do not invent a threshold from the pre-gap research numbers. Plan 04 first adds named deterministic selectors, including the four PostgreSQL families (DB-API error classification, replay, bounded pagination, transactional rollback); Plan 05 then captures the actual post-gap repository-total and critical-scope statement/branch counts and rates as immutable non-regression floors. [VERIFIED: `08-CONTEXT.md` D-14 and D-15; `src/cacheness/storage/backends/postgresql_lifecycle_authority.py:247-345,1577-1695`]
@@ -658,7 +685,7 @@ The full-suite command includes marked live modules and therefore must be used w
 
 - **Per task commit:** Run the focused files changed plus `tests/test_phase8_quality_gates.py`; for lifecycle/cache-policy changes also run the exact Phase 07.1 selector subset and coverage quick scope. [ASSUMED]
 - **Per wave merge:** Run the deterministic full suite on the wave's Python, package-matrix self-tests, direct Ruff scopes, and coverage verifier. [ASSUMED]
-- **Phase gate:** Linux 3.11-3.14 compatible matrix green, TensorFlow 3.11-3.13 probe green, macOS 3.11/3.14 smoke green, exact-commit live evidence `QUALIFIED`/`CLEAN`, controlled performance within reviewed envelope, and immutable release evidence attached. [ASSUMED]
+- **Phase gate:** Linux 3.11-3.14 core and remaining advertised-group matrix green, macOS 3.11/3.14 smoke green, the D-23 TensorFlow-absence contract green, exact-commit live evidence `QUALIFIED`/`CLEAN`, controlled performance within reviewed envelope, and immutable release evidence attached. [ASSUMED]
 
 ### Wave 0 Gaps
 

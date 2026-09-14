@@ -164,6 +164,15 @@ None - no external service configuration is required for this plan.
 
 Later release tooling can consume strict platform row evidence without treating a local macOS smoke, an advisory interpreter, or an unavailable Windows result as a full-matrix pass. Actual Linux 3.11–3.14 jobs and Phase 999.1 native Windows evidence remain separate external qualification work.
 
+## Post-Completion Supersession (2026-09-14)
+
+D-23 removes native TensorFlow support from the release. This summary remains an
+accurate historical record of Plan 08-03's implementation and commits, but its
+TensorFlow-compatible feature-profile claims are superseded. Plan 08-13 deletes that
+profile and its evidence rows before final CI, aggregation, and publication. The core
+Linux 3.11–3.14, macOS boundary-smoke, prerelease-advisory, Windows-nonclaim, and ADR
+0001 progress-classification work remains applicable.
+
 ## Self-Check: PASSED
 
 - All three implementation/test artifacts and this summary exist on disk.

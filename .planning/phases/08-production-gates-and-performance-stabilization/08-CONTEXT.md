@@ -1,14 +1,14 @@
 # Phase 8: Production Gates and Performance Stabilization - Context
 
 **Gathered:** 2026-09-13
-**Status:** Ready for planning
+**Status:** Revised during execution (TensorFlow support superseded)
 
 <domain>
 ## Phase Boundary
 
 Qualify the post-Phase-07.1 Cacheness architecture for release. Phase 8 turns
 the already-implemented `BlobStore` lifecycle, `UnifiedCache` policy layer,
-obstore payload participant, supported handlers, packaging groups, and live
+obstore payload participant, retained supported handlers, packaging groups, and live
 PostgreSQL/Amazon-S3 topology into reproducible release evidence across the
 declared Python and platform matrix. It establishes measured coverage,
 performance, memory, and backend-call gates without changing lifecycle
@@ -35,6 +35,7 @@ test that final architecture as shipped.
 - **D-06:** Run the full supported-Python matrix on Linux. Run boundary smoke tests on macOS using the oldest and newest supported Python minors. Windows remains `UNAVAILABLE`/`NOT_QUALIFIED` until Phase 999.1 supplies eligible native evidence.
 - **D-07:** NumPy remains a core dependency. A clean base wheel must prove guaranteed public imports, a generic-object round trip, and retained NumPy handler round trips using pickle and native NPZ/Blosc2 formats as applicable.
 - **D-08:** Dataframe support remains optional and uses the retained Parquet handlers. Every advertised optional dependency group must install in a clean isolated environment, import its guaranteed public surface, and complete a representative existing handler or backend round trip. This is qualification of retained behavior, not a new format or handler redesign.
+- **D-23 (supersedes the TensorFlow subset of D-08 and completed Plans 08-02/08-03):** Cacheness does not ship or advertise native TensorFlow support in this release. Remove the TensorFlow dependency groups and lock graph, handler/config/registry/export surface, dedicated tests and guides, and Phase 8 packaging/platform/evidence rows. A stored `tensorflow_tensor` contract is an unsupported versioned handler identity and must fail closed through the existing unsupported-payload path; do not add a compatibility reader or migration. Preserve the generic custom-handler registration seam so an application may supply an out-of-tree handler later. NumPy, Blosc2, and dataframe/Parquet support are unchanged. Plans 08-02 and 08-03 remain accurate historical execution records only where they describe what was built before this decision; their TensorFlow qualification claims are superseded by Plan 08-13.
 
 ### Live PostgreSQL and Amazon S3 qualification
 - **D-09:** Run deterministic backend and topology contracts on every pull request. Run real PostgreSQL and real Amazon S3 qualification on protected release candidates and on a schedule for service/API drift detection.
@@ -115,6 +116,7 @@ test that final architecture as shipped.
 ## Specific Ideas
 
 - NumPy arrays should use retained NPZ/Blosc2 handlers, and pandas/polars dataframe behavior should use retained Parquet handlers; Phase 8 verifies these rather than presenting them as new features.
+- TensorFlow is intentionally outside the shipped support surface. Extensibility remains available through ordinary custom-handler registration rather than an in-tree dormant handler, dependency extra, compatibility read, or matrix exception.
 - Hash benchmarking must include XXH3 because blob-sized hashing is performance-sensitive, but canonical SHA-256 remains unchanged until a separately versioned future decision evaluates the measured security and migration tradeoffs.
 - Release evidence should say exactly what commit, environment, topology, workload, and evidence class it qualifies. `UNAVAILABLE` and `NOT_QUALIFIED` must remain visibly distinct from a pass.
 
@@ -126,6 +128,7 @@ test that final architecture as shipped.
 - Investigate Narwhals as a future dataframe-handler compatibility layer across pandas, PyArrow, and Polars while retaining Parquet as the handler-owned format. This is a future handler/extensibility milestone, not Phase 8 qualification work.
 - SEED-003 may revisit a versioned XXH3 canonical payload digest after Phase 8 supplies comparative throughput and end-to-end cost evidence.
 - Native Windows lifecycle qualification remains Phase 999.1 because no eligible Windows environment is available.
+- Reintroducing native TensorFlow support would require a separately discussed future phase. The generic custom-handler seam remains available now, but Phase 8 does not carry an in-tree TensorFlow implementation or migration promise.
 
 </deferred>
 
