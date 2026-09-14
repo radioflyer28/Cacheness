@@ -20,7 +20,7 @@ from urllib.parse import urlparse
 import pytest
 
 
-_RUN_ID = re.compile(r"phase5-[0-9a-f]{32}\Z")
+_RUN_ID = re.compile(r"phase[58]-[0-9a-f]{32}\Z")
 _OWNER_TABLE = "__cacheness_qualification_owner"
 _OWNER_MARKER_NAME = "__cacheness_qualification_owner__.json"
 _MAX_OWNER_MARKER_BYTES = 512
@@ -124,12 +124,22 @@ def qualification_namespace(run_id: str | None = None) -> QualificationNamespace
     selected_run_id = run_id or f"phase5-{secrets.token_hex(16)}"
     if not _RUN_ID.fullmatch(selected_run_id):
         raise QualificationConfigurationError("invalid qualification run identifier")
-    token = selected_run_id.removeprefix("phase5-")
+    phase = selected_run_id[5]
+    token = selected_run_id.removeprefix(f"phase{phase}-")
     return QualificationNamespace(
         run_id=selected_run_id,
-        schema=f"cacheness_q5_{token}",
+        schema=f"cacheness_q{phase}_{token}",
         prefix=f"cacheness-qualification/{selected_run_id}/",
     )
+
+
+def _qualification_run_id_from_environment(environment: Mapping[str, str]) -> str | None:
+    """Select one explicit runner namespace without mixing qualification generations."""
+    phase5_run_id = environment.get("CACHENESS_PHASE5_QUALIFICATION_RUN_ID")
+    phase8_run_id = environment.get("CACHENESS_PHASE8_QUALIFICATION_RUN_ID")
+    if phase5_run_id and phase8_run_id:
+        raise QualificationConfigurationError("multiple qualification run identifiers")
+    return phase8_run_id or phase5_run_id
 
 
 def independent_manifest_signers(
@@ -590,7 +600,7 @@ def create_live_qualification_resources(
 ) -> LiveQualificationResources:
     """Create only the marked schema/prefix and explicitly initialize authority state."""
     config = qualification_config_from_environment(environment)
-    namespace = qualification_namespace(environment.get("CACHENESS_PHASE5_QUALIFICATION_RUN_ID"))
+    namespace = qualification_namespace(_qualification_run_id_from_environment(environment))
     first_signer, second_signer = independent_manifest_signers(config)
     _create_postgresql_namespace(config, namespace)
     authority: Any | None = None
