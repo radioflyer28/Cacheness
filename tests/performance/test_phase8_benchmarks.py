@@ -3,18 +3,18 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 from pathlib import Path
 import sys
 
 _BENCHMARKS_DIR = Path(__file__).parents[2] / "benchmarks"
 sys.path.insert(0, str(_BENCHMARKS_DIR))
 
-from phase8_workloads import (
-    LAYERS,
-    access_labels,
-    build_layer_workload,
-    reviewed_workloads,
-)
+_WORKLOADS = importlib.import_module("phase8_workloads")
+LAYERS = _WORKLOADS.LAYERS
+access_labels = _WORKLOADS.access_labels
+build_layer_workload = _WORKLOADS.build_layer_workload
+reviewed_workloads = _WORKLOADS.reviewed_workloads
 
 
 def test_workloads_inventory_is_representative_without_topology_cross_product() -> None:
@@ -47,7 +47,7 @@ def test_workloads_inventory_is_representative_without_topology_cross_product() 
     assert all("blosc2" not in workload.name for workload in workloads)
 
 
-def test_reduced_workload_callbacks_use_current_public_composition() -> None:
+def test_reduced_workloads_use_current_public_composition() -> None:
     """Reduced fixtures remain deterministic and exercise public layers only."""
     descriptor = next(
         workload
@@ -70,7 +70,7 @@ def test_reduced_workload_callbacks_use_current_public_composition() -> None:
         second.close()
 
 
-def test_workload_layers_and_access_labels_remain_explicit() -> None:
+def test_workloads_layers_and_access_labels_remain_explicit() -> None:
     """Cold and warm operations are not conflated in one timing sample."""
     assert LAYERS == ("handler", "blobstore", "unified-cache")
     assert access_labels() == ("cold-put", "warm-get")
