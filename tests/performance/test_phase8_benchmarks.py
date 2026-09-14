@@ -7,6 +7,8 @@ import importlib
 from pathlib import Path
 import sys
 
+import pytest
+
 _BENCHMARKS_DIR = Path(__file__).parents[2] / "benchmarks"
 sys.path.insert(0, str(_BENCHMARKS_DIR))
 
@@ -15,6 +17,15 @@ LAYERS = _WORKLOADS.LAYERS
 access_labels = _WORKLOADS.access_labels
 build_layer_workload = _WORKLOADS.build_layer_workload
 reviewed_workloads = _WORKLOADS.reviewed_workloads
+
+_BENCHMARKS = importlib.import_module("phase8_benchmarks")
+BaselineVerificationError = _BENCHMARKS.BaselineVerificationError
+HASH_SIZES = _BENCHMARKS.HASH_SIZES
+atomic_replace_baseline = _BENCHMARKS.atomic_replace_baseline
+build_baseline_document = _BENCHMARKS.build_baseline_document
+distribution = _BENCHMARKS.distribution
+measure_hashes = _BENCHMARKS.measure_hashes
+verify_baseline = _BENCHMARKS.verify_baseline
 
 
 def test_workloads_inventory_is_representative_without_topology_cross_product() -> None:
@@ -74,3 +85,102 @@ def test_workloads_layers_and_access_labels_remain_explicit() -> None:
     """Cold and warm operations are not conflated in one timing sample."""
     assert LAYERS == ("handler", "blobstore", "unified-cache")
     assert access_labels() == ("cold-put", "warm-get")
+
+
+def _baseline_document() -> dict[str, object]:
+    return build_baseline_document(
+        revision="a" * 40,
+        source_digest="b" * 64,
+        runner_identity="cacheness-perf-linux-x64",
+        environment={"platform": "Linux", "machine": "x86_64"},
+        distributions={
+            "small-generic-object__blobstore__cold-put": distribution(
+                [100, 110, 120, 130, 140]
+            )
+        },
+        envelopes={
+            "small-generic-object__blobstore__cold-put": {
+                "median_relative_limit": 1.2,
+                "tail_relative_limit": 1.3,
+            }
+        },
+    )
+
+
+def test_distribution_preserves_raw_samples_and_deterministic_tails() -> None:
+    """The reviewed record keeps derivations traceable to raw nanoseconds."""
+    result = distribution([1, 2, 3, 4, 5])
+
+    assert result["samples_ns"] == [1, 2, 3, 4, 5]
+    assert result["p50_ns"] == 3.0
+    assert result["p95_ns"] == 4.8
+    assert result["p99_ns"] == 4.96
+
+
+def test_hash_measurements_cover_canonical_sizes_without_changing_sha256() -> None:
+    """XXH3 is comparative evidence while SHA-256 remains the stored digest."""
+    assert HASH_SIZES == (4 * 1024, 1 * 1024 * 1024, 16 * 1024 * 1024, 128 * 1024 * 1024)
+
+    observations = measure_hashes(
+        size_bytes=4 * 1024,
+        lifecycle_distribution=distribution([1_000, 1_200, 1_400]),
+        loops=2,
+    )
+
+    assert {observation["algorithm"] for observation in observations} == {"sha256", "xxh3_64"}
+    assert all(observation["throughput_bytes_per_second"] > 0 for observation in observations)
+    assert all(0 < observation["lifecycle_share_p50"] for observation in observations)
+    assert _BENCHMARKS.PAYLOAD_DIGEST_ALGORITHM == "sha256"
+
+
+def test_verify_baseline_rejects_mismatched_identity_revision_environment_and_regression() -> None:
+    """Only one exact controlled environment can qualify its reviewed envelope."""
+    baseline = _baseline_document()
+    current = _baseline_document()
+    assert verify_baseline(baseline, current) == []
+
+    mismatched_runner = _baseline_document()
+    mismatched_runner["runner_identity"] = "ordinary-linux"
+    with pytest.raises(BaselineVerificationError, match="runner identity"):
+        verify_baseline(baseline, mismatched_runner)
+
+    stale_revision = _baseline_document()
+    stale_revision["revision"] = "c" * 40
+    with pytest.raises(BaselineVerificationError, match="revision"):
+        verify_baseline(baseline, stale_revision)
+
+    environment_drift = _baseline_document()
+    environment_drift["environment"] = {"platform": "Linux", "machine": "arm64"}
+    with pytest.raises(BaselineVerificationError, match="environment"):
+        verify_baseline(baseline, environment_drift)
+
+    regressed = _baseline_document()
+    record = regressed["distributions"]["small-generic-object__blobstore__cold-put"]
+    record["samples_ns"] = [200, 220, 240, 260, 280]
+    record.update(distribution(record["samples_ns"]))
+    with pytest.raises(BaselineVerificationError, match="median"):
+        verify_baseline(baseline, regressed)
+
+
+def test_baseline_capture_and_recalibration_are_explicit_and_atomic(tmp_path: Path) -> None:
+    """Verify reads evidence; reviewed capture/recalibration own all mutations."""
+    destination = tmp_path / "phase8_baseline.json"
+    baseline = _baseline_document()
+
+    atomic_replace_baseline(destination, baseline, mode="capture")
+    original = destination.read_bytes()
+    assert verify_baseline(destination, baseline) == []
+    assert destination.read_bytes() == original
+
+    with pytest.raises(BaselineVerificationError, match="already exists"):
+        atomic_replace_baseline(destination, baseline, mode="capture")
+    with pytest.raises(BaselineVerificationError, match="justification"):
+        atomic_replace_baseline(destination, baseline, mode="recalibrate")
+
+    atomic_replace_baseline(
+        destination,
+        baseline,
+        mode="recalibrate",
+        justification="controlled runner kernel update",
+    )
+    assert destination.read_bytes() != b""
