@@ -154,3 +154,15 @@ def test_external_statuses_are_explicit_nonclaims() -> None:
     assert "controlled_performance: UNAVAILABLE" in report
     assert "live_services: UNAVAILABLE" in report
     assert "windows: NOT_QUALIFIED" in report
+
+
+def test_all_mode_uses_fixed_local_gate_commands_before_external_reporting(
+    tmp_path: Path,
+) -> None:
+    """All-mode cannot report only external statuses after skipping local proof."""
+    verifier = _load_verifier()
+
+    commands = verifier.local_gate_commands(tmp_path)
+
+    assert [command[2] for command in commands] == ["all", "platform"]
+    assert all("tools/run_phase8_local_gates.py" in command for command in commands)

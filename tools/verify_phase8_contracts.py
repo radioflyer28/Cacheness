@@ -14,8 +14,10 @@ import argparse
 import ast
 from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePosixPath
+import platform
 import subprocess
 import sys
+import tempfile
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -475,6 +477,33 @@ def _run(command: Sequence[str]) -> subprocess.CompletedProcess[str]:
     )
 
 
+def local_gate_commands(output_directory: Path) -> tuple[tuple[str, ...], ...]:
+    """Return every fixed local evidence command for the current host identity."""
+    python_minor = f"{sys.version_info.major}.{sys.version_info.minor}"
+    return (
+        (
+            sys.executable,
+            "tools/run_phase8_local_gates.py",
+            "all",
+            "--output-dir",
+            str(output_directory / "all"),
+        ),
+        (
+            sys.executable,
+            "tools/run_phase8_local_gates.py",
+            "platform",
+            "--expected-os",
+            platform.system(),
+            "--python-minor",
+            python_minor,
+            "--feature-profile",
+            "core",
+            "--output",
+            str(output_directory / "platform.json"),
+        ),
+    )
+
+
 def _run_local(mode: str) -> int:
     command = (
         sys.executable,
@@ -493,7 +522,19 @@ def _run_local(mode: str) -> int:
         result = _run(command)
     except (OSError, subprocess.TimeoutExpired):
         return 1
-    return 0 if result.returncode == 0 else 1
+    if result.returncode != 0:
+        return 1
+    if mode == "quick":
+        return 0
+    with tempfile.TemporaryDirectory(prefix="phase8-contract-") as temporary:
+        for local_command in local_gate_commands(Path(temporary)):
+            try:
+                local_result = _run(local_command)
+            except (OSError, subprocess.TimeoutExpired):
+                return 1
+            if local_result.returncode != 0:
+                return 1
+    return 0
 
 
 def main(arguments: Sequence[str] | None = None) -> int:
