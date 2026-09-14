@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+import json
 from pathlib import Path
 import re
 import sys
@@ -184,7 +185,11 @@ def test_baseline_capture_and_recalibration_are_explicit_and_atomic(tmp_path: Pa
         mode="recalibrate",
         justification="controlled runner kernel update",
     )
-    assert destination.read_bytes() != b""
+    recalibrated = json.loads(destination.read_text(encoding="utf-8"))
+    assert recalibrated["baseline_change"] == {
+        "mode": "recalibrate",
+        "justification": "controlled runner kernel update",
+    }
 
 
 def test_controlled_workflow_requires_exact_sha_and_named_linux_runner() -> None:

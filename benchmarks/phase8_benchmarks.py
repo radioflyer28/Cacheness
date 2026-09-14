@@ -219,7 +219,7 @@ def _validate_document(value: object) -> dict[str, Any]:
     }
     if len(normalized_distributions) != len(distributions):
         raise BaselineVerificationError("benchmark distribution names must be non-empty strings")
-    return {
+    normalized = {
         "schema": BENCHMARK_SCHEMA,
         "evidence_class": "controlled-performance",
         "revision": _validate_hex(value.get("revision"), name="revision", length=40),
@@ -231,6 +231,23 @@ def _validate_document(value: object) -> dict[str, Any]:
         "distributions": normalized_distributions,
         "envelopes": _validate_envelopes(value.get("envelopes"), normalized_distributions),
     }
+    baseline_change = value.get("baseline_change")
+    if baseline_change is not None:
+        if not isinstance(baseline_change, Mapping):
+            raise BaselineVerificationError("baseline change record must be a mapping")
+        mode = baseline_change.get("mode")
+        if mode not in {"capture", "recalibrate"}:
+            raise BaselineVerificationError("baseline change record has an invalid mode")
+        change_record: dict[str, str] = {"mode": mode}
+        justification = baseline_change.get("justification")
+        if mode == "recalibrate":
+            if not isinstance(justification, str) or not justification.strip():
+                raise BaselineVerificationError(
+                    "baseline recalibration record requires a justification"
+                )
+            change_record["justification"] = justification.strip()
+        normalized["baseline_change"] = change_record
+    return normalized
 
 
 def build_baseline_document(
@@ -313,6 +330,10 @@ def atomic_replace_baseline(
         raise BaselineVerificationError("baseline already exists; use recalibrate")
     if mode == "recalibrate" and (not isinstance(justification, str) or not justification.strip()):
         raise BaselineVerificationError("baseline recalibration requires a justification")
+    normalized["baseline_change"] = {"mode": mode}
+    if mode == "recalibrate":
+        assert justification is not None
+        normalized["baseline_change"]["justification"] = justification.strip()
     destination.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(normalized, indent=2, sort_keys=True) + "\n"
     with tempfile.NamedTemporaryFile(
