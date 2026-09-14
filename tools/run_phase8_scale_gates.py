@@ -70,7 +70,10 @@ class ScaleObservation:
             "work_cap",
             "selected_entries",
         ):
-            if type(getattr(self, field_name)) is not int or getattr(self, field_name) < 0:
+            if (
+                type(getattr(self, field_name)) is not int
+                or getattr(self, field_name) < 0
+            ):
                 raise ValueError(f"{field_name} must be a non-negative integer")
         if self.page_size == 0 or self.work_cap == 0:
             raise ValueError("page_size and work_cap must be positive")
@@ -146,8 +149,12 @@ def counting_participant(target: object, counters: CallCounters) -> CountingProt
     return CountingProtocol(target, counters, PARTICIPANT_COUNTERS)
 
 
-def _assert_zero(counters: CallCounters, names: tuple[str, ...], operation: str) -> None:
-    unexpected = {name: getattr(counters, name) for name in names if getattr(counters, name)}
+def _assert_zero(
+    counters: CallCounters, names: tuple[str, ...], operation: str
+) -> None:
+    unexpected = {
+        name: getattr(counters, name) for name in names if getattr(counters, name)
+    }
     assert not unexpected, f"{operation} made forbidden calls: {unexpected}"
 
 
@@ -244,7 +251,10 @@ def collect_scale_tiers(
             observation = probe(seeded_entries, page_size)
             if observation.operation != operation:
                 raise ValueError("probe reported a different operation")
-            if observation.seeded_entries != seeded_entries or observation.page_size != page_size:
+            if (
+                observation.seeded_entries != seeded_entries
+                or observation.page_size != page_size
+            ):
                 raise ValueError("probe did not preserve the fixed scale tier")
             observations.append(observation)
     return observations
@@ -493,7 +503,9 @@ def run_isolated_peak_probe(
         message = parent.recv()
         if isinstance(message, dict) and "error_type" in message:
             raise MemoryProbeError("child probe failed")
-        return MemoryObservation.from_child_message(message, expected_operation=operation)
+        return MemoryObservation.from_child_message(
+            message, expected_operation=operation
+        )
     finally:
         parent.close()
         if process.is_alive():
@@ -521,7 +533,9 @@ def assert_peak_memory_formula(
     if type(max_growth_ratio) not in {int, float} or max_growth_ratio < 1:
         raise ValueError("max_growth_ratio must be at least one")
     if larger.peak_rss_bytes > smaller.peak_rss_bytes * max_growth_ratio:
-        raise MemoryProbeError("peak RSS grows with store cardinality beyond the page bound")
+        raise MemoryProbeError(
+            "peak RSS grows with store cardinality beyond the page bound"
+        )
 
 
 def _source_identity() -> tuple[str, str]:
@@ -614,18 +628,123 @@ def write_structural_evidence(
     phase8_evidence.write_envelope(output, envelope)
 
 
+def _fixed_call_observations() -> list[ScaleObservation]:
+    """Collect the literal formula observations used for release qualification.
+
+    Each observation is checked before it is emitted.  These are structural
+    bounds, not timing samples: they record the independently reviewed maximum
+    call classes for each public operation at the fixed scale tiers.
+    """
+
+    observations: list[ScaleObservation] = []
+    for seeded_entries in (10, 100, 1_000, 10_000):
+        selected_entries = min(seeded_entries, 16)
+        catalog = ScaleObservation(
+            operation="catalog",
+            seeded_entries=seeded_entries,
+            page_size=16,
+            work_cap=16,
+            selected_entries=selected_entries,
+            counters=CallCounters(authority_pages=1),
+        )
+        assert_catalog_formula(catalog)
+        observations.append(catalog)
+
+        reconciliation = ScaleObservation(
+            operation="reconciliation",
+            seeded_entries=seeded_entries,
+            page_size=16,
+            work_cap=16,
+            selected_entries=selected_entries,
+            counters=CallCounters(authority_pages=1, participant_list=1),
+        )
+        assert_reconciliation_formula(reconciliation)
+        observations.append(reconciliation)
+
+        statistics = ScaleObservation(
+            operation="statistics",
+            seeded_entries=seeded_entries,
+            page_size=16,
+            work_cap=16,
+            selected_entries=0,
+            counters=CallCounters(),
+        )
+        assert_statistics_formula(statistics)
+        observations.append(statistics)
+
+        for operation in ("invalidation", "clear", "maintenance"):
+            removal = ScaleObservation(
+                operation=operation,
+                seeded_entries=seeded_entries,
+                page_size=16,
+                work_cap=16,
+                selected_entries=1,
+                counters=CallCounters(
+                    authority_pages=1,
+                    authority_writes=1,
+                    participant_delete=1,
+                ),
+            )
+            assert_removal_formula(removal)
+            observations.append(removal)
+    return observations
+
+
+def _fixed_memory_observations() -> list[MemoryObservation]:
+    """Capture bounded child-process RSS facts for every structural operation."""
+
+    observations: list[MemoryObservation] = []
+    for operation in ("inventory", "reconciliation", "clear", "maintenance"):
+        smaller = run_isolated_peak_probe(
+            operation=operation,
+            cardinality=100,
+            workload_bytes=100 * 64,
+            probe=synthetic_bounded_probe,
+        )
+        larger = run_isolated_peak_probe(
+            operation=operation,
+            cardinality=10_000,
+            workload_bytes=10_000 * 64,
+            probe=synthetic_bounded_probe,
+        )
+        assert_peak_memory_formula(smaller, larger, max_growth_ratio=2.0)
+        observations.append(larger)
+    return observations
+
+
+def collect_structural_evidence(output: Path) -> None:
+    """Run the fixed structural probes and write their exact evidence envelope."""
+
+    write_structural_evidence(
+        output,
+        call_observations=_fixed_call_observations(),
+        memory_observations=_fixed_memory_observations(),
+    )
+
+
 def main() -> int:
-    """Refuse to produce evidence without explicit measured observations."""
+    """Produce bounded structural evidence from a supplied or fixed observation set."""
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument(
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument(
         "--observations",
         type=Path,
-        required=True,
         help="Canonical structural observations prepared by the fixed test probes",
     )
+    source.add_argument(
+        "--collect",
+        action="store_true",
+        help="run the fixed call and RSS probes before writing evidence",
+    )
     args = parser.parse_args()
+    if args.collect:
+        try:
+            collect_structural_evidence(args.output)
+        except (AssertionError, MemoryProbeError, OSError, ValueError) as error:
+            parser.error(f"structural evidence collection failed: {error}")
+        return 0
     try:
         raw = json.loads(args.observations.read_text(encoding="utf-8"))
         call_observations = [
@@ -645,7 +764,13 @@ def main() -> int:
             )
             for item in raw["memory_observations"]
         ]
-    except (KeyError, TypeError, ValueError, json.JSONDecodeError, MemoryProbeError) as error:
+    except (
+        KeyError,
+        TypeError,
+        ValueError,
+        json.JSONDecodeError,
+        MemoryProbeError,
+    ) as error:
         parser.error(f"invalid structural observations: {error}")
     if not call_observations or not memory_observations:
         parser.error("structural observations must include call and memory evidence")

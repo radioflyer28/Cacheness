@@ -33,9 +33,7 @@ EVIDENCE_CLASSES = (
 )
 TERMINAL_STATUSES = frozenset({"PASS", "UNAVAILABLE", "NOT_QUALIFIED"})
 CLAIM_CATEGORIES = ("integrity", "recovery", "progress", "performance")
-CLAIM_STATES = frozenset(
-    {"EVIDENCED", "NOT_QUALIFIED", "UNAVAILABLE", "DIAGNOSTIC"}
-)
+CLAIM_STATES = frozenset({"EVIDENCED", "NOT_QUALIFIED", "UNAVAILABLE", "DIAGNOSTIC"})
 QUALIFIED_SUBJECTS = (
     "AuthorityLifecycleEngine",
     "BlobStore",
@@ -191,8 +189,7 @@ def is_qualification_evidence(
     if required_evidence_class not in EVIDENCE_CLASSES:
         raise EvidenceValidationError("invalid required evidence_class")
     return (
-        envelope.evidence_class == required_evidence_class
-        and envelope.status == "PASS"
+        envelope.evidence_class == required_evidence_class and envelope.status == "PASS"
     )
 
 
@@ -290,7 +287,10 @@ def _validate_structural_payload(payload: Mapping[str, object]) -> dict[str, obj
     """Validate finite call-count and RSS facts without accepting timing data."""
 
     environment = payload.get("environment")
-    if not isinstance(environment, Mapping) or set(environment) != _STRUCTURAL_ENVIRONMENT_KEYS:
+    if (
+        not isinstance(environment, Mapping)
+        or set(environment) != _STRUCTURAL_ENVIRONMENT_KEYS
+    ):
         raise EvidenceValidationError("invalid structural environment")
     operating_system = _validate_safe_text(environment.get("os"), field="os")
     if environment.get("rss_unit") != "bytes":
@@ -337,7 +337,10 @@ def _validate_structural_payload(payload: Mapping[str, object]) -> dict[str, obj
         ):
             raise EvidenceValidationError("invalid structural work bounds")
         counters = observation.get("counters")
-        if not isinstance(counters, Mapping) or set(counters) != _STRUCTURAL_COUNTER_KEYS:
+        if (
+            not isinstance(counters, Mapping)
+            or set(counters) != _STRUCTURAL_COUNTER_KEYS
+        ):
             raise EvidenceValidationError("invalid structural counters")
         validated_counters: dict[str, int] = {}
         for counter_name in sorted(_STRUCTURAL_COUNTER_KEYS):
@@ -453,6 +456,7 @@ def _validate_payload(
         "deterministic",
         "packaging",
         "platform",
+        "coverage",
         "structural",
     }:
         raise EvidenceValidationError("only implemented evidence producers may pass")
@@ -477,7 +481,9 @@ def envelope_from_mapping(value: Mapping[str, object]) -> EvidenceEnvelope:
     source_digest = value.get("source_digest")
     if not isinstance(revision, str) or not _REVISION_PATTERN.fullmatch(revision):
         raise EvidenceValidationError("invalid revision")
-    if not isinstance(source_digest, str) or not _DIGEST_PATTERN.fullmatch(source_digest):
+    if not isinstance(source_digest, str) or not _DIGEST_PATTERN.fullmatch(
+        source_digest
+    ):
         raise EvidenceValidationError("invalid source_digest")
 
     generated_at_utc = _validate_timestamp(value.get("generated_at_utc"))
@@ -549,7 +555,10 @@ def load_envelope(path: Path) -> EvidenceEnvelope:
 
 
 def _canonical_json(value: Mapping[str, object]) -> str:
-    return json.dumps(value, ensure_ascii=True, separators=(",", ":"), sort_keys=True) + "\n"
+    return (
+        json.dumps(value, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+        + "\n"
+    )
 
 
 def write_envelope(path: Path, envelope: EvidenceEnvelope) -> None:
@@ -570,7 +579,9 @@ def write_envelope(path: Path, envelope: EvidenceEnvelope) -> None:
             os.fsync(temporary.fileno())
         os.replace(temporary_path, path)
     except OSError as error:
-        raise EvidenceValidationError("evidence cannot be written atomically") from error
+        raise EvidenceValidationError(
+            "evidence cannot be written atomically"
+        ) from error
     finally:
         if temporary_path is not None and temporary_path.exists():
             temporary_path.unlink(missing_ok=True)
@@ -620,7 +631,11 @@ def validate_source_identity(
     if not _REVISION_PATTERN.fullmatch(revision):
         raise EvidenceValidationError("invalid required revision")
     if not hmac.compare_digest(envelope.revision, revision):
-        raise EvidenceValidationError("evidence revision does not match required revision")
+        raise EvidenceValidationError(
+            "evidence revision does not match required revision"
+        )
     expected_digest = relevant_source_digest(root, paths)
     if not hmac.compare_digest(envelope.source_digest, expected_digest):
-        raise EvidenceValidationError("evidence source digest does not match reviewed sources")
+        raise EvidenceValidationError(
+            "evidence source digest does not match reviewed sources"
+        )

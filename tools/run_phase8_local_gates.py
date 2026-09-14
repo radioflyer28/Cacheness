@@ -36,15 +36,53 @@ RELEVANT_SOURCE_PATHS = (
     "tests",
     "tools/phase8_evidence.py",
     "tools/run_phase8_local_gates.py",
+    "tools/run_phase8_packaging.py",
+    "tools/run_phase8_platform_gates.py",
+    "tools/run_phase8_scale_gates.py",
+    "tools/verify_phase8_coverage.py",
     "tools/verify_phase071_contracts.py",
 )
 _INCOMPLETE_MARKERS = ("skipped", "xfailed", "xpassed", "no tests ran", "0 passed")
 _PASS_ATTESTATION = "phase 07.1 all contract passed"
+GATE_CHOICES = (
+    "deterministic",
+    "packaging",
+    "platform",
+    "coverage",
+    "structural",
+    "all",
+)
+PACKAGING_TOOL = REPOSITORY_ROOT / "tools" / "run_phase8_packaging.py"
+PLATFORM_TOOL = REPOSITORY_ROOT / "tools" / "run_phase8_platform_gates.py"
+COVERAGE_TOOL = REPOSITORY_ROOT / "tools" / "verify_phase8_coverage.py"
+STRUCTURAL_TOOL = REPOSITORY_ROOT / "tools" / "run_phase8_scale_gates.py"
+COVERAGE_REPORT = REPOSITORY_ROOT / "build" / "phase8" / "coverage.json"
+COVERAGE_XML = REPOSITORY_ROOT / "build" / "phase8" / "coverage.xml"
+COVERAGE_BASELINE = (
+    REPOSITORY_ROOT / "tests" / "qualification" / "phase8_coverage_baseline.json"
+)
+COVERAGE_MEASUREMENT_COMMAND = (
+    sys.executable,
+    "-m",
+    "pytest",
+    "-q",
+    "-o",
+    "log_cli=false",
+    "-m",
+    "not (live_postgresql or live_aws_s3 or live_remote)",
+    "-x",
+    "--cov=cacheness",
+    "--cov-branch",
+    f"--cov-report=json:{COVERAGE_REPORT.relative_to(REPOSITORY_ROOT)}",
+    f"--cov-report=xml:{COVERAGE_XML.relative_to(REPOSITORY_ROOT)}",
+)
 
 
 def _load_evidence_module():
     """Load the sibling utility when this file is run directly or in a test."""
-    specification = importlib.util.spec_from_file_location("phase8_evidence", EVIDENCE_PATH)
+    specification = importlib.util.spec_from_file_location(
+        "phase8_evidence", EVIDENCE_PATH
+    )
     if specification is None or specification.loader is None:
         raise RuntimeError("Phase 8 evidence utility is unavailable")
     module = importlib.util.module_from_spec(specification)
@@ -78,7 +116,12 @@ def _git_revision() -> str | None:
     except (OSError, subprocess.SubprocessError):
         return None
     revision = completed.stdout.strip()
-    return revision if len(revision) == 40 and all(character in "0123456789abcdef" for character in revision) else None
+    return (
+        revision
+        if len(revision) == 40
+        and all(character in "0123456789abcdef" for character in revision)
+        else None
+    )
 
 
 def _relevant_sources_are_clean() -> bool:
@@ -166,9 +209,7 @@ def _payload(result: str) -> dict[str, object]:
     }
 
 
-def _write_result(
-    output: Path, identity: SourceIdentity, result: str
-) -> None:
+def _write_result(output: Path, identity: SourceIdentity, result: str) -> None:
     status = "PASS" if result == "passed" else "NOT_QUALIFIED"
     envelope = phase8_evidence.make_envelope(
         evidence_class="deterministic",
@@ -183,7 +224,8 @@ def _write_result(
 def run_deterministic(
     *,
     output: Path,
-    run_child: Callable[[tuple[str, ...], int], subprocess.CompletedProcess[str]] | None = None,
+    run_child: Callable[[tuple[str, ...], int], subprocess.CompletedProcess[str]]
+    | None = None,
 ) -> int:
     """Execute only the inherited Phase 07.1 all-mode verifier for one clean SHA."""
     if run_child is None:
@@ -195,7 +237,9 @@ def run_deterministic(
         _write_result(output, before, "source_dirty")
         return 1
     try:
-        child_result = _child_result(run_child(DETERMINISTIC_COMMAND, CHILD_TIMEOUT_SECONDS))
+        child_result = _child_result(
+            run_child(DETERMINISTIC_COMMAND, CHILD_TIMEOUT_SECONDS)
+        )
     except subprocess.TimeoutExpired:
         child_result = "timed_out"
     after = current_source_identity()
@@ -212,6 +256,183 @@ def run_deterministic(
     return 0 if child_result == "passed" else 1
 
 
+def _run_required_child(command: tuple[str, ...], *, timeout: int) -> int:
+    """Run one reviewed child command without allowing shell interpolation."""
+
+    try:
+        completed = _run_child(command, timeout)
+    except subprocess.TimeoutExpired:
+        return 1
+    return 0 if completed.returncode == 0 else 1
+
+
+def _validate_class_envelope(output: Path, evidence_class: str) -> int:
+    """Require the child to write one matching passing envelope."""
+
+    try:
+        envelope = phase8_evidence.load_envelope(output)
+    except phase8_evidence.EvidenceValidationError:
+        return 1
+    return int(not phase8_evidence.is_qualification_evidence(envelope, evidence_class))
+
+
+def run_packaging(*, output: Path) -> int:
+    """Run the fixed isolated-wheel qualification with no feature overrides."""
+
+    return (
+        _validate_class_envelope(output, "packaging")
+        if not _run_required_child(
+            (sys.executable, str(PACKAGING_TOOL), "--output", str(output)),
+            timeout=CHILD_TIMEOUT_SECONDS,
+        )
+        else 1
+    )
+
+
+def run_platform(
+    *,
+    output: Path,
+    expected_os: str,
+    python_minor: str,
+    feature_profile: str,
+    advisory: bool,
+) -> int:
+    """Delegate one identity-bound platform row to its fixed runner."""
+
+    command = (
+        sys.executable,
+        str(PLATFORM_TOOL),
+        "--expected-os",
+        expected_os,
+        "--python-minor",
+        python_minor,
+        "--feature-profile",
+        feature_profile,
+        "--output",
+        str(output),
+    )
+    if advisory:
+        command = (*command, "--advisory")
+    return (
+        _validate_class_envelope(output, "platform")
+        if not _run_required_child(command, timeout=CHILD_TIMEOUT_SECONDS)
+        else 1
+    )
+
+
+def _class_payload(evidence_class: str) -> dict[str, object]:
+    """Return the common safe payload for one completed local evidence class."""
+
+    return {
+        "result": "passed",
+        "claim_categories": {
+            "integrity": "EVIDENCED",
+            "recovery": "EVIDENCED",
+            "progress": "EVIDENCED",
+            "performance": "NOT_QUALIFIED",
+        },
+        "non_qualifying_classes": [
+            candidate
+            for candidate in phase8_evidence.EVIDENCE_CLASSES
+            if candidate != evidence_class
+        ],
+        "subjects": list(phase8_evidence.QUALIFIED_SUBJECTS),
+    }
+
+
+def _write_local_envelope(
+    *, output: Path, identity: SourceIdentity, evidence_class: str
+) -> None:
+    """Write one validated coverage-class envelope after its child succeeds."""
+
+    phase8_evidence.write_envelope(
+        output,
+        phase8_evidence.make_envelope(
+            evidence_class=evidence_class,
+            status="PASS",
+            revision=identity.revision,
+            source_digest=identity.source_digest,
+            payload=_class_payload(evidence_class),
+        ),
+    )
+
+
+def run_coverage(*, output: Path) -> int:
+    """Measure branch coverage, verify its ratchet, and emit one clean envelope."""
+
+    before = current_source_identity()
+    if before is None or not before.clean:
+        return 1
+    if _run_required_child(COVERAGE_MEASUREMENT_COMMAND, timeout=CHILD_TIMEOUT_SECONDS):
+        return 1
+    if _run_required_child(
+        (
+            sys.executable,
+            str(COVERAGE_TOOL),
+            "--report",
+            str(COVERAGE_REPORT.relative_to(REPOSITORY_ROOT)),
+            "--baseline",
+            str(COVERAGE_BASELINE.relative_to(REPOSITORY_ROOT)),
+            "--ruff",
+        ),
+        timeout=CHILD_TIMEOUT_SECONDS,
+    ):
+        return 1
+    after = current_source_identity()
+    if after is None or not after.clean or after != before:
+        return 1
+    _write_local_envelope(output=output, identity=before, evidence_class="coverage")
+    return 0
+
+
+def run_structural(*, output: Path) -> int:
+    """Run formula/RSS self-tests and collect their raw structural envelope."""
+
+    test_command = (
+        sys.executable,
+        "-m",
+        "pytest",
+        "-q",
+        "-o",
+        "log_cli=false",
+        "tests/performance/test_complexity_contracts.py",
+        "tests/performance/test_memory_bounds.py",
+        "-x",
+    )
+    if _run_required_child(test_command, timeout=CHILD_TIMEOUT_SECONDS):
+        return 1
+    return (
+        _validate_class_envelope(output, "structural")
+        if not _run_required_child(
+            (
+                sys.executable,
+                str(STRUCTURAL_TOOL),
+                "--collect",
+                "--output",
+                str(output),
+            ),
+            timeout=CHILD_TIMEOUT_SECONDS,
+        )
+        else 1
+    )
+
+
+def run_all(*, output_directory: Path) -> int:
+    """Produce every non-platform local evidence class in a fixed order."""
+
+    output_directory.mkdir(parents=True, exist_ok=True)
+    commands = (
+        ("deterministic", lambda path: run_deterministic(output=path)),
+        ("packaging", lambda path: run_packaging(output=path)),
+        ("coverage", lambda path: run_coverage(output=path)),
+        ("structural", lambda path: run_structural(output=path)),
+    )
+    for name, runner in commands:
+        if runner(output_directory / f"{name}.json"):
+            return 1
+    return 0
+
+
 def render_evidence_report(envelope) -> str:
     """Render one class-by-class report without promoting absent evidence."""
     lines = ["Phase 8 qualification evidence:"]
@@ -226,11 +447,53 @@ def render_evidence_report(envelope) -> str:
 
 
 def main(arguments: Sequence[str] | None = None) -> int:
-    """Run the fixed deterministic gate without user-controlled child selection."""
+    """Run one fixed local evidence producer without caller-selected selectors."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("gate", choices=("deterministic",))
-    parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("gate", choices=GATE_CHOICES)
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--output-dir", type=Path)
+    parser.add_argument("--expected-os", choices=("Linux", "Darwin", "Windows"))
+    parser.add_argument("--python-minor")
+    parser.add_argument(
+        "--feature-profile", choices=("core", "non_tensorflow", "tensorflow")
+    )
+    parser.add_argument("--advisory", action="store_true")
     parsed = parser.parse_args(arguments)
+    if parsed.gate == "all":
+        if parsed.output is not None or parsed.output_dir is None:
+            parser.error("all requires --output-dir and rejects --output")
+        return run_all(output_directory=parsed.output_dir)
+    if parsed.output is None or parsed.output_dir is not None:
+        parser.error("a single gate requires --output and rejects --output-dir")
+    if parsed.gate == "packaging":
+        return run_packaging(output=parsed.output)
+    if parsed.gate == "platform":
+        if (
+            parsed.expected_os is None
+            or parsed.python_minor is None
+            or parsed.feature_profile is None
+        ):
+            parser.error(
+                "platform requires expected OS, Python minor, and feature profile"
+            )
+        return run_platform(
+            output=parsed.output,
+            expected_os=parsed.expected_os,
+            python_minor=parsed.python_minor,
+            feature_profile=parsed.feature_profile,
+            advisory=parsed.advisory,
+        )
+    if (
+        parsed.expected_os
+        or parsed.python_minor
+        or parsed.feature_profile
+        or parsed.advisory
+    ):
+        parser.error("platform options are valid only for the platform gate")
+    if parsed.gate == "coverage":
+        return run_coverage(output=parsed.output)
+    if parsed.gate == "structural":
+        return run_structural(output=parsed.output)
     exit_code = run_deterministic(output=parsed.output)
     if not parsed.output.is_file():
         return DETERMINISTIC_FAILURE_EXIT_CODE

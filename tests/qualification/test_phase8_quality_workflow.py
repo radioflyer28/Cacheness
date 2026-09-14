@@ -37,7 +37,7 @@ def test_local_gate_runner_exposes_only_fixed_quality_classes() -> None:
 
     for gate in ("deterministic", "packaging", "platform", "coverage", "structural"):
         assert f'"{gate}"' in runner
-    assert 'choices=("deterministic", "packaging", "platform", "coverage", "structural", "all")' in runner
+    assert "GATE_CHOICES" in runner
     assert "tools/run_phase8_packaging.py" in runner
     assert "tools/run_phase8_platform_gates.py" in runner
     assert "tools/verify_phase8_coverage.py" in runner
@@ -69,7 +69,9 @@ def test_quality_workflow_has_exact_non_live_matrix_and_least_permissions() -> N
     ).group(1)
 
 
-def test_quality_workflow_keeps_live_and_controlled_performance_out_of_pr_jobs() -> None:
+def test_quality_workflow_keeps_live_and_controlled_performance_out_of_pr_jobs() -> (
+    None
+):
     """Untrusted CI cannot receive live inputs or turn timing into a local gate."""
 
     workflow = _workflow().casefold()
@@ -84,7 +86,9 @@ def test_quality_workflow_keeps_live_and_controlled_performance_out_of_pr_jobs()
     assert "controlled-performance" not in workflow
 
 
-def test_release_candidate_binds_one_detached_sha_and_uploads_fixed_class_artifacts() -> None:
+def test_release_candidate_binds_one_detached_sha_and_uploads_fixed_class_artifacts() -> (
+    None
+):
     """The trusted path cannot mix artifacts from an implicit or later revision."""
 
     workflow = _workflow()
@@ -99,9 +103,9 @@ def test_release_candidate_binds_one_detached_sha_and_uploads_fixed_class_artifa
     assert "persist-credentials: false" in release_candidate
     assert "git rev-parse HEAD" in release_candidate
     assert "candidate checkout must be detached" in release_candidate
-    assert release_candidate.index("Prove detached source identity") < release_candidate.index(
-        "Run release-candidate quality gates"
-    )
+    assert release_candidate.index(
+        "Prove detached source identity"
+    ) < release_candidate.index("Run release-candidate quality gates")
     for artifact in (
         "phase8-deterministic-envelope",
         "phase8-packaging-envelope",
