@@ -4,14 +4,6 @@
 **Files analyzed:** 17 proposed new/modified implementation, test, configuration, and workflow files
 **Analogs found:** 14 / 17 (the three workflow surfaces have no direct repository analog)
 
-**Revised 2026-09-14:** D-23 supersedes the TensorFlow-specific pattern assignments
-implemented by completed Plans 08-02/08-03. Plan 08-13 uses a pre-production removal
-pattern: delete the in-tree handler/config/export/docs surface, remove the optional
-group and its lock graph, contract-test exact absence from final packaging/platform
-evidence, and preserve the generic custom-handler seam. Historical `.planning`
-summaries remain evidence of work performed and are excluded from production-surface
-absence scans. No lifecycle or ADR 0001 pattern changes.
-
 Phase 8 is release evidence and measurement work. Preserve the Phase 07.1 single
 BlobStore/AuthorityLifecycleEngine authority and ADR 0001's separation of integrity,
 recovery, bounded progress, and performance. These assignments authorize no new
@@ -30,7 +22,6 @@ lifecycle lock, queue, lease, retry coordinator, or source of truth.
 | tools/verify_phase8_release.py | utility / release aggregator | transform, file I/O | tools/verify_phase5_contracts.py + tests/test_phase3_release_evidence.py | role-match |
 | tests/qualification/test_phase8_evidence.py (or extend test_live_evidence.py) | test | request-response, file I/O | tests/qualification/test_live_evidence.py | exact match |
 | tests/packaging/test_wheel_matrix.py | test | batch, file I/O, subprocess | tests/test_full_suite_environment.py | exact match |
-| tests/test_tensorflow_removal.py | test | public-surface and repository contract | tests/test_blob_manifest.py + tests/test_handler_registration.py | strong match |
 | tests/performance/test_complexity_contracts.py | test | batch, CRUD/metrics | catalog/reconciliation/policy tests | exact match |
 | tests/performance/test_phase8_benchmarks.py | test | batch, transform, file I/O | lifecycle benchmark + verifier tests | role-match |
 | tests/test_phase8_quality_gates.py | test / verifier self-test | transform, request-response | tests/test_phase071_contract_verifier.py | exact match |
@@ -185,11 +176,10 @@ Copy wheel build and isolated subprocess pattern (lines 122-174):
 
 Base probe imports public cacheness/cacheness.storage, creates explicit memory/memory
 StoreTopology, initializes, and performs generic plus NumPy round-trips through
-BlobStore/UnifiedCache. Iterate every remaining literal optional group in a fresh
-environment; one all-extras process is not QUAL-02 proof. Preserve runtime-boto3
-absence assertion from lines 98-119. Use retained Parquet, NPZ/Blosc2, and SQL
-representatives. Per D-23, no TensorFlow group, compatibility row, or dormant probe
-remains.
+BlobStore/UnifiedCache. Iterate every literal optional group in a fresh environment;
+one all-extras process is not QUAL-02 proof. Preserve runtime-boto3 absence assertion
+from lines 98-119. Use retained Parquet, NPZ/Blosc2, SQL, and TensorFlow representatives
+only for compatible groups/interpreters.
 
 ### tools/run_phase8_local_gates.py (utility, request-response)
 
@@ -324,10 +314,10 @@ workloads in ordinary self-tests.
 
 No direct analog: no .github/workflows/ exists. Use verify_phase071_contracts.py fixed
 suites as the command analog. Define PR deterministic jobs with fail-fast false, Linux
-stable matrix 3.11 through latest compatible stable, macOS boundary smokes, packaging
-for only the advertised groups, coverage, direct Ruff scopes, and complexity contracts.
-Put prerelease Python in a separate advisory/continue-on-error job. Invoke frozen
-isolated uv commands and Python gate tools; keep logic out of YAML.
+stable matrix 3.11 through latest compatible stable, macOS boundary smokes, packaging,
+coverage, direct Ruff scopes, and complexity contracts. Put prerelease Python in a
+separate advisory/continue-on-error job. Invoke frozen isolated uv commands and Python
+gate tools; keep logic out of YAML.
 
 ### .github/workflows/live_qualification.yml (config/workflow, event-driven + request-response)
 
@@ -367,13 +357,11 @@ for translated file/JSON failures.
 
 Analog: pyproject.toml lines 9-16, 18-45, 68-76, 82-129, and 131-146.
 
-Keep Python >=3.11, core NumPy/obstore, the remaining literal optional groups, strict
-markers, coverage source/omit, and Ruff target/line-length policy. Per D-23, remove the
-TensorFlow project/dev groups and all resulting TensorFlow-named lock packages rather
-than retaining an empty or incompatible extra. Add branch coverage only with the Phase
-8 verifier/baseline. Add pyperf to dev only after human legitimacy checkpoint, pin its
-reviewed version, and update uv.lock normally. Do not add runtime coverage/benchmark
-dependencies or boto3 to production groups.
+Keep Python >=3.11, core NumPy/obstore, literal optional groups, strict markers,
+coverage source/omit, and Ruff target/line-length policy. Add branch coverage only
+with the Phase 8 verifier/baseline. Add pyperf to dev only after human legitimacy
+checkpoint, pin its reviewed version, and update uv.lock normally. Do not add runtime
+coverage/benchmark dependencies or boto3 to production groups.
 
 ## Shared Patterns
 

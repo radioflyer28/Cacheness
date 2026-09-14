@@ -5,15 +5,12 @@ status: planned
 nyquist_compliant: true
 wave_0_complete: false
 created: 2026-09-13
-updated: 2026-09-14
+updated: 2026-09-13
 ---
 
 # Phase 08 — Validation Strategy
 
-> Planning-time Nyquist contract for Plans 08-01 through 08-13. Plans 08-02 and
-> 08-03 retain historical evidence for the TensorFlow qualification work completed
-> before D-23; Plan 08-13 supersedes that support claim and removes the shipped
-> surface before remaining release gates. No Phase 8
+> Planning-time Nyquist contract for Plans 08-01 through 08-12. No Phase 8
 > implementation result, live credential, controlled-runner capture, workflow run,
 > or immutable release is claimed to exist. Existing Phase 03/05/07.1 artifacts are
 > implementation analogs or inherited regressions, not substitute Phase 8 evidence.
@@ -31,13 +28,9 @@ updated: 2026-09-14
    deselected, stale, scheduled-diagnostic, prerelease, Windows, mocked, and remote
    latency results never fill a qualifying slot.
 4. Deterministic PostgreSQL authority gaps are test-first work in Wave 2 and must
-   pass before Wave 4 captures coverage floors; Wave 3 first removes TensorFlow.
+   pass before Wave 3 captures coverage floors.
 5. External execution prerequisites are blocking checkpoints, not manual substitutes
    for automated evidence.
-6. D-23 removes native TensorFlow support completely before coverage capture, quality
-   workflow composition, fixed verification, external evidence aggregation, or release
-   publication. Historical `.planning` summaries remain readable history but are not
-   scanned as current production/package/docs support surfaces.
 
 ## Evidence Classes and Non-Substitution Rules
 
@@ -45,7 +38,7 @@ updated: 2026-09-14
 |---|---|---|---|---|
 | Deterministic/local | `tools/run_phase8_local_gates.py`, fixed pytest selectors, `tools/verify_phase8_contracts.py` | PR and release | Exact selector inventory, no skip/deselection, canonical same-SHA envelope | Live services, controlled timing, other platforms |
 | Packaging | `tools/run_phase8_packaging.py` | PR and release | Fresh isolated wheel install and representative public round trip for base and each literal optional group | Source-tree imports, all-extras transitivity, service qualification |
-| Platform | `tools/run_phase8_platform_gates.py`, `quality.yml` | PR and release according to row role | Full stable Linux 3.11-3.14 core/advertised-group rows and macOS 3.11/3.14 boundary smoke; no TensorFlow feature profile exists | Windows support, prerelease support, controlled performance |
+| Platform | `tools/run_phase8_platform_gates.py`, `quality.yml` | PR and release according to row role | Full stable Linux 3.11-3.14 rows, macOS 3.11/3.14 boundary smoke, TensorFlow only on compatible stable rows | Windows support, prerelease support, controlled performance |
 | Coverage/quality | `tools/verify_phase8_coverage.py`, Coverage.py JSON/XML, direct Ruff commands | PR and release | Named behavior selectors plus post-gap repository/critical statement and branch floors; read-only baseline verification | Behavior omitted merely because percentages are green |
 | Structural | `tools/run_phase8_scale_gates.py` | PR and release | Exact authority/participant call formulas and peak-memory bounds at fixed tiers | Wall-clock latency or stronger progress guarantees |
 | Controlled performance | `benchmarks/phase8_benchmarks.py`, `performance.yml` | Release | Stable distributions and RSS on exact `cacheness-perf-linux-x64` fingerprint against checked baseline | Runtime deadlines, remote latency, safety/recovery/progress |
@@ -61,7 +54,7 @@ the blocking aggregate.
 | Property | Value |
 |---|---|
 | Framework | pytest 8.4.1, pytest-cov 6.2.1, Coverage.py 7.10.3, Ruff 0.12.9 in the researched environment |
-| Config | `pyproject.toml`; Wave 4 enables branch coverage and strict baseline validation after D-23 removal |
+| Config | `pyproject.toml`; Wave 3 enables branch coverage and strict baseline validation |
 | Per-task command | Each plan task’s literal `<automated>` command |
 | Full deterministic command | `uv run --isolated --all-extras --group dev --frozen python tools/verify_phase8_contracts.py --all` |
 | Feedback target | Focused deterministic self-tests under 30 seconds; live and controlled-performance execution are separately bounded external jobs |
@@ -73,7 +66,7 @@ the blocking aggregate.
 |---|---|---|---|---|
 | BACK-05 | Real PostgreSQL and authoritative Amazon S3 behavior passes the frozen suite at one exact candidate SHA with exact bounded cleanup; compatible S3 services remain unclaimed | `tools/run_phase8_qualification.py`; `tests/qualification/test_phase8_evidence.py`; `tests/qualification/test_phase8_live_workflow.py`; exact run-ID collection; Plan 12 immutable publication validation | Live service + publication | Wave 0 runner/workflow missing; credentials/resources/actual run are external blockers |
 | QUAL-01 | Clean minimal wheel imports every guaranteed public symbol and performs generic-object plus NumPy public round trips | `tests/packaging/test_wheel_matrix.py -k base`; `tools/run_phase8_packaging.py` | Packaging | Wave 0 extension missing; existing `tests/test_full_suite_environment.py` is only an analog |
-| QUAL-02 | Every remaining literal optional group installs independently and exercises its public feature; TensorFlow has no dependency group, handler, or matrix slot | `tests/packaging/test_wheel_matrix.py`; `tests/test_tensorflow_removal.py`; exact packaging manifest emitted by `tools/run_phase8_packaging.py` | Packaging + platform | Plans 08-02/08-03 historical implementation is superseded by Plan 08-13 before final qualification |
+| QUAL-02 | Every literal optional group installs independently and exercises its public feature; TensorFlow incompatibility on 3.14 is explicit, never skipped | `tests/packaging/test_wheel_matrix.py`; exact packaging manifest emitted by `tools/run_phase8_packaging.py` | Packaging + platform | Wave 0 missing |
 | QUAL-03 | CI executes stable Python/platform roles, deterministic backends, packaging, branch coverage, scoped Ruff, structural gates, protected live qualification, and controlled performance without class substitution | Static workflow contract tests plus `tools/verify_phase8_contracts.py --all`; exact external run artifacts for live/performance | All classes | Workflows and contract tests missing; live/performance remain external |
 | QUAL-04 | Finite integrity/recovery/commit-boundary regressions remain green; shared-worker fixtures initialize before contention; terminal outcomes remain success, exact conflict, or typed retryable outcome | Inherited `tools/verify_phase071_contracts.py --all` plus `tests/test_phase8_lifecycle_coverage.py` | Deterministic/local | Inherited verifier exists; Phase 8 named-gap file missing |
 | QUAL-05 | Named lifecycle/cache-policy gaps plus repository and critical statement/branch counts do not regress | `tests/test_phase8_lifecycle_coverage.py`; `tests/test_phase8_cache_policy_coverage.py`; `tests/test_phase8_coverage_gate.py`; read-only `tools/verify_phase8_coverage.py` | Deterministic + coverage | Wave 0 tests/verifier/baseline missing; capture forbidden until Wave 2 passes |
@@ -94,9 +87,8 @@ names those selectors literally.
 | Bounded pagination | Inventory and reconciliation use explicit `limit`/work caps, canonical cursors, stable high-water bounds, no skipped unemitted rows, and typed stale/reinspection outcomes | `test_inventory_preserves_retryable_postgresql_progress_causes`, `test_reconciliation_cursor_does_not_skip_unemitted_debt_rows`, existing `inventory_page(limit=1, work_cap=1024)` contract | Add Phase 8 boundary/cursor matrix; run `tests/test_phase8_lifecycle_coverage.py -k postgresql_pagination -x` |
 | Transactional rollback | Every initialization/read/transition failure exits the connection transaction as failure, rolls back partial writes, preserves domain cause, and does not commit/leave partial authority state | `test_initialize_rolls_back_and_redacts_driver_details`, `test_initialize_rejects_an_existing_partial_layout_before_ddl`, `test_pool_lease_receives_transition_failure_for_rollback` | Add failure injection across prepare/verify/promote/clear/reconcile paths; run `tests/test_phase8_lifecycle_coverage.py -k postgresql_transaction_rollback -x` |
 
-**Wave dependency:** 08-04-01 must pass all four families and Plan 08-13 must close
-the D-23 support-surface removal before 08-05-02 may execute. The coverage capture
-tool must preflight the literal selector inventory and refuse to
+**Wave dependency:** 08-04-01 must pass all four families before 08-05-02 may execute.
+The coverage capture tool must preflight the literal selector inventory and refuse to
 write a baseline when a selector is absent, skipped, deselected, or failing. The
 pre-gap research percentages are diagnostic and never qualify this dependency.
 
@@ -108,15 +100,12 @@ pre-gap research percentages are diagnostic and never qualify this dependency.
 | 08-01-02 | 1 | Truthful evidence parsing/nonclaims | `uv run pytest -q -o log_cli=false tests/test_phase8_release_tracer.py -x` | Deterministic/local | Wave 0 missing |
 | 08-02-01 | 2 | QUAL-01 base wheel | `uv run pytest -q -o log_cli=false tests/packaging/test_wheel_matrix.py -k base -x` | Packaging | Wave 0 missing |
 | 08-02-02 | 2 | QUAL-02 literal optional groups | `uv run pytest -q -o log_cli=false tests/packaging/test_wheel_matrix.py -x` | Packaging | Wave 0 missing |
-| 08-03-01 | 2 | Historical Python/TensorFlow compatibility roles, superseded by D-23 | `uv run pytest -q -o log_cli=false tests/qualification/test_phase8_platform.py -k python -x` | Platform | Completed historical work; Plan 08-13 removes the TensorFlow profile before final qualification |
+| 08-03-01 | 2 | Python/TensorFlow compatibility roles | `uv run pytest -q -o log_cli=false tests/qualification/test_phase8_platform.py -k python -x` | Platform | Wave 0 missing |
 | 08-03-02 | 2 | Linux/macOS/Windows nonclaim | `uv run pytest -q -o log_cli=false tests/qualification/test_phase8_platform.py -x` | Platform | Wave 0 missing |
 | 08-04-01 | 2 | QUAL-04/05 lifecycle + PostgreSQL gaps | `uv run pytest -q -o log_cli=false tests/test_phase8_lifecycle_coverage.py -x` | Deterministic/local | Wave 0 missing; blocks 08-05-02 |
 | 08-04-02 | 2 | QUAL-05 cache policy | `uv run pytest -q -o log_cli=false tests/test_phase8_cache_policy_coverage.py -x` | Deterministic/local | Wave 0 missing; blocks 08-05-02 |
-| 08-13-01 | 3 | D-23 runtime/package removal and unsupported stored contract | `uv run pytest -q -o log_cli=false tests/test_tensorflow_removal.py -k 'runtime or stored or custom_handler' -x` | Deterministic/package | Must pass before 08-05 resumes |
-| 08-13-02 | 3 | D-23 final packaging/platform evidence inventories | `uv run pytest -q -o log_cli=false tests/test_tensorflow_removal.py tests/packaging/test_wheel_matrix.py tests/qualification/test_phase8_platform.py -x` | Packaging + platform | Must pass before 08-05 resumes |
-| 08-13-03 | 3 | D-23 docs and lock-graph absence contract | `uv run pytest -q -o log_cli=false tests/test_tensorflow_removal.py -k 'docs or lock or metadata' -x` | Documentation/package metadata | Must pass before 08-05 resumes |
-| 08-05-01 | 4 | QUAL-05 ratchet/parser/Ruff scope | `uv run pytest -q -o log_cli=false tests/test_phase8_coverage_gate.py -x` | Coverage/quality | Blocked on 08-13 support-surface removal |
-| 08-05-02 | 4 | QUAL-05 post-gap baseline | `uv run python tools/verify_phase8_coverage.py --report build/phase8/coverage.json --baseline tests/qualification/phase8_coverage_baseline.json` | Coverage/quality | Blocked until 08-04 and 08-13 pass |
+| 08-05-01 | 3 | QUAL-05 ratchet/parser/Ruff scope | `uv run pytest -q -o log_cli=false tests/test_phase8_coverage_gate.py -x` | Coverage/quality | Wave 0 missing |
+| 08-05-02 | 3 | QUAL-05 post-gap baseline | `uv run python tools/verify_phase8_coverage.py --report build/phase8/coverage.json --baseline tests/qualification/phase8_coverage_baseline.json` | Coverage/quality | Blocked until 08-04 passes |
 | 08-06-01 | 2 | QUAL-07 call formulas | `uv run pytest -q -o log_cli=false tests/performance/test_complexity_contracts.py -x` | Structural | Wave 0 missing |
 | 08-06-02 | 2 | QUAL-07 peak memory | `uv run pytest -q -o log_cli=false tests/performance/test_memory_bounds.py tests/performance/test_complexity_contracts.py -x` | Structural | Wave 0 missing |
 | 08-07-01 | 2 | QUAL-06 workloads | `uv run pytest -q -o log_cli=false tests/performance/test_phase8_benchmarks.py -k workloads -x` | Performance self-test | Wave 0 missing |
@@ -125,17 +114,17 @@ pre-gap research percentages are diagnostic and never qualify this dependency.
 | 08-08-01 | 2 | BACK-05 runner/source/obstore | `uv run pytest -q -o log_cli=false tests/qualification/test_phase8_evidence.py -k runner -x` | Live harness self-test | Wave 0 missing |
 | 08-08-02 | 2 | BACK-05 cleanup/redaction | `uv run pytest -q -o log_cli=false tests/qualification/test_phase8_evidence.py -k 'cleanup or redact or secret' -x` | Live harness self-test | Wave 0 missing |
 | 08-08-03 | 2 | Exact-SHA live workflow | `uv run pytest -q -o log_cli=false tests/qualification/test_phase8_live_workflow.py tests/qualification/test_phase8_evidence.py -x` | Live orchestration self-test | Wave 0 missing |
-| 08-09-01 | 5 | QUAL-03 fixed quality CI | `uv run pytest -q -o log_cli=false tests/qualification/test_phase8_quality_workflow.py -x` | Deterministic/platform/workflow | Blocked on 08-05 and 08-13 |
-| 08-09-02 | 5 | Qualification/nonclaim docs | `uv run pytest -q -o log_cli=false tests/qualification/test_phase8_quality_workflow.py -k documentation -x` | Documentation contract | Blocked on 08-13 support-surface removal |
-| 08-10-01 | 6 | Fixed source/selector/decision verifier | `uv run pytest -q -o log_cli=false tests/test_phase8_contract_verifier.py -x` | Deterministic/local | Blocked on the complete Plan 08-01 through 08-13 inventory |
-| 08-10-02 | 6 | Exact-SHA workflow dispatch/run-ID wait/fixed artifact collection | `uv run pytest -q -o log_cli=false tests/qualification/test_phase8_release.py -k 'dispatch or run_id or artifact_collection' -x` | External-orchestration self-test | Wave 0 missing |
-| 08-10-03 | 6 | Same-SHA aggregate and published immutable release verifier | `uv run pytest -q -o log_cli=false tests/qualification/test_phase8_release.py tests/test_phase8_contract_verifier.py -x` | Publication self-test | Wave 0 missing |
-| 08-11-01 | 7 | Controlled baseline capture | `uv run --isolated --all-extras --group dev --frozen python benchmarks/phase8_benchmarks.py --verify-baseline benchmarks/phase8_baseline.json` | Controlled performance | External runner checkpoint |
-| 08-11-02 | 7 | Exact-SHA quality/performance/live dispatch, wait, and artifact collection | `uv run --isolated --all-extras --group dev --frozen python tools/verify_phase8_release.py collect --candidate-sha "$(git rev-parse HEAD)" --output-dir build/phase8/evidence --live-output build/phase8/live_qualification.json` | Deterministic/platform/packaging/coverage/structural/controlled/live collection | Controlled runner, protected live service, and exact dispatch checkpoints |
-| 08-11-03 | 7 | Validate and aggregate exact-run artifacts | `uv run --isolated --all-extras --group dev --frozen python tools/verify_phase8_contracts.py --all && uv run --isolated --group dev --frozen python tools/verify_phase8_release.py aggregate --candidate-sha "$(git rev-parse HEAD)" --evidence-dir build/phase8/evidence --live-evidence build/phase8/live_qualification.json --output build/phase8/release_qualification.json` | Publication input | Blocked until exact-run collection passes |
-| 08-12-01 | 8 | Exact draft target/assets/states/digests prepublication report | `uv run --isolated --group dev --frozen python tools/verify_phase8_release.py prepare-draft --tag "$CACHENESS_RELEASE_TAG" --aggregate build/phase8/release_qualification.json --asset-dir build/phase8/evidence --live-evidence build/phase8/live_qualification.json --output build/phase8/release_prepublication.json` | Publication | Immutable-policy/permission precondition checkpoint |
-| 08-12-02 | 8 | Operator/reviewer approval bound to exact report digest | Blocking-human resume signal `publish <tag> <sha> <report-sha256>` | Human authorization | Draft remains unpublished until approved |
-| 08-12-03 | 8 | Publish and final exact immutable state/assets/digests verification | `uv run --isolated --group dev --frozen python tools/verify_phase8_release.py publish-and-verify --tag "$CACHENESS_RELEASE_TAG" --prepublication build/phase8/release_prepublication.json --output build/phase8/release_publication.json` | Publication | One-way authorized transition then read-only proof |
+| 08-09-01 | 4 | QUAL-03 fixed quality CI | `uv run pytest -q -o log_cli=false tests/qualification/test_phase8_quality_workflow.py -x` | Deterministic/platform/workflow | Wave 0 missing |
+| 08-09-02 | 4 | Qualification/nonclaim docs | `uv run pytest -q -o log_cli=false tests/qualification/test_phase8_quality_workflow.py -k documentation -x` | Documentation contract | Wave 0 missing |
+| 08-10-01 | 5 | Fixed source/selector/decision verifier | `uv run pytest -q -o log_cli=false tests/test_phase8_contract_verifier.py -x` | Deterministic/local | Wave 0 missing |
+| 08-10-02 | 5 | Exact-SHA workflow dispatch/run-ID wait/fixed artifact collection | `uv run pytest -q -o log_cli=false tests/qualification/test_phase8_release.py -k 'dispatch or run_id or artifact_collection' -x` | External-orchestration self-test | Wave 0 missing |
+| 08-10-03 | 5 | Same-SHA aggregate and published immutable release verifier | `uv run pytest -q -o log_cli=false tests/qualification/test_phase8_release.py tests/test_phase8_contract_verifier.py -x` | Publication self-test | Wave 0 missing |
+| 08-11-01 | 6 | Controlled baseline capture | `uv run --isolated --all-extras --group dev --frozen python benchmarks/phase8_benchmarks.py --verify-baseline benchmarks/phase8_baseline.json` | Controlled performance | External runner checkpoint |
+| 08-11-02 | 6 | Exact-SHA quality/performance/live dispatch, wait, and artifact collection | `uv run --isolated --all-extras --group dev --frozen python tools/verify_phase8_release.py collect --candidate-sha "$(git rev-parse HEAD)" --output-dir build/phase8/evidence --live-output build/phase8/live_qualification.json` | Deterministic/platform/packaging/coverage/structural/controlled/live collection | Controlled runner, protected live service, and exact dispatch checkpoints |
+| 08-11-03 | 6 | Validate and aggregate exact-run artifacts | `uv run --isolated --all-extras --group dev --frozen python tools/verify_phase8_contracts.py --all && uv run --isolated --group dev --frozen python tools/verify_phase8_release.py aggregate --candidate-sha "$(git rev-parse HEAD)" --evidence-dir build/phase8/evidence --live-evidence build/phase8/live_qualification.json --output build/phase8/release_qualification.json` | Publication input | Blocked until exact-run collection passes |
+| 08-12-01 | 7 | Exact draft target/assets/states/digests prepublication report | `uv run --isolated --group dev --frozen python tools/verify_phase8_release.py prepare-draft --tag "$CACHENESS_RELEASE_TAG" --aggregate build/phase8/release_qualification.json --asset-dir build/phase8/evidence --live-evidence build/phase8/live_qualification.json --output build/phase8/release_prepublication.json` | Publication | Immutable-policy/permission precondition checkpoint |
+| 08-12-02 | 7 | Operator/reviewer approval bound to exact report digest | Blocking-human resume signal `publish <tag> <sha> <report-sha256>` | Human authorization | Draft remains unpublished until approved |
+| 08-12-03 | 7 | Publish and final exact immutable state/assets/digests verification | `uv run --isolated --group dev --frozen python tools/verify_phase8_release.py publish-and-verify --tag "$CACHENESS_RELEASE_TAG" --prepublication build/phase8/release_prepublication.json --output build/phase8/release_publication.json` | Publication | One-way authorized transition then read-only proof |
 
 ## Exact-SHA Dispatch, Wait, and Artifact Collection Gate
 
@@ -198,10 +187,6 @@ authorization, or a published release exists.
       per literal optional group, with public round trips.
 - [ ] `tests/qualification/test_phase8_platform.py` — stable/advisory/feature-aware
       matrices and Windows nonclaim.
-- [ ] `tests/test_tensorflow_removal.py` — D-23 runtime/package/docs/lock/matrix
-      absence plus existing unsupported versioned-handler behavior and preserved
-      custom-handler registration. Its production-surface scan excludes historical
-      `.planning` summaries.
 - [ ] `tests/test_phase8_lifecycle_coverage.py` — lifecycle risks plus explicit
       PostgreSQL DB-API classification, replay, bounded pagination, and transaction
       rollback matrices. This gap must close before coverage baseline capture.
@@ -253,30 +238,23 @@ checkpoint rather than inventing values.
 - **Per task commit:** run the task’s exact focused command; for Python edits also run
   direct Ruff lint/format on changed paths plus the fixed critical scope.
 - **After Wave 2:** run all new deterministic, packaging, platform, structural,
-      benchmark-harness, and live-harness self-tests. Specifically require all four
-      PostgreSQL gap selectors before Wave 3.
-- **After Wave 3:** complete D-23 removal and prove the final runtime, wheel metadata,
-  lock graph, docs, and package/platform inventories contain no native TensorFlow
-  support while custom handlers and NumPy/Blosc2 remain intact.
-- **After Wave 4:** generate branch-aware coverage evidence and run read-only
-      verification against the newly reviewed post-gap baseline.
-- **After Wave 5:** validate workflow/docs contracts; do not dispatch live or
-      controlled jobs from an untrusted PR.
-- **After Wave 6:** run fixed verifier quick/all modes plus adversarial dispatcher,
-      collector, aggregator, and publication-verifier tests.
-- **After Wave 7:** require exact-SHA quality/performance/live dispatch, recorded run-ID
-      waits, fixed-name downloads, envelope validation, and same-SHA aggregation.
-- **Phase gate (Wave 8):** satisfy the immutable policy/authority preflight, create
+  benchmark-harness, and live-harness self-tests. Specifically require all four
+  PostgreSQL gap selectors before Wave 3.
+- **After Wave 3:** generate branch-aware coverage evidence and run read-only
+  verification against the newly reviewed post-gap baseline.
+- **After Wave 4:** validate workflow/docs contracts; do not dispatch live or
+  controlled jobs from an untrusted PR.
+- **After Wave 5:** run fixed verifier quick/all modes plus adversarial dispatcher,
+  collector, aggregator, and publication-verifier tests.
+- **After Wave 6:** require exact-SHA quality/performance/live dispatch, recorded run-ID
+  waits, fixed-name downloads, envelope validation, and same-SHA aggregation.
+- **Phase gate (Wave 7):** satisfy the immutable policy/authority preflight, create
   and verify the exact draft, obtain report-digest-bound operator approval, publish,
   and verify immutable state without mutating the release.
 
 ## Validation Sign-Off Criteria
 
-- [ ] Every Plan 01-13 code-producing task has its exact automated command and evidence class; the publication checkpoint has an exact digest-bound resume signal.
-- [ ] Plan 08-13 proves no shipped TensorFlow dependency group, lock package, handler,
-      config field, registry/export identity, docs claim, or packaging/platform row
-      remains; a stored `tensorflow_tensor` contract fails through the existing typed
-      unsupported path and a user-defined custom handler still registers normally.
+- [ ] Every Plan 01-12 code-producing task has its exact automated command and evidence class; the publication checkpoint has an exact digest-bound resume signal.
 - [ ] Wave 0 creates every missing test/harness/workflow verifier before relying on it.
 - [ ] PostgreSQL DB-API classification, replay, pagination, and rollback selectors
       pass before coverage floors are captured.

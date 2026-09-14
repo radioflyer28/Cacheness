@@ -587,17 +587,14 @@ Plans:
   5. Inventory, reconciliation, statistics, clear, and aggregate operations demonstrate bounded memory and backend-call behavior without accidental N+1 access patterns.
   6. Qualify exact commits in isolated environments and retain failed-run evidence plus migration fixtures for deliberately supported source versions. Phase 5's PostgreSQL/Amazon-S3 candidate remains unqualified until its non-substitutable real-service gate passes here; unavailable services never count as passes. Historical compatibility tests may remain as evidence but are not release blockers for removed pre-production APIs/layouts. Windows remains UNAVAILABLE/NOT_QUALIFIED until Phase 999.1 supplies native evidence. Optimization must preserve one authority and may not introduce a projection-repair prerequisite for canonical operations.
 
-**Support-surface revision (2026-09-14):** Native TensorFlow support is removed before final Phase 8 qualification. Completed Plans 08-02/08-03 remain historical records, but their TensorFlow extra/profile claims are superseded by Plan 08-13. The final wheel, lock graph, handlers/config/exports, guides, package/platform evidence, and release claims contain no native TensorFlow support. Unknown stored `tensorflow_tensor` contracts fail through the existing versioned unsupported-handler boundary; the generic custom-handler registration seam remains available. NumPy, Blosc2, and dataframe/Parquet support are unchanged.
-
-**Plans**: 7/13 plans executed
+**Plans**: 7/12 plans executed
 
 Plans:
 
 - [x] 08-01-PLAN.md — Establish strict evidence classes and the deterministic exact-commit tracer.
-- [x] 08-02-PLAN.md — Qualify the base wheel and then-current optional groups in isolated environments; TensorFlow portions are superseded by 08-13.
-- [x] 08-03-PLAN.md — Encode supported Python/platform evidence and truthful Windows nonclaims; TensorFlow profile portions are superseded by 08-13.
+- [x] 08-02-PLAN.md — Qualify the base wheel and every optional group in isolated environments.
+- [x] 08-03-PLAN.md — Encode supported Python/platform evidence and truthful Windows nonclaims.
 - [x] 08-04-PLAN.md — Close named lifecycle and cache-policy coverage gaps.
-- [ ] 08-13-PLAN.md — Remove native TensorFlow support and prove its absence while preserving custom handlers and NumPy/Blosc2.
 - [ ] 08-05-PLAN.md — Record branch-aware coverage floors and direct Ruff ratchets.
 - [x] 08-06-PLAN.md — Prove structural backend-call and peak-memory bounds at scale.
 - [x] 08-07-PLAN.md — Build layer-separated format/hash benchmarks and controlled workflow.
@@ -619,7 +616,7 @@ Plans:
 | 6. UnifiedCache Policy Composition | 11/11 | Complete    | 2026-09-09 |
 | 7. Explicit Migration and Rebuild Cutover | 24/24 | Complete    | 2026-09-11 |
 | 07.1. Obstore Payload Participant Unification | 11/11 | Complete | 2026-09-13 |
-| 8. Production Gates and Performance Stabilization | 7/13 | In Progress|  |
+| 8. Production Gates and Performance Stabilization | 7/12 | In Progress|  |
 
 ## Backlog
 

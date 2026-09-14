@@ -150,15 +150,6 @@ None - local packaging qualification requires no external service configuration.
 - Later Phase 8 release tooling can consume the exact packaging evidence class without treating it as live-service evidence.
 - Platform qualification owns the compatible TensorFlow interpreter matrix; live PostgreSQL and AWS S3 remain dedicated evidence producers.
 
-## Post-Completion Supersession (2026-09-14)
-
-D-23 removes native TensorFlow support from the release. This summary remains an
-accurate historical record of Plan 08-02's implementation and commits, but its
-TensorFlow extra/probe/compatibility claims are no longer current release guidance.
-Plan 08-13 removes that dependency group, lock graph, runtime surface, and evidence
-slot before the remaining Phase 8 gates. The base, NumPy/Blosc2, dataframe/Parquet,
-S3, PostgreSQL, and cloud qualification work remains applicable.
-
 ## Self-Check: PASSED
 
 - Required runner, matrix tests, and evidence validator changes exist on disk.
