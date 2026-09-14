@@ -35,7 +35,7 @@ contract. Neither non-passing state may be relabeled as success.
 - macOS runs the public topology boundary smoke on Python 3.11 and 3.14. It
   complements Linux rather than replacing the full Linux matrix.
 - TensorFlow remains a retained optional handler only on compatible stable
-  Linux rows: Python 3.11, 3.12, and 3.13. It is not inferred from a core or
+  Linux rows: Python 3.11 and 3.12. It is not inferred from a core or
   dataframe result.
 - Python 3.15 is a continue-on-error advisory row. Its result informs future
   support work but does not qualify or disqualify the stable matrix.

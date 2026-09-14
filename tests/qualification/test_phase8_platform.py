@@ -95,7 +95,7 @@ def test_python_advisory_result_cannot_satisfy_or_invalidate_stable_slot(
 
 def test_python_tensorflow_profile_has_explicit_stable_compatibility(runner) -> None:
     """TensorFlow gaps are nonqualifying results, never skip-based qualification."""
-    assert runner.TENSORFLOW_COMPATIBLE_MINORS == ("3.11", "3.12", "3.13")
+    assert runner.TENSORFLOW_COMPATIBLE_MINORS == ("3.11", "3.12")
     rows = [
         runner.build_row(
             expected_os="Linux",

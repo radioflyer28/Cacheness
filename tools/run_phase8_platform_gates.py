@@ -22,7 +22,7 @@ EVIDENCE_PATH = REPOSITORY_ROOT / "tools" / "phase8_evidence.py"
 LOCAL_GATE_PATH = REPOSITORY_ROOT / "tools" / "run_phase8_local_gates.py"
 STABLE_PYTHON_MINORS = ("3.11", "3.12", "3.13", "3.14")
 ADVISORY_PYTHON_MINORS = ("3.15",)
-TENSORFLOW_COMPATIBLE_MINORS = ("3.11", "3.12", "3.13")
+TENSORFLOW_COMPATIBLE_MINORS = ("3.11", "3.12")
 MACOS_BOUNDARY_MINORS = ("3.11", "3.14")
 WINDOWS_BACKLOG_PHASE = "999.1"
 ADR_PROGRESS_OUTCOMES = ("success", "conflict", "typed_retryable")
@@ -83,7 +83,9 @@ with TemporaryDirectory() as temporary:
 
 def _load_evidence_module():
     """Load the sibling evidence contract when invoked outside package import."""
-    specification = importlib.util.spec_from_file_location("phase8_evidence", EVIDENCE_PATH)
+    specification = importlib.util.spec_from_file_location(
+        "phase8_evidence", EVIDENCE_PATH
+    )
     if specification is None or specification.loader is None:
         raise RuntimeError("Phase 8 evidence utility is unavailable")
     module = importlib.util.module_from_spec(specification)
@@ -268,9 +270,7 @@ def aggregate_platform_roles(rows: Sequence[Mapping[str, object]]) -> dict[str, 
     ]
     linux = aggregate_rows(linux_rows)
 
-    macos_slots = {
-        ("Darwin", minor, "core") for minor in MACOS_BOUNDARY_MINORS
-    }
+    macos_slots = {("Darwin", minor, "core") for minor in MACOS_BOUNDARY_MINORS}
     macos_seen: dict[tuple[str, str, str], dict[str, object]] = {}
     windows_rows: list[dict[str, object]] = []
     for row in validated:
@@ -284,7 +284,10 @@ def aggregate_platform_roles(rows: Sequence[Mapping[str, object]]) -> dict[str, 
         if row["expected_os"] == "Darwin":
             if slot not in macos_slots:
                 raise ValueError("macOS row is outside the boundary smoke matrix")
-            if row["actual_os"] != "Darwin" or row["actual_python_minor"] != row["python_minor"]:
+            if (
+                row["actual_os"] != "Darwin"
+                or row["actual_python_minor"] != row["python_minor"]
+            ):
                 raise ValueError("macOS boundary row has mismatched runtime identity")
             if slot in macos_seen:
                 raise ValueError("duplicate macOS boundary row")
@@ -332,7 +335,9 @@ def _git_revision() -> str:
     except (OSError, subprocess.SubprocessError) as error:
         raise RuntimeError("repository revision is unavailable") from error
     revision = completed.stdout.strip()
-    if len(revision) != 40 or any(character not in "0123456789abcdef" for character in revision):
+    if len(revision) != 40 or any(
+        character not in "0123456789abcdef" for character in revision
+    ):
         raise RuntimeError("repository revision is invalid")
     return revision
 
@@ -604,9 +609,13 @@ def run_platform_gate(
 def parse_arguments(arguments: Sequence[str] | None = None) -> argparse.Namespace:
     """Parse the bounded one-row command-line contract."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--expected-os", required=True, choices=sorted(_PLATFORM_ROLE_BY_OS))
+    parser.add_argument(
+        "--expected-os", required=True, choices=sorted(_PLATFORM_ROLE_BY_OS)
+    )
     parser.add_argument("--python-minor", required=True)
-    parser.add_argument("--feature-profile", required=True, choices=sorted(FEATURE_PROFILES))
+    parser.add_argument(
+        "--feature-profile", required=True, choices=sorted(FEATURE_PROFILES)
+    )
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--advisory", action="store_true")
     parser.add_argument("--timeout", type=int, default=900)

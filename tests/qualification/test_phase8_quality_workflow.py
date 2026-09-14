@@ -63,11 +63,13 @@ def test_quality_workflow_has_exact_non_live_matrix_and_least_permissions() -> N
         assert macos_minor in workflow
     assert "continue-on-error: true" in workflow
     assert "tensorflow" in workflow
-    assert "3.14" not in re.search(
+    tensorflow_job = re.search(
         r"tensorflow-compatible:(.*?)(?:\n  [a-z_-]+:|\Z)",
         workflow,
         flags=re.DOTALL,
     ).group(1)
+    assert "3.13" not in tensorflow_job
+    assert "3.14" not in tensorflow_job
 
 
 def test_quality_workflow_keeps_live_and_controlled_performance_out_of_pr_jobs() -> (
