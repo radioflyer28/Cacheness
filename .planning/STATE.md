@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 08
 current_phase_name: Production Gates and Performance Stabilization
 status: executing
-stopped_at: Completed 08-10-PLAN.md
-last_updated: "2026-09-14T03:59:49.871Z"
+stopped_at: Completed 08-13-PLAN.md
+last_updated: "2026-09-14T04:39:54.710Z"
 last_activity: 2026-09-14
 last_activity_desc: Phase 08 Plan 08 completed; protected real PostgreSQL/Amazon-S3 qualification machinery recorded
-state_head: 10379092c2d0bb15b7c540cd44d0025654cb961b
+state_head: 1bf044601e42393e663c2e98a4c0b1b572f0b150
 progress:
   total_phases: 9
   completed_phases: 7
-  total_plans: 128
-  completed_plans: 125
+  total_plans: 129
+  completed_plans: 126
 milestone_name: milestone
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-09-13)
 ## Current Position
 
 Phase: 08 — Production Gates and Performance Stabilization
-Plan: 11 of 12
+Plan: 12 of 12
 Status: Ready to execute
 Last activity: 2026-09-14 — Phase 08 Plan 08 completed; protected real PostgreSQL/Amazon-S3 qualification machinery recorded
 
@@ -204,6 +204,7 @@ the deliberately superseded Phase 03 plan; do not fabricate its completion.
 | Phase 08 P05 | 4020 | 2 tasks | 23 files |
 | Phase 08 P09 | 32min | 2 tasks | 8 files |
 | Phase 08 P10 | 3301s | 3 tasks | 4 files |
+| Phase 08 P13 | 12min | 1 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -497,6 +498,8 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - [Phase 08]: Phase 08 Plan 09 qualifies retained TensorFlow support only on Python 3.11 and 3.12, matching the package probe's declared compatible range.
 - [Phase 08]: Phase 08 Plan 10: exact-SHA release collection records fresh run IDs and fixed artifact names; latest-run selection is prohibited.
 - [Phase 08]: Phase 08 Plan 10: bounded UNAVAILABLE packaging/platform envelopes stay explicit release-blocking nonclaims rather than generic failures or passes.
+- [Phase 08]: Phase 08 Plan 13: Controlled-runner preflight emits bounded eligibility only; performance stability remains Plan 08-11 work.
+- [Phase 08]: Phase 08 Plan 13: Only cacheness-perf-linux-x64 plus clean detached exact SHA and canonical allow-listed digest can qualify capture.
 
 ### Pending Todos
 
@@ -526,6 +529,6 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 
 ## Session Continuity
 
-Last session: 2026-09-14T03:59:49.633Z
-Stopped at: Completed 08-10-PLAN.md
+Last session: 2026-09-14T04:39:54.462Z
+Stopped at: Completed 08-13-PLAN.md
 Resume file: None
