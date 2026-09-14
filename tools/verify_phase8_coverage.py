@@ -80,6 +80,16 @@ POSTGRESQL_SELECTOR_FAMILIES = (
     "postgresql_transaction_rollback",
 )
 
+NON_LIVE_MARKER_EXPRESSION = "not (live_postgresql or live_aws_s3 or live_remote)"
+DEFAULT_MEASUREMENT_COMMAND = (
+    "uv run --isolated --all-extras --group dev --frozen pytest "
+    "-q -o log_cli=false "
+    f"-m '{NON_LIVE_MARKER_EXPRESSION}' "
+    "--cov=cacheness --cov-branch "
+    "--cov-report=json:build/phase8/coverage.json "
+    "--cov-report=xml:build/phase8/coverage.xml"
+)
+
 # The fixed scope represents the complete Phase 8 lifecycle, cache-policy,
 # qualification, and packaging surface already delivered by prior plans.  New
 # changed Python files are added separately from a safely parsed Git diff.
@@ -706,12 +716,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument(
         "--command",
-        default=(
-            "uv run --isolated --all-extras --group dev --frozen pytest "
-            "-q -o log_cli=false -m 'not live_remote' --cov=cacheness --cov-branch "
-            "--cov-report=json:build/phase8/coverage.json "
-            "--cov-report=xml:build/phase8/coverage.xml"
-        ),
+        default=DEFAULT_MEASUREMENT_COMMAND,
         help="measurement command recorded in a baseline capture",
     )
     parser.add_argument(

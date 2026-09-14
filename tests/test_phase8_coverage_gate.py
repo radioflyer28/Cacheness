@@ -239,3 +239,15 @@ def test_ruff_scope_is_bounded_and_contains_fixed_critical_inventory(
     scope = verifier.build_ruff_scope(["src/cacheness/core.py"])
     assert "src/cacheness/core.py" in scope
     assert set(verifier.RUFF_CRITICAL_PATHS).issubset(scope)
+
+
+def test_default_measurement_command_excludes_every_live_service_marker() -> None:
+    verifier = _load_verifier()
+
+    assert verifier.NON_LIVE_MARKER_EXPRESSION == (
+        "not (live_postgresql or live_aws_s3 or live_remote)"
+    )
+    assert (
+        f"-m '{verifier.NON_LIVE_MARKER_EXPRESSION}'"
+        in verifier.DEFAULT_MEASUREMENT_COMMAND
+    )
