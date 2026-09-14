@@ -185,10 +185,12 @@ class _AuthorityReconciler:
             raise TypeError("apply must be a boolean")
         if now is not None and now.tzinfo is None:
             raise ValueError("reconciliation requires a timezone-aware clock")
-        run_token, snapshot, mutation_cursor, debt_cursor, inventory_cursor = self._resume_state(
-            apply=apply, resume_token=resume_token
+        run_token, snapshot, mutation_cursor, debt_cursor, inventory_cursor = (
+            self._resume_state(apply=apply, resume_token=resume_token)
         )
-        deadline = time.monotonic() + self.lifecycle_limits.authority_busy_timeout_seconds
+        deadline = (
+            time.monotonic() + self.lifecycle_limits.authority_busy_timeout_seconds
+        )
         row_budget = self.lifecycle_limits.operation_page_size
         action_budget = self.lifecycle_limits.max_reconcile_actions
         byte_budget = self.lifecycle_limits.max_operation_record_bytes
@@ -327,7 +329,9 @@ class _AuthorityReconciler:
         """Report one bounded participant page without deriving lifecycle authority."""
         participant = self.store._materialize_authority_store()
         capabilities = getattr(participant, "topology_capabilities", {})
-        if not isinstance(capabilities, Mapping) or not capabilities.get("listing", False):
+        if not isinstance(capabilities, Mapping) or not capabilities.get(
+            "listing", False
+        ):
             return (), None
         inventory_page = getattr(participant, "inventory_page", None)
         if not callable(inventory_page):
@@ -344,7 +348,9 @@ class _AuthorityReconciler:
         for item in objects:
             locator = getattr(item, "locator", None)
             if not isinstance(locator, str) or not locator:
-                raise CacheStorageError("payload inventory evidence object is malformed")
+                raise CacheStorageError(
+                    "payload inventory evidence object is malformed"
+                )
             locators.append(locator)
         owned_locators = self._inventory_locator_attribution(snapshot, tuple(locators))
 
@@ -404,7 +410,9 @@ class _AuthorityReconciler:
         if not isinstance(result, frozenset) or not all(
             isinstance(locator, str) and locator in locators for locator in result
         ):
-            raise CacheStorageError("payload inventory authority attribution is malformed")
+            raise CacheStorageError(
+                "payload inventory authority attribution is malformed"
+            )
         return result
 
     @staticmethod
@@ -462,7 +470,9 @@ class _AuthorityReconciler:
         authoritative_generation = None
         try:
             if current is not None:
-                manifest = self.store._authenticated_authority_manifest(current.manifest)
+                manifest = self.store._authenticated_authority_manifest(
+                    current.manifest
+                )
                 authoritative_generation = manifest.generation
                 if manifest.locator == debt.locator:
                     raise CacheBlobLifecycleConflictError(
@@ -519,7 +529,9 @@ class _AuthorityReconciler:
                 action = ReconciliationAction.REPORT_ONLY
                 reason = "mutation_not_pending"
             elif current is not None:
-                manifest = self.store._authenticated_authority_manifest(current.manifest)
+                manifest = self.store._authenticated_authority_manifest(
+                    current.manifest
+                )
                 authoritative_generation = manifest.generation
                 if manifest.locator == spec.candidate_locator:
                     status = ReconciliationStatus.BLOCKED
@@ -643,9 +655,9 @@ class _AuthorityReconciler:
             "run_id": None if run_token is None else run_token.value,
             "version": 1,
         }
-        encoded = json.dumps(
-            payload, sort_keys=True, separators=(",", ":")
-        ).encode("utf-8")
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
         signature = hmac.new(
             self.store._authority_manifest_key(initialize_new_store=False),
             self._TOKEN_DOMAIN + encoded,
@@ -659,11 +671,15 @@ class _AuthorityReconciler:
         try:
             raw = base64.urlsafe_b64decode(token.encode("ascii"))
             encoded, signature = raw.rsplit(b".", 1)
-            expected = hmac.new(
-                self.store._authority_manifest_key(initialize_new_store=False),
-                self._TOKEN_DOMAIN + encoded,
-                hashlib.sha256,
-            ).hexdigest().encode("ascii")
+            expected = (
+                hmac.new(
+                    self.store._authority_manifest_key(initialize_new_store=False),
+                    self._TOKEN_DOMAIN + encoded,
+                    hashlib.sha256,
+                )
+                .hexdigest()
+                .encode("ascii")
+            )
             payload = json.loads(encoded)
         except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ValueError("Reconciliation resume token is malformed") from exc

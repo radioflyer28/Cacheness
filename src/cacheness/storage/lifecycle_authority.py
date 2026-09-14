@@ -21,7 +21,11 @@ _MAX_MANIFEST_BYTES = 1024 * 1024
 
 
 def _bounded_text(value: str, field_name: str) -> str:
-    if not isinstance(value, str) or not value or len(value.encode("utf-8")) > _MAX_TEXT_BYTES:
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value.encode("utf-8")) > _MAX_TEXT_BYTES
+    ):
         raise ValueError(f"{field_name} must be a non-empty bounded string")
     return value
 
@@ -46,9 +50,14 @@ class EntryExpectation:
                 _bounded_text(value, field_name)
         if self.manifest_digest is not None and (
             len(self.manifest_digest) != 64
-            or any(character not in "0123456789abcdef" for character in self.manifest_digest)
+            or any(
+                character not in "0123456789abcdef"
+                for character in self.manifest_digest
+            )
         ):
-            raise ValueError("manifest_digest must be a lowercase SHA-256 hexadecimal value")
+            raise ValueError(
+                "manifest_digest must be a lowercase SHA-256 hexadecimal value"
+            )
 
     @classmethod
     def absent(cls) -> "EntryExpectation":
@@ -69,7 +78,10 @@ class EntrySnapshot:
     def __post_init__(self) -> None:
         for field_name in ("key", "generation", "locator"):
             _bounded_text(getattr(self, field_name), field_name)
-        if not isinstance(self.manifest, bytes) or len(self.manifest) > _MAX_MANIFEST_BYTES:
+        if (
+            not isinstance(self.manifest, bytes)
+            or len(self.manifest) > _MAX_MANIFEST_BYTES
+        ):
             raise ValueError("manifest must be bounded bytes")
         if self.expectation.generation != self.generation:
             raise ValueError("entry expectation generation must corroborate the entry")
@@ -81,7 +93,9 @@ class EntrySnapshot:
             or not self.transport_evidence
             or len(self.transport_evidence) > MAX_TRANSPORT_EVIDENCE_BYTES
         ):
-            raise ValueError("transport_evidence must be bounded authenticated bytes or None")
+            raise ValueError(
+                "transport_evidence must be bounded authenticated bytes or None"
+            )
 
 
 @dataclass(frozen=True)
@@ -101,7 +115,10 @@ class MutationSpec:
     def __post_init__(self) -> None:
         for field_name in ("operation_id", "key", "generation", "candidate_locator"):
             _bounded_text(getattr(self, field_name), field_name)
-        if not isinstance(self.manifest, bytes) or len(self.manifest) > _MAX_MANIFEST_BYTES:
+        if (
+            not isinstance(self.manifest, bytes)
+            or len(self.manifest) > _MAX_MANIFEST_BYTES
+        ):
             raise ValueError("manifest must be bounded bytes")
 
     @classmethod
@@ -148,18 +165,25 @@ class VerificationProof:
     transport_evidence: bytes | None = None
 
     def __post_init__(self) -> None:
-        if len(self.digest) != 64 or any(char not in "0123456789abcdef" for char in self.digest):
+        if len(self.digest) != 64 or any(
+            char not in "0123456789abcdef" for char in self.digest
+        ):
             raise ValueError("digest must be a lowercase SHA-256 hexadecimal value")
         if not isinstance(self.byte_size, int) or self.byte_size < 0:
             raise ValueError("byte_size must be a non-negative integer")
-        if not isinstance(self.manifest, bytes) or len(self.manifest) > _MAX_MANIFEST_BYTES:
+        if (
+            not isinstance(self.manifest, bytes)
+            or len(self.manifest) > _MAX_MANIFEST_BYTES
+        ):
             raise ValueError("manifest must be bounded bytes")
         if self.transport_evidence is not None and (
             not isinstance(self.transport_evidence, bytes)
             or not self.transport_evidence
             or len(self.transport_evidence) > MAX_TRANSPORT_EVIDENCE_BYTES
         ):
-            raise ValueError("transport_evidence must be bounded authenticated bytes or None")
+            raise ValueError(
+                "transport_evidence must be bounded authenticated bytes or None"
+            )
 
 
 @dataclass(frozen=True)
@@ -235,7 +259,9 @@ class MutationReplay:
                 and self.verification.manifest
                 and self.prepared.spec.manifest != self.verification.manifest
             ):
-                raise ValueError("verification descriptor differs from prepared descriptor")
+                raise ValueError(
+                    "verification descriptor differs from prepared descriptor"
+                )
         if self.state == "prepared":
             if self.promotion is not None:
                 raise ValueError("prepared replay cannot carry a promotion result")
@@ -256,9 +282,16 @@ class MutationReplay:
             else spec.manifest
         )
         if descriptor and entry.manifest != descriptor:
-            raise ValueError("promotion result descriptor is incompatible with the replay")
-        if any(debt.operation_id != self.prepared.operation_id for debt in self.promotion.cleanup_debt):
-            raise ValueError("promotion cleanup debt does not belong to the replayed operation")
+            raise ValueError(
+                "promotion result descriptor is incompatible with the replay"
+            )
+        if any(
+            debt.operation_id != self.prepared.operation_id
+            for debt in self.promotion.cleanup_debt
+        ):
+            raise ValueError(
+                "promotion cleanup debt does not belong to the replayed operation"
+            )
 
 
 @dataclass(frozen=True)

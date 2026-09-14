@@ -112,7 +112,10 @@ def _normalize_function_args(
     try:
         signature = inspect.signature(func)
     except (TypeError, ValueError):
-        return {**{f"__arg_{index}": value for index, value in enumerate(args)}, **kwargs}
+        return {
+            **{f"__arg_{index}": value for index, value in enumerate(args)},
+            **kwargs,
+        }
     bound = signature.bind(*args, **kwargs)
     bound.apply_defaults()
     return dict(bound.arguments)
@@ -275,7 +278,9 @@ class UnifiedCache:
 
         raw = self._plain_value(snapshot.metadata)
         if not isinstance(raw, dict):
-            self._raise_malformed_policy_facts("Cache policy snapshot metadata is invalid")
+            self._raise_malformed_policy_facts(
+                "Cache policy snapshot metadata is invalid"
+            )
         file_size = raw.get("file_size")
         created_at = raw.get("created_at")
         catalog = raw.get("catalog")
@@ -368,7 +373,11 @@ class UnifiedCache:
         self, cache_key: str
     ) -> tuple[Any | None, dict[str, Any] | None]:
         snapshot = self._cache_blob_store.get_entry_info(cache_key)
-        return (snapshot, self._cache_entry(snapshot)) if snapshot is not None else (None, None)
+        return (
+            (snapshot, self._cache_entry(snapshot))
+            if snapshot is not None
+            else (None, None)
+        )
 
     def _is_expired(
         self,
@@ -570,8 +579,13 @@ class UnifiedCache:
             raise ValueError("maintenance state must be a CacheMaintenanceState")
         if state.composition_fingerprint != self._maintenance_composition_fingerprint():
             raise ValueError("maintenance state belongs to another cache composition")
-        if state.configuration_fingerprint != self._maintenance_configuration_fingerprint():
-            raise ValueError("maintenance state does not match the active policy configuration")
+        if (
+            state.configuration_fingerprint
+            != self._maintenance_configuration_fingerprint()
+        ):
+            raise ValueError(
+                "maintenance state does not match the active policy configuration"
+            )
         if state.encoded_size > self.config.policy.max_maintenance_state_bytes:
             raise ValueError("maintenance state exceeds the configured byte bound")
         expected_signature = hmac.new(
@@ -778,7 +792,9 @@ class UnifiedCache:
             excess_bytes=state.excess_bytes,
         )
 
-    def _run_size_maintenance(self, state: CacheMaintenanceState) -> CacheMaintenanceResult:
+    def _run_size_maintenance(
+        self, state: CacheMaintenanceState
+    ) -> CacheMaintenanceResult:
         """Execute one finite inventory, eviction, or verification step only."""
 
         try:
@@ -826,7 +842,9 @@ class UnifiedCache:
         return self._run_size_maintenance(state)
 
     @_clear_coordinated
-    def resume_maintenance(self, state: CacheMaintenanceState) -> CacheMaintenanceResult:
+    def resume_maintenance(
+        self, state: CacheMaintenanceState
+    ) -> CacheMaintenanceResult:
         """Resume exactly one validated policy-maintenance step.
 
         This method neither schedules background work nor loops through later
@@ -914,7 +932,9 @@ class UnifiedCache:
         """Commit one decorated result with its authenticated function namespace."""
 
         if (namespace is None) != (cache_key is None):
-            raise ValueError("function namespace and cache key must be supplied together")
+            raise ValueError(
+                "function namespace and cache key must be supplied together"
+            )
         if namespace is None:
             namespace, cache_key = self._function_cache_key(func, args, kwargs)
         assert cache_key is not None
@@ -1004,7 +1024,9 @@ class UnifiedCache:
                             CacheOutcome.EXPIRED, removal=removal
                         )
                     else:
-                        result = CacheLookupResult(CacheOutcome.HIT, value=snapshot.read())
+                        result = CacheLookupResult(
+                            CacheOutcome.HIT, value=snapshot.read()
+                        )
         except (
             CacheBlobIntegrityError,
             CacheBlobLifecycleConflictError,
@@ -1097,9 +1119,7 @@ class UnifiedCache:
         namespace = self.function_namespace(func)
         return self.invalidate_where(
             CatalogQuery(
-                predicates=(
-                    CatalogPredicate("function_namespace", "eq", namespace),
-                ),
+                predicates=(CatalogPredicate("function_namespace", "eq", namespace),),
                 page_size=page_size,
             ),
             cursor=cursor,

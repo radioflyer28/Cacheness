@@ -162,7 +162,11 @@ def test_optional_groups_get_fresh_wheel_requirements_and_non_live_probes(
     assert len(calls) == len(runner.OPTIONAL_GROUPS) - 1
     assert all("--isolated" in command for command, _workspace in calls)
     assert all("--no-project" in command for command, _workspace in calls)
-    assert all(result.non_live for result in results if result.name in {"s3", "postgresql", "cloud"})
+    assert all(
+        result.non_live
+        for result in results
+        if result.name in {"s3", "postgresql", "cloud"}
+    )
     tensorflow = next(result for result in results if result.name == "tensorflow")
     assert tensorflow.compatibility == "INCOMPATIBLE"
     assert tensorflow.probes == ("tensorflow_incompatible_platform",)
@@ -183,7 +187,11 @@ def test_optional_group_wheel_qualification_runs_each_compatible_extra(
 
     assert [result.name for result in results] == list(runner.OPTIONAL_GROUPS)
     assert all(result.requirement.startswith(str(artifact.path)) for result in results)
-    assert all(result.non_live for result in results if result.name in {"s3", "postgresql", "cloud"})
+    assert all(
+        result.non_live
+        for result in results
+        if result.name in {"s3", "postgresql", "cloud"}
+    )
     tensorflow = next(result for result in results if result.name == "tensorflow")
     assert tensorflow.compatibility == "INCOMPATIBLE"
 
@@ -208,7 +216,10 @@ def test_packaging_evidence_allows_only_the_reviewed_sanitized_pass_shape() -> N
         "wheel_sha256": "a" * 64,
         "python": "3.12.9",
         "platform": "Linux-x86_64",
-        "probes": ["base:public_exports", "dataframes:pandas_polars_parquet_round_trip"],
+        "probes": [
+            "base:public_exports",
+            "dataframes:pandas_polars_parquet_round_trip",
+        ],
         "optional_groups": [
             "recommended",
             "dataframes",

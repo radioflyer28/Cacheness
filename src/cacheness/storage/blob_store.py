@@ -87,11 +87,27 @@ logger = logging.getLogger(__name__)
 
 _IMMUTABLE_METADATA_PATCH_FIELDS = frozenset(
     {
-        "schema_version", "key", "cache_key", "generation", "state", "locator",
-        "actual_path", "handler_type", "data_type", "payload_format",
-        "payload_format_version", "storage_format", "digest_algorithm", "digest",
-        "byte_size", "file_size", "created_at", "handler_metadata", "user_metadata",
-        "signature_algorithm", "signature",
+        "schema_version",
+        "key",
+        "cache_key",
+        "generation",
+        "state",
+        "locator",
+        "actual_path",
+        "handler_type",
+        "data_type",
+        "payload_format",
+        "payload_format_version",
+        "storage_format",
+        "digest_algorithm",
+        "digest",
+        "byte_size",
+        "file_size",
+        "created_at",
+        "handler_metadata",
+        "user_metadata",
+        "signature_algorithm",
+        "signature",
     }
 )
 _RETIRED_SCHEDULER_CONTROL_SENTINELS = (
@@ -137,11 +153,13 @@ def _retired_scheduler_control(root: Path) -> str | None:
 
 def _ordinary_admitted(method: Callable) -> Callable:
     """Order ordinary work locally and reject immutable legacy evidence first."""
+
     @wraps(method)
     def wrapped(self, *args, **kwargs):
         self._require_canonical_store()
         with self._instance_admission.operation():
             return method(self, *args, **kwargs)
+
     return wrapped
 
 
@@ -230,7 +248,10 @@ class BlobStore:
             self._manifest_key_provider = manifest_key_provider
         elif self._is_memory_topology():
             self._manifest_key_provider = _EphemeralManifestKeyProvider()
-        elif self.topology.qualified_profile.requirements.coordination_scope == "multiple_hosts":
+        elif (
+            self.topology.qualified_profile.requirements.coordination_scope
+            == "multiple_hosts"
+        ):
             raise CacheBlobBackendError(
                 "A multi-host BlobStore requires an external manifest signing key",
                 context={"operation": "blob_store_composition", "stage": "signing_key"},
@@ -266,7 +287,9 @@ class BlobStore:
             controller = ProjectionController(
                 self,
                 projection,
-                page_size=getattr(projection, "projection_page_size", DEFAULT_PAGE_SIZE),
+                page_size=getattr(
+                    projection, "projection_page_size", DEFAULT_PAGE_SIZE
+                ),
                 work_cap=getattr(projection, "projection_work_cap", None),
                 query=query,
                 schema=schema,
@@ -276,7 +299,9 @@ class BlobStore:
                 ),
             )
             if controller.projection_name in names:
-                raise TypeError("ProjectionSink names must be unique within one BlobStore")
+                raise TypeError(
+                    "ProjectionSink names must be unique within one BlobStore"
+                )
             names.add(controller.projection_name)
             controllers.append(controller)
         return tuple(controllers)
@@ -284,7 +309,9 @@ class BlobStore:
     def _receipt_for_result(self, result: Any) -> BlobReceipt:
         """Freeze the canonical authority result before any derived attempt."""
         if result.promoted is None:
-            raise CacheBlobLifecycleConflictError("Committed put lacks an authority entry")
+            raise CacheBlobLifecycleConflictError(
+                "Committed put lacks an authority entry"
+            )
         return BlobReceipt(
             operation_id=result.operation_id,
             key=result.promoted.key,
@@ -363,7 +390,10 @@ class BlobStore:
         # the canonical worker fence before any payload or key material work.
         self._require_canonical_store()
         self._materialize_authority_store()
-        if self.topology.qualified_profile.requirements.coordination_scope == "multiple_hosts":
+        if (
+            self.topology.qualified_profile.requirements.coordination_scope
+            == "multiple_hosts"
+        ):
             # A remote authority must not materialize its catalog merely to
             # decide whether an application-owned shared key exists. The
             # injected provider is already an explicit topology prerequisite.
@@ -528,7 +558,6 @@ class BlobStore:
         self._run_post_commit_projections(self._receipt_for_result(result))
         return result.key
 
-
     def _put_with_result_admitted(
         self,
         data: Any,
@@ -542,8 +571,11 @@ class BlobStore:
         """Store one payload after validation and exactly one public admission."""
         catalog = self._prepare_catalog_write(catalog_schema, catalog_values)
         blob_key = (
-            self._compute_content_hash(data) if self.content_addressable
-            else key if key is not None else self._generate_unique_key()
+            self._compute_content_hash(data)
+            if self.content_addressable
+            else key
+            if key is not None
+            else self._generate_unique_key()
         )
         return self.lifecycle.put(
             data,
@@ -580,7 +612,6 @@ class BlobStore:
             catalog_schema.fingerprint,
             values,
         )
-
 
     @_ordinary_admitted
     def get(self, key: str) -> Optional[Any]:
@@ -650,9 +681,7 @@ class BlobStore:
         return patch
 
     @_ordinary_admitted
-    def delete(
-        self, key: str, *, expected: EntryExpectation | None = None
-    ) -> bool:
+    def delete(self, key: str, *, expected: EntryExpectation | None = None) -> bool:
         """Tombstone one observed generation and delete its exact payload."""
         deleted = self.lifecycle.delete(key=key, expected=expected)
         return deleted
@@ -723,7 +752,8 @@ class BlobStore:
         if work_cap is None:
             effective_work_cap = (
                 max(effective_limit, DEFAULT_PAGE_SIZE)
-                if isinstance(effective_limit, int) and not isinstance(effective_limit, bool)
+                if isinstance(effective_limit, int)
+                and not isinstance(effective_limit, bool)
                 else DEFAULT_PAGE_SIZE
             )
         else:
@@ -804,14 +834,18 @@ class BlobStore:
         return cleared
 
     def reconcile(
-        self, *, apply: bool = False, resume_token: str | None = None, now: Any | None = None
+        self,
+        *,
+        apply: bool = False,
+        resume_token: str | None = None,
+        now: Any | None = None,
     ) -> ReconciliationReport:
         """Inspect or settle only authority-recorded lifecycle debt."""
         with self._instance_admission.operation():
             self._require_canonical_store()
-            report = _AuthorityReconciler(self, lifecycle_limits=self.lifecycle_limits).reconcile(
-                apply=apply, resume_token=resume_token, now=now
-            )
+            report = _AuthorityReconciler(
+                self, lifecycle_limits=self.lifecycle_limits
+            ).reconcile(apply=apply, resume_token=resume_token, now=now)
         return report
 
     def close(self) -> None:
@@ -836,7 +870,10 @@ class BlobStore:
             self._instance_admission.finish_close(closed=closed)
 
     def _release_owned_resources(self) -> None:
-        if self.guarded_handler_io is not None and not self._guarded_handler_io_released:
+        if (
+            self.guarded_handler_io is not None
+            and not self._guarded_handler_io_released
+        ):
             # The unified obstore participant is itself the guarded I/O object.
             # Its close belongs exclusively to StoreTopology's ownership ledger:
             # closing it here would double-close a store-owned provider or adopt
@@ -877,11 +914,15 @@ class BlobStore:
     def _authority_manifest_key(self, *, initialize_new_store: bool = False) -> bytes:
         """Read or initialize the authority trust root at its lifecycle boundary."""
         context = {
-            "operation": "initialize_manifest_key" if initialize_new_store else "get_manifest_key",
+            "operation": "initialize_manifest_key"
+            if initialize_new_store
+            else "get_manifest_key",
             "provider": type(self._manifest_key_provider).__name__,
         }
         try:
-            initialize_or_get = getattr(self._manifest_key_provider, "get_or_initialize_new_store", None)
+            initialize_or_get = getattr(
+                self._manifest_key_provider, "get_or_initialize_new_store", None
+            )
             if initialize_new_store and callable(initialize_or_get):
                 key = initialize_or_get()
             else:
@@ -890,7 +931,9 @@ class BlobStore:
                 except ManifestKeyError:
                     if not initialize_new_store:
                         raise
-                    initializer = getattr(self._manifest_key_provider, "initialize_new_store", None)
+                    initializer = getattr(
+                        self._manifest_key_provider, "initialize_new_store", None
+                    )
                     if not callable(initializer):
                         raise
                     key = initializer()
@@ -919,7 +962,9 @@ class BlobStore:
                 "Authority manifest schema version is unsupported"
             ) from exc
         except CacheManifestIntegrityError as exc:
-            raise CacheBlobManifestMalformedError("Authority manifest is malformed") from exc
+            raise CacheBlobManifestMalformedError(
+                "Authority manifest is malformed"
+            ) from exc
         try:
             verify_current_manifest(manifest, self._authority_manifest_key())
         except CacheManifestIntegrityError as exc:
@@ -954,17 +999,23 @@ class BlobStore:
         try:
             if callable(resolver):
                 return resolver(
-                    manifest.handler_type, manifest.payload_format, manifest.payload_format_version
+                    manifest.handler_type,
+                    manifest.payload_format,
+                    manifest.payload_format_version,
                 )
             handler = self.handlers.get_handler_by_type(manifest.handler_type)
             declared_format = manifest.handler_metadata.get("storage_format")
-            if declared_format != manifest.payload_format or manifest.payload_format_version != 1:
+            if (
+                declared_format != manifest.payload_format
+                or manifest.payload_format_version != 1
+            ):
                 raise CacheManifestUnsupportedVersionError(
                     "Canonical manifest declares an unsupported native payload contract"
                 )
             return handler
         except (CacheManifestUnsupportedVersionError, ValueError) as exc:
             from cacheness.error_handling import CacheBlobPayloadUnsupportedVersionError
+
             raise CacheBlobPayloadUnsupportedVersionError(
                 "Canonical BlobStore payload contract is unsupported"
             ) from exc
@@ -972,9 +1023,12 @@ class BlobStore:
     @staticmethod
     def _handler_metadata(manifest: BlobManifest) -> Dict[str, Any]:
         return {
-            **dict(manifest.user_metadata), **dict(manifest.handler_metadata),
-            "cache_key": manifest.key, "data_type": manifest.handler_type,
-            "storage_format": manifest.payload_format, "file_size": manifest.byte_size,
+            **dict(manifest.user_metadata),
+            **dict(manifest.handler_metadata),
+            "cache_key": manifest.key,
+            "data_type": manifest.handler_type,
+            "storage_format": manifest.payload_format,
+            "file_size": manifest.byte_size,
             "created_at": manifest.created_at,
         }
 
@@ -985,7 +1039,8 @@ class BlobStore:
             "file_size": manifest.byte_size,
             "created_at": manifest.created_at,
             "metadata": {
-                **dict(manifest.user_metadata), **dict(manifest.handler_metadata),
+                **dict(manifest.user_metadata),
+                **dict(manifest.handler_metadata),
                 "actual_path": manifest.locator,
             },
             "catalog": {
@@ -999,6 +1054,7 @@ class BlobStore:
 
     def _compute_content_hash(self, data: Any) -> str:
         import pickle
+
         try:
             serialized = pickle.dumps(data)
         except Exception:

@@ -154,6 +154,23 @@ def test_requires_literal_postgresql_selector_families() -> None:
         )
 
 
+def test_named_selector_ast_validation_accepts_only_module_level_tests(
+    tmp_path: Path,
+) -> None:
+    verifier = _load_verifier()
+    source_path = tmp_path / "selector_source.py"
+    source_path.write_text(
+        "class TestNested:\n"
+        "    def test_not_module_level(self):\n"
+        "        pass\n\n"
+        "def test_module_level():\n"
+        "    pass\n",
+        encoding="utf-8",
+    )
+
+    assert verifier._top_level_test_names(source_path) == {"test_module_level"}
+
+
 def test_rejects_baseline_with_an_omitted_named_contract(tmp_path: Path) -> None:
     verifier = _load_verifier()
     baseline_path = tmp_path / "baseline.json"

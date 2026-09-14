@@ -140,7 +140,9 @@ class SqliteLifecycleAuthority:
             else lifecycle_topology
         )
         if not isinstance(self.lifecycle_topology, LifecycleAuthorityTopology):
-            raise TypeError("lifecycle_topology must be a LifecycleAuthorityTopology instance")
+            raise TypeError(
+                "lifecycle_topology must be a LifecycleAuthorityTopology instance"
+            )
         self._owner_pid = os.getpid()
         self._state_lock = Lock()
         self._bootstrap_lock = Lock()
@@ -183,7 +185,9 @@ class SqliteLifecycleAuthority:
 
     def _now(self) -> float:
         """Resolve the production clock lazily while retaining an explicit test seam."""
-        clock = time.monotonic if self._monotonic_clock is None else self._monotonic_clock
+        clock = (
+            time.monotonic if self._monotonic_clock is None else self._monotonic_clock
+        )
         return clock()
 
     def _deadline_timeout(
@@ -316,14 +320,18 @@ class SqliteLifecycleAuthority:
             reserved_stat = reserved.lstat()
         except FileNotFoundError:
             return "ready" if not any(self.root.iterdir()) else "established"
-        if not stat.S_ISDIR(reserved_stat.st_mode) or stat.S_ISLNK(reserved_stat.st_mode):
+        if not stat.S_ISDIR(reserved_stat.st_mode) or stat.S_ISLNK(
+            reserved_stat.st_mode
+        ):
             return "invalid_reserved_directory"
 
         try:
             database_stat = self.path.lstat()
         except FileNotFoundError:
             return "ready" if not any(reserved.iterdir()) else "established"
-        if not stat.S_ISREG(database_stat.st_mode) or stat.S_ISLNK(database_stat.st_mode):
+        if not stat.S_ISREG(database_stat.st_mode) or stat.S_ISLNK(
+            database_stat.st_mode
+        ):
             return "invalid_authority"
         return "authority"
 
@@ -376,8 +384,8 @@ class SqliteLifecycleAuthority:
             "Select-Object -First 1 -ExpandProperty SID); "
             "if (-not $logonSid) { throw 'No current-token logon SID found.' }; "
             "icacls.exe $root /inheritance:r; "
-            "icacls.exe $root /grant:r \"*$logonSid:(OI)(CI)(M)\" "
-            "\"*S-1-5-18:(OI)(CI)(RX)\" \"*S-1-5-32-544:(OI)(CI)(RX)\"; "
+            'icacls.exe $root /grant:r "*$logonSid:(OI)(CI)(M)" '
+            '"*S-1-5-18:(OI)(CI)(RX)" "*S-1-5-32-544:(OI)(CI)(RX)"; '
             "icacls.exe $root /verify"
         )
 
@@ -405,7 +413,9 @@ class SqliteLifecycleAuthority:
     def _current_windows_logon_sid(self) -> str:
         result = self._run_windows_command(["whoami", "/groups", "/fo", "csv", "/nh"])
         if result.returncode != 0:
-            self._raise_windows_topology_error("Current token logon SID cannot be inspected")
+            self._raise_windows_topology_error(
+                "Current token logon SID cannot be inspected"
+            )
         for row in csv.reader(result.stdout.splitlines()):
             for value in row:
                 if value.startswith("S-1-5-5-") and value.count("-") == 5:
@@ -428,7 +438,14 @@ class SqliteLifecycleAuthority:
             "inherited = $_.IsInherited } }) } | ConvertTo-Json -Compress"
         )
         result = self._run_windows_command(
-            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script, str(self.root)]
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                script,
+                str(self.root),
+            ]
         )
         if result.returncode != 0:
             self._raise_windows_topology_error("Windows root ACL cannot be inspected")
@@ -477,28 +494,40 @@ class SqliteLifecycleAuthority:
             or evidence["protected"] is not True
             or not isinstance(rules, list)
         ):
-            self._raise_windows_topology_error("Windows lifecycle root DACL is unprovable")
+            self._raise_windows_topology_error(
+                "Windows lifecycle root DACL is unprovable"
+            )
 
         allowed_non_mutating = {"S-1-5-18", "S-1-5-32-544"}
         logon_mutation_grant = False
         for rule in rules:
             if not isinstance(rule, dict):
-                self._raise_windows_topology_error("Windows lifecycle root DACL is malformed")
+                self._raise_windows_topology_error(
+                    "Windows lifecycle root DACL is malformed"
+                )
             sid = rule.get("sid")
             inherited = rule.get("inherited")
             access_type = rule.get("type")
             mutates = self._windows_rights_allow_mutation(rule.get("rights"))
             if not isinstance(sid, str) or not sid or inherited is not False:
-                self._raise_windows_topology_error("Windows lifecycle root DACL has drifted")
+                self._raise_windows_topology_error(
+                    "Windows lifecycle root DACL has drifted"
+                )
             if access_type != "Allow":
-                self._raise_windows_topology_error("Windows lifecycle root DACL has unsupported ACEs")
+                self._raise_windows_topology_error(
+                    "Windows lifecycle root DACL has unsupported ACEs"
+                )
             if sid == logon_sid:
                 logon_mutation_grant = logon_mutation_grant or mutates
                 continue
             if sid == account_sid or mutates or sid not in allowed_non_mutating:
-                self._raise_windows_topology_error("Windows lifecycle root DACL has unsafe grants")
+                self._raise_windows_topology_error(
+                    "Windows lifecycle root DACL has unsafe grants"
+                )
         if not logon_mutation_grant:
-            self._raise_windows_topology_error("Windows lifecycle root lacks the logon-SID mutation grant")
+            self._raise_windows_topology_error(
+                "Windows lifecycle root lacks the logon-SID mutation grant"
+            )
 
     def _validate_mutation_topology(self) -> None:
         """Reject unsupported declared topology before SQLite or payload effects."""
@@ -532,7 +561,9 @@ class SqliteLifecycleAuthority:
         """
         started_at = self._now()
         with self._connection(
-            mutation=True, deadline=self._deadline(None), started_at=started_at,
+            mutation=True,
+            deadline=self._deadline(None),
+            started_at=started_at,
         ):
             pass
 
@@ -590,7 +621,9 @@ class SqliteLifecycleAuthority:
                     # object type below; never treat this race as success alone.
                     pass
             reserved_stat = reserved.lstat()
-            if not stat.S_ISDIR(reserved_stat.st_mode) or stat.S_ISLNK(reserved_stat.st_mode):
+            if not stat.S_ISDIR(reserved_stat.st_mode) or stat.S_ISLNK(
+                reserved_stat.st_mode
+            ):
                 self._reject_non_authority_state("invalid_reserved_directory")
 
             self._reach_bootstrap_boundary("authority.bootstrap.before_leaf")
@@ -607,7 +640,9 @@ class SqliteLifecycleAuthority:
                 )
             except FileExistsError:
                 database_stat = self.path.lstat()
-                if not stat.S_ISREG(database_stat.st_mode) or stat.S_ISLNK(database_stat.st_mode):
+                if not stat.S_ISREG(database_stat.st_mode) or stat.S_ISLNK(
+                    database_stat.st_mode
+                ):
                     self._reject_non_authority_state("invalid_authority")
                 return False
             else:
@@ -776,7 +811,9 @@ class SqliteLifecycleAuthority:
             )
         self._reach_bootstrap_boundary("authority.schema_initialize.exclusive_acquired")
         try:
-            connection.execute("CREATE TABLE IF NOT EXISTS store_identity (identity TEXT NOT NULL)")
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS store_identity (identity TEXT NOT NULL)"
+            )
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS entry_lineage (key TEXT PRIMARY KEY, lineage INTEGER NOT NULL)"
             )
@@ -868,7 +905,6 @@ class SqliteLifecycleAuthority:
             if connection.in_transaction:
                 connection.execute("ROLLBACK")
             raise
-
 
     def _validate_schema(
         self,
@@ -1070,7 +1106,9 @@ class SqliteLifecycleAuthority:
                     started_at=started_at,
                 )
             self._validate_schema(
-                connection, deadline=deadline, started_at=started_at,
+                connection,
+                deadline=deadline,
+                started_at=started_at,
             )
             if created_new:
                 self._reach_bootstrap_boundary("authority.schema_ready.published")
@@ -1271,7 +1309,9 @@ class SqliteLifecycleAuthority:
                 (entry.key,),
             ).fetchone()
             if row is None:
-                raise CacheBlobLifecycleConflictError("Metadata replacement entry is absent")
+                raise CacheBlobLifecycleConflictError(
+                    "Metadata replacement entry is absent"
+                )
             stored = EntrySnapshot(
                 entry.key,
                 row[0],
@@ -1316,9 +1356,12 @@ class SqliteLifecycleAuthority:
                 raise CacheBlobLifecycleConflictError(
                     "Metadata replacement changed immutable descriptor fields"
                 )
-            revision = connection.execute(
-                "SELECT revision FROM authority_state WHERE singleton = 1"
-            ).fetchone()[0] + 1
+            revision = (
+                connection.execute(
+                    "SELECT revision FROM authority_state WHERE singleton = 1"
+                ).fetchone()[0]
+                + 1
+            )
             manifest_digest = hashlib.sha256(manifest).hexdigest()
             cursor = connection.execute(
                 "UPDATE entries SET manifest = ?, manifest_digest = ?, revision = ? "
@@ -1390,7 +1433,9 @@ class SqliteLifecycleAuthority:
             if existing is not None:
                 if tuple(existing) == expected_values:
                     return PreparedMutation(spec.operation_id, spec)
-                raise CacheBlobLifecycleConflictError("Operation identifier is not reusable")
+                raise CacheBlobLifecycleConflictError(
+                    "Operation identifier is not reusable"
+                )
             observed = self._expectation(connection, spec.key)
             if not self._matches(spec.expected, observed):
                 raise CacheBlobLifecycleConflictError(
@@ -1486,9 +1531,12 @@ class SqliteLifecycleAuthority:
                 "SELECT lineage FROM entry_lineage WHERE key = ?", (row[0],)
             ).fetchone()
             next_lineage = (next_lineage_row[0] if next_lineage_row else 0) + 1
-            revision = connection.execute(
-                "SELECT revision FROM authority_state WHERE singleton = 1"
-            ).fetchone()[0] + 1
+            revision = (
+                connection.execute(
+                    "SELECT revision FROM authority_state WHERE singleton = 1"
+                ).fetchone()[0]
+                + 1
+            )
             connection.execute(
                 "INSERT INTO entry_lineage(key, lineage) VALUES (?, ?) "
                 "ON CONFLICT(key) DO UPDATE SET lineage = excluded.lineage",
@@ -1538,7 +1586,8 @@ class SqliteLifecycleAuthority:
 
         return self._transaction(
             promote,
-            uncertain_classifier=lambda deadline, started_at: self._classify_promoted_mutation(
+            uncertain_classifier=lambda deadline,
+            started_at: self._classify_promoted_mutation(
                 prepared,
                 deadline=deadline,
                 started_at=started_at,
@@ -1656,6 +1705,7 @@ class SqliteLifecycleAuthority:
         self, prepared: PreparedMutation, *, candidate_persisted: bool = False
     ) -> None:
         """Retire pre-publication intent or retain exact candidate cleanup debt."""
+
         def abort(connection: sqlite3.Connection) -> None:
             row = connection.execute(
                 "SELECT key, generation, locator, state FROM mutations WHERE operation_id = ?",
@@ -1710,9 +1760,13 @@ class SqliteLifecycleAuthority:
             )
 
     @staticmethod
-    def _inventory_identity(connection: sqlite3.Connection) -> AuthorityIdentitySnapshot:
+    def _inventory_identity(
+        connection: sqlite3.Connection,
+    ) -> AuthorityIdentitySnapshot:
         """Read one validated SQLite authority identity inside the caller's snapshot."""
-        identity_row = connection.execute("SELECT identity FROM store_identity").fetchone()
+        identity_row = connection.execute(
+            "SELECT identity FROM store_identity"
+        ).fetchone()
         revision_row = connection.execute(
             "SELECT revision FROM authority_state WHERE singleton = 1"
         ).fetchone()
@@ -1811,7 +1865,9 @@ class SqliteLifecycleAuthority:
                             generation=row[1],
                             locator=row[2],
                             manifest=bytes(row[3]),
-                            expectation=EntryExpectation(row[5], row[6], row[1], row[4]),
+                            expectation=EntryExpectation(
+                                row[5], row[6], row[1], row[4]
+                            ),
                             transport_evidence=(
                                 None if row[7] is None else bytes(row[7])
                             ),
@@ -1904,7 +1960,10 @@ class SqliteLifecycleAuthority:
         entries: tuple[AuthorityInventoryEntry, ...],
     ) -> None:
         """Reject incomplete or stale external verification before a transaction writes state."""
-        if receipt.destination_identity != identity or receipt.destination_revision != identity.revision:
+        if (
+            receipt.destination_identity != identity
+            or receipt.destination_revision != identity.revision
+        ):
             raise CacheBlobLifecycleConflictError(
                 "Migration destination identity or revision changed before candidate recording"
             )
@@ -1917,7 +1976,9 @@ class SqliteLifecycleAuthority:
                 "Migration candidate byte count disagrees with verified receipt"
             )
         if len({entry.key for entry in entries}) != len(entries):
-            raise CacheBlobLifecycleConflictError("Migration candidate contains duplicate keys")
+            raise CacheBlobLifecycleConflictError(
+                "Migration candidate contains duplicate keys"
+            )
         if candidate_digest(entries) != receipt.candidate_digest:
             raise CacheBlobLifecycleConflictError(
                 "Migration candidate digest disagrees with verified receipt"
@@ -1964,8 +2025,12 @@ class SqliteLifecycleAuthority:
         entries: tuple[AuthorityInventoryEntry, ...],
     ) -> VerifiedCandidateReceipt:
         """Record only a complete, externally verified candidate in one authority transaction."""
-        if not isinstance(receipt, VerifiedCandidateReceipt) or not isinstance(entries, tuple):
-            raise TypeError("migration candidate receipt and entries must be immutable values")
+        if not isinstance(receipt, VerifiedCandidateReceipt) or not isinstance(
+            entries, tuple
+        ):
+            raise TypeError(
+                "migration candidate receipt and entries must be immutable values"
+            )
 
         def record(connection: sqlite3.Connection) -> VerifiedCandidateReceipt:
             identity = self._inventory_identity(connection)
@@ -1973,7 +2038,11 @@ class SqliteLifecycleAuthority:
             state_row = self._publication_state_row(connection)
             state = AuthorityPublicationState(state_row[6])
             if state is AuthorityPublicationState.CANDIDATE:
-                if state_row[1] == receipt.run_id and state_row[2] == receipt.plan_digest and state_row[4] == receipt.source_revision:
+                if (
+                    state_row[1] == receipt.run_id
+                    and state_row[2] == receipt.plan_digest
+                    and state_row[4] == receipt.source_revision
+                ):
                     rows = connection.execute(
                         "SELECT key, generation, locator, manifest, manifest_digest, transport_evidence "
                         "FROM migration_store_entries WHERE run_id = ? AND selection = 'candidate' "
@@ -2005,7 +2074,11 @@ class SqliteLifecycleAuthority:
                             "UPDATE authority_state SET migration_candidate_digest = ? "
                             "WHERE singleton = 1 AND migration_run_id = ? AND migration_plan_digest = ? "
                             "AND migration_state = 'candidate'",
-                            (receipt.candidate_digest, receipt.run_id, receipt.plan_digest),
+                            (
+                                receipt.candidate_digest,
+                                receipt.run_id,
+                                receipt.plan_digest,
+                            ),
                         )
                         return receipt
                 raise CacheBlobLifecycleConflictError(
@@ -2036,7 +2109,7 @@ class SqliteLifecycleAuthority:
                 "UPDATE authority_state SET migration_run_id = ?, migration_plan_digest = ?, "
                 "migration_candidate_digest = ?, migration_source_revision = ?, "
                 "migration_activated_revision = NULL, migration_state = 'candidate', "
-                    "migration_active_selection = 'source', migration_rollback_eligible = 0 "
+                "migration_active_selection = 'source', migration_rollback_eligible = 0 "
                 "WHERE singleton = 1",
                 (
                     receipt.run_id,
@@ -2056,8 +2129,12 @@ class SqliteLifecycleAuthority:
         entries: tuple[AuthorityInventoryEntry, ...],
     ) -> None:
         """Persist exact freshly verified transport evidence without activation."""
-        if not isinstance(receipt, VerifiedCandidateReceipt) or not isinstance(entries, tuple):
-            raise TypeError("migration candidate receipt and entries must be immutable values")
+        if not isinstance(receipt, VerifiedCandidateReceipt) or not isinstance(
+            entries, tuple
+        ):
+            raise TypeError(
+                "migration candidate receipt and entries must be immutable values"
+            )
 
         def record(connection: sqlite3.Connection) -> None:
             identity = self._inventory_identity(connection)
@@ -2092,7 +2169,8 @@ class SqliteLifecycleAuthority:
                     or prior.manifest != verified.manifest
                     or prior.payload_digest != verified.payload_digest
                     or prior.byte_size != verified.byte_size
-                    or prior.transport_evidence not in {None, verified.transport_evidence}
+                    or prior.transport_evidence
+                    not in {None, verified.transport_evidence}
                 ):
                     raise CacheBlobLifecycleConflictError(
                         "Migration verification does not match the recorded candidate"
@@ -2117,7 +2195,9 @@ class SqliteLifecycleAuthority:
 
         self._transaction(record)
 
-    def candidate_entries_for_run(self, *, run_id: str) -> tuple[AuthorityInventoryEntry, ...]:
+    def candidate_entries_for_run(
+        self, *, run_id: str
+    ) -> tuple[AuthorityInventoryEntry, ...]:
         """Return only this authority's durably attributed candidate descriptors."""
         with self._read_connection() as connection:
             if connection is None:
@@ -2127,7 +2207,9 @@ class SqliteLifecycleAuthority:
             connection.execute("BEGIN")
             try:
                 state_row = self._publication_state_row(connection)
-                if state_row[1] != run_id or AuthorityPublicationState(state_row[6]) not in {
+                if state_row[1] != run_id or AuthorityPublicationState(
+                    state_row[6]
+                ) not in {
                     AuthorityPublicationState.CANDIDATE,
                     AuthorityPublicationState.ACTIVATED_OFFLINE,
                     AuthorityPublicationState.ACTIVE,
@@ -2156,15 +2238,20 @@ class SqliteLifecycleAuthority:
         entries: tuple[AuthorityInventoryEntry, ...],
     ) -> None:
         """Clear one exact unactivated candidate after external retirement succeeds."""
-        if not isinstance(receipt, VerifiedCandidateReceipt) or not isinstance(entries, tuple):
-            raise TypeError("migration candidate receipt and entries must be immutable values")
+        if not isinstance(receipt, VerifiedCandidateReceipt) or not isinstance(
+            entries, tuple
+        ):
+            raise TypeError(
+                "migration candidate receipt and entries must be immutable values"
+            )
 
         def discard(connection: sqlite3.Connection) -> None:
             identity = self._inventory_identity(connection)
             self._validate_verified_candidate(identity, receipt, entries)
             state_row = self._publication_state_row(connection)
             if (
-                AuthorityPublicationState(state_row[6]) is not AuthorityPublicationState.CANDIDATE
+                AuthorityPublicationState(state_row[6])
+                is not AuthorityPublicationState.CANDIDATE
                 or state_row[1] != receipt.run_id
                 or state_row[2] != receipt.plan_digest
                 or state_row[3] != receipt.candidate_digest
@@ -2203,8 +2290,12 @@ class SqliteLifecycleAuthority:
         entries: tuple[AuthorityInventoryEntry, ...],
     ) -> ActivationReceipt:
         """Atomically select the recorded whole candidate and retain exact prior rows."""
-        if not isinstance(receipt, VerifiedCandidateReceipt) or not isinstance(entries, tuple):
-            raise TypeError("migration candidate receipt and entries must be immutable values")
+        if not isinstance(receipt, VerifiedCandidateReceipt) or not isinstance(
+            entries, tuple
+        ):
+            raise TypeError(
+                "migration candidate receipt and entries must be immutable values"
+            )
 
         def activate(connection: sqlite3.Connection) -> ActivationReceipt:
             state_row = self._publication_state_row(connection)
@@ -2437,7 +2528,8 @@ class SqliteLifecycleAuthority:
         def retained(connection: sqlite3.Connection) -> tuple[EntrySnapshot, ...]:
             state_row = self._publication_state_row(connection)
             if (
-                AuthorityPublicationState(state_row[6]) is not AuthorityPublicationState.ACTIVE
+                AuthorityPublicationState(state_row[6])
+                is not AuthorityPublicationState.ACTIVE
                 or state_row[1] != run_id
                 or state_row[8] != 0
             ):
@@ -2495,7 +2587,9 @@ class SqliteLifecycleAuthority:
         with self._read_connection() as connection:
             if connection is None:
                 if cursor is not None:
-                    raise CatalogCursorError("Catalog cursor does not match an absent authority")
+                    raise CatalogCursorError(
+                        "Catalog cursor does not match an absent authority"
+                    )
                 return CatalogPage((), 0, None, True)
             connection.execute("BEGIN")
             try:
@@ -2596,6 +2690,7 @@ class SqliteLifecycleAuthority:
 
     def retire_cleanup_debt(self, debt: CleanupDebt) -> None:
         """Retire one exact, already reclaimed debt idempotently."""
+
         def retire(connection: sqlite3.Connection) -> None:
             connection.execute(
                 "DELETE FROM cleanup_debt WHERE operation_id = ? AND locator = ? "
@@ -2652,9 +2747,12 @@ class SqliteLifecycleAuthority:
                 "ON CONFLICT(key) DO UPDATE SET lineage = excluded.lineage",
                 (key, next_lineage),
             )
-            revision = connection.execute(
-                "SELECT revision FROM authority_state WHERE singleton = 1"
-            ).fetchone()[0] + 1
+            revision = (
+                connection.execute(
+                    "SELECT revision FROM authority_state WHERE singleton = 1"
+                ).fetchone()[0]
+                + 1
+            )
             connection.execute(
                 "UPDATE authority_state SET revision = ?, projection_dirty = 1 "
                 "WHERE singleton = 1",
@@ -2703,7 +2801,8 @@ class SqliteLifecycleAuthority:
             if connection is None:
                 return ()
             run = connection.execute(
-                "SELECT state, last_key FROM clear_runs WHERE run_id = ?", (token.value,)
+                "SELECT state, last_key FROM clear_runs WHERE run_id = ?",
+                (token.value,),
             ).fetchone()
             if run is None:
                 raise CacheBlobLifecycleConflictError("Clear run does not exist")
@@ -2742,7 +2841,9 @@ class SqliteLifecycleAuthority:
             if target is None and run is not None and run[0] == "completed":
                 return
             if run is None or run[0] != "active":
-                raise CacheBlobLifecycleConflictError("Clear run cannot accept checkpoint")
+                raise CacheBlobLifecycleConflictError(
+                    "Clear run cannot accept checkpoint"
+                )
             if target is None:
                 connection.execute(
                     "UPDATE clear_runs SET state = 'completed' WHERE run_id = ?",
@@ -2765,7 +2866,9 @@ class SqliteLifecycleAuthority:
                 ),
             ).fetchone()
             if row is None or row[0] != "pending":
-                raise CacheBlobLifecycleConflictError("Clear target is no longer pending")
+                raise CacheBlobLifecycleConflictError(
+                    "Clear target is no longer pending"
+                )
             current = connection.execute(
                 "SELECT lineage, revision, generation, manifest_digest FROM entries WHERE key = ?",
                 (target.key,),
@@ -2774,15 +2877,24 @@ class SqliteLifecycleAuthority:
                 lineage = connection.execute(
                     "SELECT lineage FROM entry_lineage WHERE key = ?", (target.key,)
                 ).fetchone()
-                if current is not None or lineage is None or lineage[0] <= target.expectation.lineage:
+                if (
+                    current is not None
+                    or lineage is None
+                    or lineage[0] <= target.expectation.lineage
+                ):
                     raise CacheBlobLifecycleConflictError(
                         "Clear target completion lacks exact absence proof"
                     )
-            elif state == "conflicted" and current is not None and current == (
-                target.expectation.lineage,
-                target.expectation.revision,
-                target.generation,
-                target.expectation.manifest_digest,
+            elif (
+                state == "conflicted"
+                and current is not None
+                and current
+                == (
+                    target.expectation.lineage,
+                    target.expectation.revision,
+                    target.generation,
+                    target.expectation.manifest_digest,
+                )
             ):
                 raise CacheBlobLifecycleConflictError("Clear target has not changed")
             cursor = connection.execute(
@@ -2791,7 +2903,9 @@ class SqliteLifecycleAuthority:
                 (state, token.value, target.key),
             )
             if cursor.rowcount != 1:
-                raise CacheBlobLifecycleConflictError("Clear target cannot accept checkpoint")
+                raise CacheBlobLifecycleConflictError(
+                    "Clear target cannot accept checkpoint"
+                )
             connection.execute(
                 "UPDATE clear_runs SET last_key = ?, state = CASE WHEN NOT EXISTS "
                 "(SELECT 1 FROM clear_targets WHERE run_id = ? AND state = 'pending') "
@@ -2842,7 +2956,9 @@ class SqliteLifecycleAuthority:
                     (token.value,),
                 ).fetchone()
                 if row is None:
-                    raise CacheBlobLifecycleConflictError("Reconciliation run does not exist")
+                    raise CacheBlobLifecycleConflictError(
+                        "Reconciliation run does not exist"
+                    )
                 return ReconciliationSnapshot(row[0], row[1], row[2], token.value)
             revision = connection.execute(
                 "SELECT revision FROM authority_state WHERE singleton = 1"
@@ -2853,7 +2969,9 @@ class SqliteLifecycleAuthority:
             debt_high_water = connection.execute(
                 "SELECT COALESCE(MAX(debt_id), 0) FROM cleanup_debt"
             ).fetchone()[0]
-            return ReconciliationSnapshot(revision, mutation_high_water, debt_high_water)
+            return ReconciliationSnapshot(
+                revision, mutation_high_water, debt_high_water
+            )
 
     def page_reconciliation_work(
         self,
@@ -2894,14 +3012,14 @@ class SqliteLifecycleAuthority:
                         manifest=bytes(row[9]),
                     ),
                 )
-                works.append(ReconciliationWork("mutation", row[0], row[10], mutation=prepared))
+                works.append(
+                    ReconciliationWork("mutation", row[0], row[10], mutation=prepared)
+                )
             for row in debt_rows:
                 debt = CleanupDebt(row[1], row[2], row[3], row[4], row[5], row[0])
                 works.append(ReconciliationWork("debt", row[0], row[6], debt=debt))
             next_mutation = (
-                mutation_rows[-1][0]
-                if mutation_rows
-                else snapshot.mutation_high_water
+                mutation_rows[-1][0] if mutation_rows else snapshot.mutation_high_water
             )
             next_debt = debt_rows[-1][0] if debt_rows else snapshot.debt_high_water
             return ReconciliationPage(tuple(works), next_mutation, next_debt)
@@ -2915,7 +3033,9 @@ class SqliteLifecycleAuthority:
                 (token.value,),
             ).fetchone()
             if run is None:
-                raise CacheBlobLifecycleConflictError("Reconciliation run does not exist")
+                raise CacheBlobLifecycleConflictError(
+                    "Reconciliation run does not exist"
+                )
             rows = connection.execute(
                 "SELECT operation_id, locator, key, generation, role FROM cleanup_debt "
                 "WHERE state = 'pending' AND debt_id <= ? ORDER BY debt_id LIMIT ?",
@@ -2934,7 +3054,9 @@ class SqliteLifecycleAuthority:
             if work is not None:
                 if state not in {"completed", "blocked", "conflicted"}:
                     raise ValueError("Reconciliation checkpoint state is unsupported")
-                column = "mutation_cursor" if work.source == "mutation" else "debt_cursor"
+                column = (
+                    "mutation_cursor" if work.source == "mutation" else "debt_cursor"
+                )
                 cursor = connection.execute(
                     f"UPDATE reconciliation_runs SET {column} = MAX({column}, ?) "
                     "WHERE run_id = ? AND state = 'active'",
@@ -3025,9 +3147,13 @@ class SqliteLifecycleAuthority:
                     snapshot_path = Path(name)
                     destination = sqlite3.connect(snapshot_path, isolation_level=None)
                     try:
+
                         def progress(status: int, _remaining: int, _total: int) -> None:
                             primary_code = status & 0xFF
-                            if primary_code in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}:
+                            if primary_code in {
+                                sqlite3.SQLITE_BUSY,
+                                sqlite3.SQLITE_LOCKED,
+                            }:
                                 error = sqlite3.OperationalError(
                                     "Lifecycle authority projection backup is busy"
                                 )
@@ -3110,7 +3236,9 @@ class SqliteLifecycleAuthority:
         with self._read_connection() as connection:
             if connection is None:
                 raise CacheBlobMigrationRequiredError("Lifecycle authority is absent")
-            identity = connection.execute("SELECT identity FROM store_identity").fetchone()[0]
+            identity = connection.execute(
+                "SELECT identity FROM store_identity"
+            ).fetchone()[0]
             return {
                 "journal_mode": connection.execute("PRAGMA journal_mode").fetchone()[0],
                 "synchronous": "extra"
@@ -3118,9 +3246,13 @@ class SqliteLifecycleAuthority:
                 else "unsupported",
                 "foreign_keys": connection.execute("PRAGMA foreign_keys").fetchone()[0]
                 == 1,
-                "trusted_schema": connection.execute("PRAGMA trusted_schema").fetchone()[0]
+                "trusted_schema": connection.execute(
+                    "PRAGMA trusted_schema"
+                ).fetchone()[0]
                 == 1,
-                "application_id": connection.execute("PRAGMA application_id").fetchone()[0],
+                "application_id": connection.execute(
+                    "PRAGMA application_id"
+                ).fetchone()[0],
                 "user_version": connection.execute("PRAGMA user_version").fetchone()[0],
                 "store_identity": identity,
                 "integrity_check": tuple(

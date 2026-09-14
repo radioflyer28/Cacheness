@@ -48,7 +48,9 @@ class TopologyQualificationRequirements:
 
     def __post_init__(self) -> None:
         if not isinstance(self.coordination_scope, str) or not self.coordination_scope:
-            raise CompositionValidationError("coordination_scope must be a non-empty string")
+            raise CompositionValidationError(
+                "coordination_scope must be a non-empty string"
+            )
         if (
             not isinstance(self.durability_atomicity_boundary, str)
             or not self.durability_atomicity_boundary
@@ -56,10 +58,19 @@ class TopologyQualificationRequirements:
             raise CompositionValidationError(
                 "durability_atomicity_boundary must be a non-empty string"
             )
-        if not isinstance(self.progress_outcomes, frozenset) or not self.progress_outcomes:
-            raise CompositionValidationError("progress_outcomes must be a non-empty frozenset")
-        if not all(isinstance(outcome, str) and outcome for outcome in self.progress_outcomes):
-            raise CompositionValidationError("progress_outcomes must contain non-empty strings")
+        if (
+            not isinstance(self.progress_outcomes, frozenset)
+            or not self.progress_outcomes
+        ):
+            raise CompositionValidationError(
+                "progress_outcomes must be a non-empty frozenset"
+            )
+        if not all(
+            isinstance(outcome, str) and outcome for outcome in self.progress_outcomes
+        ):
+            raise CompositionValidationError(
+                "progress_outcomes must contain non-empty strings"
+            )
         if not isinstance(self.service_prerequisites, tuple) or not all(
             isinstance(prerequisite, str) and prerequisite
             for prerequisite in self.service_prerequisites
@@ -149,9 +160,7 @@ BUILTIN_QUALIFIED_TOPOLOGY_PROFILES: Mapping[
                 "SQLite transaction is authoritative; immutable filesystem "
                 "generations reconcile outside cross-resource ACID"
             ),
-            progress_outcomes=frozenset(
-                {"success", "conflict", "retryable_timeout"}
-            ),
+            progress_outcomes=frozenset({"success", "conflict", "retryable_timeout"}),
             service_prerequisites=(
                 "explicit initialization before shared workers",
                 "writable local filesystem",
@@ -321,29 +330,43 @@ class ParticipantCapabilities:
             )
 
     @classmethod
-    def from_participant(cls, participant: object, role: str) -> "ParticipantCapabilities":
+    def from_participant(
+        cls, participant: object, role: str
+    ) -> "ParticipantCapabilities":
         """Normalize a participant's local declaration without inferring strength."""
-        declared = participant if isinstance(participant, Mapping) else getattr(
-            participant, "topology_capabilities", None
+        declared = (
+            participant
+            if isinstance(participant, Mapping)
+            else getattr(participant, "topology_capabilities", None)
         )
         if isinstance(declared, cls):
             return declared
-        raw = declared if declared is not None else getattr(participant, "capabilities", {})
+        raw = (
+            declared
+            if declared is not None
+            else getattr(participant, "capabilities", {})
+        )
         if isinstance(raw, cls):
             return raw
         if isinstance(raw, Mapping):
             get = raw.get
         else:
+
             def get(name: str, default: object = None) -> object:
                 return getattr(raw, name, default)
+
         transactional = get("transactional", False)
         return cls(
             durable=_capability_bool(get("durable", False), "durable"),
-            process_scope=_capability_scope(get("process_scope", "process"), "process_scope"),
+            process_scope=_capability_scope(
+                get("process_scope", "process"), "process_scope"
+            ),
             host_scope=_capability_scope(get("host_scope", "process"), "host_scope"),
             transaction_scope=get(
                 "transaction_scope",
-                "authority" if role == BackendRole.AUTHORITY.value and transactional else "none",
+                "authority"
+                if role == BackendRole.AUTHORITY.value and transactional
+                else "none",
             ),
             exact_cas=_capability_bool(
                 get("exact_cas", get("compare_and_swap", False)), "exact_cas"
@@ -407,12 +430,16 @@ class CapabilityMinimum:
     def __post_init__(self) -> None:
         if not isinstance(self.requirements, Mapping):
             raise CompositionValidationError("Capability minimum must be a mapping")
-        unsupported = set(self.requirements) - set(TopologyCapabilities.__dataclass_fields__)
+        unsupported = set(self.requirements) - set(
+            TopologyCapabilities.__dataclass_fields__
+        )
         if unsupported:
             raise CompositionValidationError(
                 f"Unsupported capability minimum: {sorted(unsupported)}"
             )
-        object.__setattr__(self, "requirements", MappingProxyType(dict(self.requirements)))
+        object.__setattr__(
+            self, "requirements", MappingProxyType(dict(self.requirements))
+        )
 
     def require(self, report: TopologyCapabilities) -> None:
         """Fail closed when the active topology is weaker than a requirement."""
@@ -452,7 +479,10 @@ class MetadataRole:
     def authorizes(self, operation: str) -> bool:
         """Return whether this metadata role can authorize ``operation``."""
         authority_operations = {"query_complete", "promote_catalog"}
-        return self.kind == BackendRole.AUTHORITY.value and operation in authority_operations
+        return (
+            self.kind == BackendRole.AUTHORITY.value
+            and operation in authority_operations
+        )
 
 
 @dataclass(frozen=True)
@@ -478,7 +508,9 @@ class BackendRef:
                 "BackendRef requires exactly one of name or instance"
             )
         if has_name and (not isinstance(self.name, str) or not self.name):
-            raise CompositionValidationError("BackendRef name must be a non-empty string")
+            raise CompositionValidationError(
+                "BackendRef name must be a non-empty string"
+            )
         if has_instance and self.options:
             raise CompositionValidationError(
                 "BackendRef options cannot be combined with an injected instance"
@@ -490,7 +522,9 @@ class BackendRef:
             try:
                 ownership = Ownership(ownership)
             except ValueError as error:
-                raise CompositionValidationError("ownership must be caller or store") from error
+                raise CompositionValidationError(
+                    "ownership must be caller or store"
+                ) from error
         if self.transfer_ownership:
             if ownership not in {None, Ownership.STORE}:
                 raise CompositionValidationError(
@@ -626,12 +660,18 @@ class RoleRegistry:
         """Register a factory under exactly one participant role."""
         normalized_role = _normalize_role(role)
         if not isinstance(name, str) or not name:
-            raise CompositionValidationError("Participant registration name must be a string")
+            raise CompositionValidationError(
+                "Participant registration name must be a string"
+            )
         if not callable(factory):
-            raise CompositionValidationError("Participant registration factory must be callable")
+            raise CompositionValidationError(
+                "Participant registration factory must be callable"
+            )
         if capabilities is None:
             capabilities = getattr(factory, "topology_capabilities", None)
-        if capabilities is not None and not isinstance(capabilities, ParticipantCapabilities):
+        if capabilities is not None and not isinstance(
+            capabilities, ParticipantCapabilities
+        ):
             capabilities = ParticipantCapabilities.from_participant(
                 capabilities, normalized_role
             )
@@ -671,7 +711,9 @@ class RoleRegistry:
         """
         return self.resolve(role, name).construct(options)
 
-    def capabilities(self, role: str | BackendRole, name: str) -> ParticipantCapabilities:
+    def capabilities(
+        self, role: str | BackendRole, name: str
+    ) -> ParticipantCapabilities:
         """Return a static declaration suitable for capability preflight."""
         registration = self.resolve(role, name)
         if registration.capabilities is None:
@@ -740,7 +782,9 @@ def _construct_postgresql_authority(**options: object) -> object:
     return participant
 
 
-def _construct_json_projection(*, metadata_file: str | Path, **options: object) -> object:
+def _construct_json_projection(
+    *, metadata_file: str | Path, **options: object
+) -> object:
     """Build the JSON carrier only as a derived projection participant."""
     from cacheness.metadata import JsonProjection
 
@@ -938,7 +982,9 @@ def _validate_participant_role(role: str, participant: object) -> None:
 
     if role == BackendRole.PAYLOAD.value:
         if is_authority or is_projection:
-            raise CompositionValidationError("A payload participant cannot fill another role")
+            raise CompositionValidationError(
+                "A payload participant cannot fill another role"
+            )
         if not is_payload:
             raise CompositionValidationError(
                 "A payload participant must provide guarded generation I/O"
@@ -947,7 +993,9 @@ def _validate_participant_role(role: str, participant: object) -> None:
 
     if role == BackendRole.AUTHORITY.value:
         if is_payload or is_projection:
-            raise CompositionValidationError("An authority participant cannot fill another role")
+            raise CompositionValidationError(
+                "An authority participant cannot fill another role"
+            )
         if not is_authority:
             raise CompositionValidationError(
                 "An authority participant must satisfy LifecycleAuthority"
@@ -956,7 +1004,9 @@ def _validate_participant_role(role: str, participant: object) -> None:
 
     if role == BackendRole.PROJECTION.value:
         if is_authority or is_payload:
-            raise CompositionValidationError("A projection participant cannot fill another role")
+            raise CompositionValidationError(
+                "A projection participant cannot fill another role"
+            )
         if not is_projection:
             raise CompositionValidationError(
                 "A projection participant must satisfy ProjectionSink"
@@ -973,7 +1023,10 @@ def _record_and_validate_injected_participants(
     references = (
         (BackendRole.PAYLOAD.value, topology.payload),
         (BackendRole.AUTHORITY.value, topology.authority),
-        *((BackendRole.PROJECTION.value, projection) for projection in topology.projections),
+        *(
+            (BackendRole.PROJECTION.value, projection)
+            for projection in topology.projections
+        ),
     )
     for _role, reference in references:
         if reference.instance is not None and reference.ownership is Ownership.STORE:
@@ -1038,7 +1091,9 @@ def _compose_capabilities(
         authority, BackendRole.AUTHORITY.value
     )
     projection_capabilities = tuple(
-        ParticipantCapabilities.from_participant(projection, BackendRole.PROJECTION.value)
+        ParticipantCapabilities.from_participant(
+            projection, BackendRole.PROJECTION.value
+        )
         for projection in projections
     )
     return _compose_capability_values(
@@ -1086,6 +1141,7 @@ def _capabilities_from_references(
     topology: StoreTopology, registry: RoleRegistry
 ) -> TopologyCapabilities:
     """Validate minima from declarations before a named factory can perform I/O."""
+
     def capabilities_for(role: str, reference: BackendRef) -> ParticipantCapabilities:
         if reference.instance is not None:
             return ParticipantCapabilities.from_participant(reference.instance, role)

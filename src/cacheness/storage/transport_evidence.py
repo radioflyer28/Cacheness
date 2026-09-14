@@ -148,7 +148,9 @@ class PayloadTransportObservation:
         }
 
     @classmethod
-    def from_mapping(cls, record: Mapping[str, object]) -> "PayloadTransportObservation":
+    def from_mapping(
+        cls, record: Mapping[str, object]
+    ) -> "PayloadTransportObservation":
         """Decode only the exact current observation field set."""
         if not isinstance(record, Mapping) or set(record) != _OBSERVATION_FIELDS:
             raise _evidence_error("Transport observation has an unsupported field set")
@@ -194,7 +196,9 @@ class PayloadTransportEvidence:
             raise _evidence_error(
                 "Transport evidence observation size disagrees with canonical payload size"
             )
-        if not isinstance(self.signature, str) or not _HEX_SHA256.fullmatch(self.signature):
+        if not isinstance(self.signature, str) or not _HEX_SHA256.fullmatch(
+            self.signature
+        ):
             raise _evidence_error("Transport evidence signature is invalid")
 
     @classmethod
@@ -264,7 +268,11 @@ class PayloadTransportEvidence:
     @classmethod
     def from_canonical_bytes(cls, raw: bytes) -> "PayloadTransportEvidence":
         """Boundedly decode exact-schema evidence before signature verification."""
-        if not isinstance(raw, bytes) or not raw or len(raw) > MAX_TRANSPORT_EVIDENCE_BYTES:
+        if (
+            not isinstance(raw, bytes)
+            or not raw
+            or len(raw) > MAX_TRANSPORT_EVIDENCE_BYTES
+        ):
             raise _evidence_error("Transport evidence bytes are invalid or too large")
         try:
             record = json.loads(
@@ -274,10 +282,16 @@ class PayloadTransportEvidence:
                 parse_float=_reject_float,
                 parse_constant=_reject_constant,
             )
-        except (UnicodeDecodeError, json.JSONDecodeError, CacheManifestIntegrityError) as exc:
+        except (
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+            CacheManifestIntegrityError,
+        ) as exc:
             if isinstance(exc, CacheManifestIntegrityError):
                 raise
-            raise _evidence_error("Transport evidence is not valid canonical JSON") from exc
+            raise _evidence_error(
+                "Transport evidence is not valid canonical JSON"
+            ) from exc
         if not isinstance(record, dict) or set(record) != _EVIDENCE_FIELDS:
             raise _evidence_error("Transport evidence has an unsupported field set")
         observation = PayloadTransportObservation.from_mapping(
@@ -339,7 +353,9 @@ class PayloadTransportEvidence:
             self.payload_byte_size,
         )
         if signed_identity != expected_identity:
-            raise _evidence_error("Transport evidence identity does not match the payload")
+            raise _evidence_error(
+                "Transport evidence identity does not match the payload"
+            )
         return self.observation
 
 

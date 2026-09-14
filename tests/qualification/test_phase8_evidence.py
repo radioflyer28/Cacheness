@@ -17,7 +17,9 @@ FIXTURES_PATH = REPOSITORY_ROOT / "tests" / "qualification" / "conftest.py"
 
 def _load_runner():
     """Load the standalone runner without importing ``tools`` as a package."""
-    spec = importlib.util.spec_from_file_location("phase8_qualification_runner", RUNNER_PATH)
+    spec = importlib.util.spec_from_file_location(
+        "phase8_qualification_runner", RUNNER_PATH
+    )
     assert spec is not None
     assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -28,7 +30,9 @@ def _load_runner():
 
 def _load_fixtures():
     """Load the real cleanup helpers without making ``tests`` a package."""
-    spec = importlib.util.spec_from_file_location("phase8_qualification_fixtures", FIXTURES_PATH)
+    spec = importlib.util.spec_from_file_location(
+        "phase8_qualification_fixtures", FIXTURES_PATH
+    )
     assert spec is not None
     assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -56,8 +60,13 @@ def test_runner_uses_only_the_frozen_live_obstore_suite() -> None:
         "tests/integration/test_s3_generation.py",
         "tests/integration/test_remote_topology.py",
     )
-    assert runner.LIVE_MARKER_EXPRESSION == "live_postgresql or live_aws_s3 or live_remote"
-    assert "src/cacheness/storage/obstore_generation_io.py" in runner.QUALIFICATION_SOURCE_PATHS
+    assert (
+        runner.LIVE_MARKER_EXPRESSION == "live_postgresql or live_aws_s3 or live_remote"
+    )
+    assert (
+        "src/cacheness/storage/obstore_generation_io.py"
+        in runner.QUALIFICATION_SOURCE_PATHS
+    )
     assert "tools/run_phase8_qualification.py" in runner.QUALIFICATION_SOURCE_PATHS
     assert "tools/run_phase5_qualification.py" not in runner.QUALIFICATION_SOURCE_PATHS
 
@@ -116,7 +125,11 @@ def test_runner_requires_complete_clean_current_source_proof(
     )
 
     evidence = runner.load_evidence(output)
-    assert evidence["status"] == ("QUALIFIED" if completed.returncode == 0 and "passed, " not in completed.stdout else "NOT_QUALIFIED")
+    assert evidence["status"] == (
+        "QUALIFIED"
+        if completed.returncode == 0 and "passed, " not in completed.stdout
+        else "NOT_QUALIFIED"
+    )
     assert evidence["revision"] == "a" * 40
     assert isinstance(evidence["source_digest"], str)
     assert evidence["services"]["aws"] == {
@@ -148,11 +161,17 @@ def test_runner_rejects_endpoint_override_and_owner_pinning_without_running(
         ("CACHENESS_TEST_EXPECTED_BUCKET_OWNER", "123456789012"),
     ):
         output = tmp_path / f"{disallowed_name}.json"
-        assert runner.run_qualification(
-            output=output,
-            environment={**_configured_environment(), disallowed_name: disallowed_value},
-            run_tests=should_not_run,
-        ) == 1
+        assert (
+            runner.run_qualification(
+                output=output,
+                environment={
+                    **_configured_environment(),
+                    disallowed_name: disallowed_value,
+                },
+                run_tests=should_not_run,
+            )
+            == 1
+        )
         assert runner.load_evidence(output)["status"] == "NOT_QUALIFIED"
 
     assert called is False
@@ -165,10 +184,13 @@ def test_runner_refuses_dirty_relevant_sources_before_service_access(
     runner = _load_runner()
     monkeypatch.setattr(runner, "_qualification_source_identity", lambda: None)
 
-    assert runner.run_qualification(
-        output=tmp_path / "live.json",
-        environment=_configured_environment(),
-    ) == 1
+    assert (
+        runner.run_qualification(
+            output=tmp_path / "live.json",
+            environment=_configured_environment(),
+        )
+        == 1
+    )
 
     evidence = runner.load_evidence(tmp_path / "live.json")
     assert evidence["status"] == "NOT_QUALIFIED"
@@ -332,14 +354,23 @@ def test_secret_safe_evidence_and_cleanup_exception_remain_nonqualifying(
     assert "m" * 32 not in serialized
 
     monkeypatch.setattr(runner, "_qualification_source_identity", lambda: identity)
-    assert runner.run_qualification(
-        output=output,
-        environment=_configured_environment(),
-        run_tests=lambda _arguments, _timeout: subprocess.CompletedProcess([], 0, "4 passed", ""),
-        resolve_aws=lambda _environment: runner.AwsServiceIdentity("us-east-1", "standard"),
-        cleanup=lambda _environment, _run_id: (_ for _ in ()).throw(RuntimeError("cleanup")),
-        run_namespace="phase8-" + "d" * 32,
-    ) == 1
+    assert (
+        runner.run_qualification(
+            output=output,
+            environment=_configured_environment(),
+            run_tests=lambda _arguments, _timeout: subprocess.CompletedProcess(
+                [], 0, "4 passed", ""
+            ),
+            resolve_aws=lambda _environment: runner.AwsServiceIdentity(
+                "us-east-1", "standard"
+            ),
+            cleanup=lambda _environment, _run_id: (_ for _ in ()).throw(
+                RuntimeError("cleanup")
+            ),
+            run_namespace="phase8-" + "d" * 32,
+        )
+        == 1
+    )
     assert runner.load_evidence(output)["cleanup_status"] == "ERROR"
 
 
@@ -351,15 +382,22 @@ def test_scheduled_diagnostic_role_cannot_emit_release_candidate_evidence(
     identity = runner.SourceIdentity(revision="a" * 40, digest="b" * 64)
     monkeypatch.setattr(runner, "_qualification_source_identity", lambda: identity)
 
-    assert runner.run_qualification(
-        output=tmp_path / "scheduled.json",
-        environment=_configured_environment(),
-        run_tests=lambda _arguments, _timeout: subprocess.CompletedProcess([], 0, "4 passed", ""),
-        resolve_aws=lambda _environment: runner.AwsServiceIdentity("us-east-1", "standard"),
-        cleanup=lambda _environment, _run_id: "CLEAN",
-        run_namespace="phase8-" + "e" * 32,
-        run_role="scheduled_diagnostic",
-    ) == 1
+    assert (
+        runner.run_qualification(
+            output=tmp_path / "scheduled.json",
+            environment=_configured_environment(),
+            run_tests=lambda _arguments, _timeout: subprocess.CompletedProcess(
+                [], 0, "4 passed", ""
+            ),
+            resolve_aws=lambda _environment: runner.AwsServiceIdentity(
+                "us-east-1", "standard"
+            ),
+            cleanup=lambda _environment, _run_id: "CLEAN",
+            run_namespace="phase8-" + "e" * 32,
+            run_role="scheduled_diagnostic",
+        )
+        == 1
+    )
 
     evidence = runner.load_evidence(tmp_path / "scheduled.json")
     assert evidence["run_role"] == "scheduled_diagnostic"

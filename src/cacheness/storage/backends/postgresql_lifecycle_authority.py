@@ -125,7 +125,11 @@ _T = TypeVar("_T")
 
 
 def _bounded_identity(value: str) -> str:
-    if not isinstance(value, str) or not value or len(value.encode("utf-8")) > _MAX_STORE_IDENTITY_BYTES:
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value.encode("utf-8")) > _MAX_STORE_IDENTITY_BYTES
+    ):
         raise ValueError("store_identity must be a non-empty bounded string")
     return value
 
@@ -236,7 +240,9 @@ class PostgresqlLifecycleAuthority:
 
     def _table(self, name: str) -> Any:
         """Compose the only dynamic SQL values as psycopg identifiers."""
-        return sql.SQL("{}.{}").format(sql.Identifier(self.schema), sql.Identifier(name))
+        return sql.SQL("{}.{}").format(
+            sql.Identifier(self.schema), sql.Identifier(name)
+        )
 
     @staticmethod
     def _token_value(token: PageToken) -> str:
@@ -261,7 +267,9 @@ class PostgresqlLifecycleAuthority:
             else:
                 connection = resource
             if connection is None or not hasattr(connection, "cursor"):
-                raise TypeError("connection_factory must return a psycopg connection or lease")
+                raise TypeError(
+                    "connection_factory must return a psycopg connection or lease"
+                )
             yield connection
         except BaseException:
             exit_type, exit_value, exit_traceback = sys.exc_info()
@@ -276,7 +284,9 @@ class PostgresqlLifecycleAuthority:
 
     def _configure_transaction(self, cursor: Any) -> None:
         """Bound one transaction locally; no process or cluster lock is involved."""
-        cursor.execute("SET LOCAL statement_timeout = %s", (f"{self.statement_timeout_ms}ms",))
+        cursor.execute(
+            "SET LOCAL statement_timeout = %s", (f"{self.statement_timeout_ms}ms",)
+        )
         cursor.execute("SET LOCAL lock_timeout = %s", (f"{self.lock_timeout_ms}ms",))
 
     @staticmethod
@@ -298,7 +308,8 @@ class PostgresqlLifecycleAuthority:
             context["sqlstate"] = sqlstate
             context["progress_outcome"] = progress_outcome
             raise CacheBlobLifecycleTimeoutError(
-                "PostgreSQL lifecycle authority made no bounded progress", context=context
+                "PostgreSQL lifecycle authority made no bounded progress",
+                context=context,
             ) from error
         if errors is not None and isinstance(
             error,
@@ -317,7 +328,8 @@ class PostgresqlLifecycleAuthority:
             }
             context["progress_outcome"] = class_outcomes[error.__class__.__name__]
             raise CacheBlobLifecycleTimeoutError(
-                "PostgreSQL lifecycle authority made no bounded progress", context=context
+                "PostgreSQL lifecycle authority made no bounded progress",
+                context=context,
             ) from error
         if sqlstate is None and error.__class__.__name__ in {
             "OperationalError",
@@ -327,7 +339,8 @@ class PostgresqlLifecycleAuthority:
         }:
             context["progress_outcome"] = "connection_timeout"
             raise CacheBlobLifecycleTimeoutError(
-                "PostgreSQL lifecycle authority made no bounded progress", context=context
+                "PostgreSQL lifecycle authority made no bounded progress",
+                context=context,
             ) from error
         raise CacheBlobBackendError(
             "PostgreSQL lifecycle authority operation failed", context=context
@@ -383,7 +396,9 @@ class PostgresqlLifecycleAuthority:
         )
         metadata = cursor.fetchone()
         if metadata is None or len(metadata) != 4:
-            raise CacheBlobMigrationRequiredError("PostgreSQL lifecycle authority is absent")
+            raise CacheBlobMigrationRequiredError(
+                "PostgreSQL lifecycle authority is absent"
+            )
         version, identity, capability, revision = metadata
         try:
             identity = _bounded_identity(identity)
@@ -446,7 +461,10 @@ class PostgresqlLifecycleAuthority:
             raise CacheBlobMigrationRequiredError(
                 "PostgreSQL lifecycle authority store identity is incompatible"
             ) from error
-        if self._expected_store_identity is not None and identity != self._expected_store_identity:
+        if (
+            self._expected_store_identity is not None
+            and identity != self._expected_store_identity
+        ):
             raise CacheBlobMigrationRequiredError(
                 "PostgreSQL lifecycle authority store identity is incompatible"
             )
@@ -648,7 +666,9 @@ class PostgresqlLifecycleAuthority:
                 "Migration candidate byte count disagrees with verified receipt"
             )
         if len({entry.key for entry in entries}) != len(entries):
-            raise CacheBlobLifecycleConflictError("Migration candidate contains duplicate keys")
+            raise CacheBlobLifecycleConflictError(
+                "Migration candidate contains duplicate keys"
+            )
         if candidate_digest(entries) != receipt.candidate_digest:
             raise CacheBlobLifecycleConflictError(
                 "Migration candidate digest disagrees with verified receipt"
@@ -727,8 +747,12 @@ class PostgresqlLifecycleAuthority:
         entries: tuple[AuthorityInventoryEntry, ...],
     ) -> VerifiedCandidateReceipt:
         """Persist one complete candidate without selecting it for ordinary workers."""
-        if not isinstance(receipt, VerifiedCandidateReceipt) or not isinstance(entries, tuple):
-            raise TypeError("migration candidate receipt and entries must be immutable values")
+        if not isinstance(receipt, VerifiedCandidateReceipt) or not isinstance(
+            entries, tuple
+        ):
+            raise TypeError(
+                "migration candidate receipt and entries must be immutable values"
+            )
 
         def record(cursor: Any) -> VerifiedCandidateReceipt:
             identity = self._inventory_identity(cursor)
@@ -776,7 +800,11 @@ class PostgresqlLifecycleAuthority:
                                 "WHERE singleton = TRUE AND migration_run_id = %s "
                                 "AND migration_plan_digest = %s AND migration_state = 'candidate'"
                             ).format(self._table("authority_meta")),
-                            (receipt.candidate_digest, receipt.run_id, receipt.plan_digest),
+                            (
+                                receipt.candidate_digest,
+                                receipt.run_id,
+                                receipt.plan_digest,
+                            ),
                         )
                         return receipt
                 raise CacheBlobLifecycleConflictError(
@@ -836,8 +864,12 @@ class PostgresqlLifecycleAuthority:
         entries: tuple[AuthorityInventoryEntry, ...],
     ) -> None:
         """Persist exact destination evidence without changing active selection."""
-        if not isinstance(receipt, VerifiedCandidateReceipt) or not isinstance(entries, tuple):
-            raise TypeError("migration candidate receipt and entries must be immutable values")
+        if not isinstance(receipt, VerifiedCandidateReceipt) or not isinstance(
+            entries, tuple
+        ):
+            raise TypeError(
+                "migration candidate receipt and entries must be immutable values"
+            )
 
         def record(cursor: Any) -> None:
             identity = self._inventory_identity(cursor)
@@ -873,7 +905,8 @@ class PostgresqlLifecycleAuthority:
                     or prior.manifest != verified.manifest
                     or prior.payload_digest != verified.payload_digest
                     or prior.byte_size != verified.byte_size
-                    or prior.transport_evidence not in {None, verified.transport_evidence}
+                    or prior.transport_evidence
+                    not in {None, verified.transport_evidence}
                 ):
                     raise CacheBlobLifecycleConflictError(
                         "Migration verification does not match the recorded candidate"
@@ -900,11 +933,16 @@ class PostgresqlLifecycleAuthority:
 
         self._transaction("record_candidate_verification", record)
 
-    def candidate_entries_for_run(self, *, run_id: str) -> tuple[AuthorityInventoryEntry, ...]:
+    def candidate_entries_for_run(
+        self, *, run_id: str
+    ) -> tuple[AuthorityInventoryEntry, ...]:
         """Return only this authority's durably attributed candidate descriptors."""
+
         def read(cursor: Any) -> tuple[AuthorityInventoryEntry, ...]:
             state_row = self._publication_state_row(cursor)
-            if state_row[1] != run_id or AuthorityPublicationState(state_row[6]) not in {
+            if state_row[1] != run_id or AuthorityPublicationState(
+                state_row[6]
+            ) not in {
                 AuthorityPublicationState.CANDIDATE,
                 AuthorityPublicationState.ACTIVATED_OFFLINE,
                 AuthorityPublicationState.ACTIVE,
@@ -929,15 +967,20 @@ class PostgresqlLifecycleAuthority:
         entries: tuple[AuthorityInventoryEntry, ...],
     ) -> None:
         """Clear one exact unactivated candidate after external retirement succeeds."""
-        if not isinstance(receipt, VerifiedCandidateReceipt) or not isinstance(entries, tuple):
-            raise TypeError("migration candidate receipt and entries must be immutable values")
+        if not isinstance(receipt, VerifiedCandidateReceipt) or not isinstance(
+            entries, tuple
+        ):
+            raise TypeError(
+                "migration candidate receipt and entries must be immutable values"
+            )
 
         def discard(cursor: Any) -> None:
             identity = self._inventory_identity(cursor)
             self._validate_verified_candidate(identity, receipt, entries)
             state_row = self._publication_state_row(cursor, lock=True)
             if (
-                AuthorityPublicationState(state_row[6]) is not AuthorityPublicationState.CANDIDATE
+                AuthorityPublicationState(state_row[6])
+                is not AuthorityPublicationState.CANDIDATE
                 or state_row[1] != receipt.run_id
                 or state_row[2] != receipt.plan_digest
                 or state_row[3] != receipt.candidate_digest
@@ -987,8 +1030,12 @@ class PostgresqlLifecycleAuthority:
         entries: tuple[AuthorityInventoryEntry, ...],
     ) -> ActivationReceipt:
         """Make one recorded candidate visible in one PostgreSQL-only transaction."""
-        if not isinstance(receipt, VerifiedCandidateReceipt) or not isinstance(entries, tuple):
-            raise TypeError("migration candidate receipt and entries must be immutable values")
+        if not isinstance(receipt, VerifiedCandidateReceipt) or not isinstance(
+            entries, tuple
+        ):
+            raise TypeError(
+                "migration candidate receipt and entries must be immutable values"
+            )
 
         def activate(cursor: Any) -> ActivationReceipt:
             state_row = self._publication_state_row(cursor, lock=True)
@@ -1141,7 +1188,9 @@ class PostgresqlLifecycleAuthority:
             return AuthorityPublicationState.IDLE
         return self._read_only(
             "publication_state",
-            lambda cursor: AuthorityPublicationState(self._publication_state_row(cursor)[6]),
+            lambda cursor: AuthorityPublicationState(
+                self._publication_state_row(cursor)[6]
+            ),
         )
 
     def activation_receipt_for_candidate(
@@ -1185,7 +1234,9 @@ class PostgresqlLifecycleAuthority:
                 ),
             )
 
-        return self._read_only("activation_receipt_for_candidate", receipt_for_candidate)
+        return self._read_only(
+            "activation_receipt_for_candidate", receipt_for_candidate
+        )
 
     def require_ordinary_worker_access(self) -> None:
         """Fence ordinary BlobStore work during the explicit rollback window."""
@@ -1404,7 +1455,11 @@ class PostgresqlLifecycleAuthority:
                 "authority_revision, projection_dirty) VALUES (TRUE, %s, %s, %s, 0, FALSE) "
                 "ON CONFLICT (singleton) DO NOTHING"
             ).format(self._table("authority_meta")),
-            (POSTGRESQL_AUTHORITY_SCHEMA_VERSION, identity, POSTGRESQL_AUTHORITY_CAPABILITY),
+            (
+                POSTGRESQL_AUTHORITY_SCHEMA_VERSION,
+                identity,
+                POSTGRESQL_AUTHORITY_CAPABILITY,
+            ),
         )
         # A created layout is known to have the exact table/constraint definitions.
         # Existing layouts are checked separately by ``open()`` without DDL.
@@ -1419,7 +1474,9 @@ class PostgresqlLifecycleAuthority:
     def _matches(expected: EntryExpectation, observed: EntryExpectation) -> bool:
         return expected == observed
 
-    def _expectation(self, cursor: Any, key: str, *, lock: bool = False) -> EntryExpectation:
+    def _expectation(
+        self, cursor: Any, key: str, *, lock: bool = False
+    ) -> EntryExpectation:
         suffix = " FOR UPDATE OF l, e" if lock else ""
         cursor.execute(
             sql.SQL(
@@ -1454,7 +1511,9 @@ class PostgresqlLifecycleAuthority:
         return self._read_only("read_entry", read)
 
     def read_expectation(self, key: str) -> EntryExpectation:
-        return self._read_only("read_expectation", lambda cursor: self._expectation(cursor, key))
+        return self._read_only(
+            "read_expectation", lambda cursor: self._expectation(cursor, key)
+        )
 
     def replace_committed_metadata(
         self,
@@ -1481,7 +1540,9 @@ class PostgresqlLifecycleAuthority:
             )
             row = cursor.fetchone()
             if row is None:
-                raise CacheBlobLifecycleConflictError("Metadata replacement entry is absent")
+                raise CacheBlobLifecycleConflictError(
+                    "Metadata replacement entry is absent"
+                )
             stored = self._entry_from_row((entry.key, *row), stage="replace_metadata")
             if stored != entry:
                 raise CacheBlobLifecycleConflictError(
@@ -1526,7 +1587,9 @@ class PostgresqlLifecycleAuthority:
             )
             revision_row = cursor.fetchone()
             if revision_row is None:
-                raise CacheBlobLifecycleConflictError("Authority metadata row is absent")
+                raise CacheBlobLifecycleConflictError(
+                    "Authority metadata row is absent"
+                )
             revision = revision_row[0] + 1
             manifest_digest = hashlib.sha256(manifest).hexdigest()
             cursor.execute(
@@ -1577,14 +1640,20 @@ class PostgresqlLifecycleAuthority:
     def snapshot_state(self) -> AuthorityStateSnapshot:
         def snapshot(cursor: Any) -> AuthorityStateSnapshot:
             cursor.execute(
-                sql.SQL("SELECT authority_revision, projection_dirty FROM {} WHERE singleton = TRUE").format(
-                    self._table("authority_meta")
-                )
+                sql.SQL(
+                    "SELECT authority_revision, projection_dirty FROM {} WHERE singleton = TRUE"
+                ).format(self._table("authority_meta"))
             )
             meta = cursor.fetchone()
             if meta is None:
-                raise CacheBlobMigrationRequiredError("PostgreSQL lifecycle authority is absent")
-            cursor.execute(sql.SQL("SELECT operation_id, state FROM {} ORDER BY operation_id").format(self._table("mutations")))
+                raise CacheBlobMigrationRequiredError(
+                    "PostgreSQL lifecycle authority is absent"
+                )
+            cursor.execute(
+                sql.SQL(
+                    "SELECT operation_id, state FROM {} ORDER BY operation_id"
+                ).format(self._table("mutations"))
+            )
             try:
                 states = tuple(
                     (
@@ -1596,7 +1665,10 @@ class PostgresqlLifecycleAuthority:
             except (TypeError, ValueError) as error:
                 raise CacheBlobBackendError(
                     "PostgreSQL lifecycle authority mutation row is malformed",
-                    context={"operation": "postgresql_lifecycle_authority", "stage": "snapshot_state"},
+                    context={
+                        "operation": "postgresql_lifecycle_authority",
+                        "stage": "snapshot_state",
+                    },
                 ) from error
             cursor.execute(
                 sql.SQL(
@@ -1609,7 +1681,10 @@ class PostgresqlLifecycleAuthority:
             if len(debt_rows) > self.lifecycle_limits.operation_page_size:
                 raise CacheBlobBackendError(
                     "PostgreSQL lifecycle authority diagnostic debt page exceeds its bound",
-                    context={"operation": "postgresql_lifecycle_authority", "stage": "snapshot_state"},
+                    context={
+                        "operation": "postgresql_lifecycle_authority",
+                        "stage": "snapshot_state",
+                    },
                 )
             debts = tuple(
                 CleanupDebt(row[1], row[2], row[3], row[4], row[5], row[0])
@@ -1631,14 +1706,21 @@ class PostgresqlLifecycleAuthority:
             )
             existing = cursor.fetchone()
             expected_values = (
-                spec.key, spec.generation, spec.candidate_locator, spec.expected.lineage,
-                spec.expected.revision, spec.expected.generation, spec.expected.manifest_digest,
+                spec.key,
+                spec.generation,
+                spec.candidate_locator,
+                spec.expected.lineage,
+                spec.expected.revision,
+                spec.expected.generation,
+                spec.expected.manifest_digest,
                 spec.manifest,
             )
             if existing is not None:
                 if tuple(existing) == expected_values:
                     return PreparedMutation(spec.operation_id, spec)
-                raise CacheBlobLifecycleConflictError("Operation identifier is not reusable")
+                raise CacheBlobLifecycleConflictError(
+                    "Operation identifier is not reusable"
+                )
             observed = self._expectation(cursor, spec.key)
             if not self._matches(spec.expected, observed):
                 raise CacheBlobLifecycleConflictError(
@@ -1652,17 +1734,29 @@ class PostgresqlLifecycleAuthority:
                     "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NULL, NULL, 'prepared')"
                 ).format(self._table("mutations")),
                 (
-                    spec.operation_id, spec.key, spec.generation, spec.candidate_locator,
-                    spec.expected.lineage, spec.expected.revision, spec.expected.generation,
-                    spec.expected.manifest_digest, spec.manifest,
+                    spec.operation_id,
+                    spec.key,
+                    spec.generation,
+                    spec.candidate_locator,
+                    spec.expected.lineage,
+                    spec.expected.revision,
+                    spec.expected.generation,
+                    spec.expected.manifest_digest,
+                    spec.manifest,
                 ),
             )
             return PreparedMutation(spec.operation_id, spec)
 
         return self._transaction("prepare_mutation", prepare)
 
-    def record_verification(self, prepared: PreparedMutation, proof: VerificationProof) -> None:
-        if prepared.spec.manifest and proof.manifest and prepared.spec.manifest != proof.manifest:
+    def record_verification(
+        self, prepared: PreparedMutation, proof: VerificationProof
+    ) -> None:
+        if (
+            prepared.spec.manifest
+            and proof.manifest
+            and prepared.spec.manifest != proof.manifest
+        ):
             raise CacheBlobLifecycleConflictError(
                 "Verification descriptor differs from prepared descriptor"
             )
@@ -1697,22 +1791,29 @@ class PostgresqlLifecycleAuthority:
 
         self._transaction("record_verification", record)
 
-    def _read_mutation(self, cursor: Any, operation_id: str, *, lock: bool = False) -> _MutationRow | None:
+    def _read_mutation(
+        self, cursor: Any, operation_id: str, *, lock: bool = False
+    ) -> _MutationRow | None:
         suffix = " FOR UPDATE" if lock else ""
         cursor.execute(
             sql.SQL(
                 "SELECT key, generation, locator, expected_lineage, expected_revision, "
                 "expected_generation, expected_manifest_digest, manifest, verified_digest, "
                 "verified_size, transport_evidence, state FROM {} WHERE operation_id = %s"
-            ).format(self._table("mutations")) + sql.SQL(suffix),
+            ).format(self._table("mutations"))
+            + sql.SQL(suffix),
             (operation_id,),
         )
         row = cursor.fetchone()
         if row is None:
             return None
         spec = MutationSpec.create(
-            operation_id=operation_id, key=row[0], generation=row[1], candidate_locator=row[2],
-            expected=EntryExpectation(row[3], row[4], row[5], row[6]), manifest=bytes(row[7]),
+            operation_id=operation_id,
+            key=row[0],
+            generation=row[1],
+            candidate_locator=row[2],
+            expected=EntryExpectation(row[3], row[4], row[5], row[6]),
+            manifest=bytes(row[7]),
         )
         return _MutationRow(
             spec,
@@ -1731,7 +1832,9 @@ class PostgresqlLifecycleAuthority:
                 mutation = self._read_mutation(cursor, operation_id)
                 if mutation is None:
                     return None
-                if (mutation.verified_digest is None) != (mutation.verified_size is None):
+                if (mutation.verified_digest is None) != (
+                    mutation.verified_size is None
+                ):
                     raise ValueError("verification proof fields are incomplete")
                 proof = (
                     None
@@ -1770,7 +1873,16 @@ class PostgresqlLifecycleAuthority:
 
     def _entry_from_row(self, row: tuple[Any, ...], *, stage: str) -> EntrySnapshot:
         """Decode one canonical row only after its bounded values corroborate."""
-        key, generation, locator, manifest, digest, lineage, revision, transport_evidence = row
+        (
+            key,
+            generation,
+            locator,
+            manifest,
+            digest,
+            lineage,
+            revision,
+            transport_evidence,
+        ) = row
         try:
             manifest = bytes(manifest)
         except (TypeError, ValueError) as error:
@@ -1853,7 +1965,9 @@ class PostgresqlLifecycleAuthority:
         )
         return PromotionResult(entry, debts)
 
-    def _classify_promoted_mutation(self, prepared: PreparedMutation) -> PromotionResult | None:
+    def _classify_promoted_mutation(
+        self, prepared: PreparedMutation
+    ) -> PromotionResult | None:
         def classify(cursor: Any) -> PromotionResult | None:
             mutation = self._read_mutation(cursor, prepared.operation_id)
             if mutation is not None and mutation.state == "promoted":
@@ -1885,11 +1999,15 @@ class PostgresqlLifecycleAuthority:
         if mutation is None:
             raise CacheBlobLifecycleConflictError("Mutation does not exist")
         if mutation.spec != prepared.spec:
-            raise CacheBlobLifecycleConflictError("Prepared mutation identity is incompatible")
+            raise CacheBlobLifecycleConflictError(
+                "Prepared mutation identity is incompatible"
+            )
         if mutation.state == "promoted":
             return self._promoted_result(cursor, prepared.operation_id)
         if mutation.state != "prepared" or mutation.verified_digest is None:
-            raise CacheBlobLifecycleConflictError("Mutation is not verified and prepared")
+            raise CacheBlobLifecycleConflictError(
+                "Mutation is not verified and prepared"
+            )
         cursor.execute(
             sql.SQL(
                 "INSERT INTO {} (key, lineage) VALUES (%s, 0) "
@@ -1905,11 +2023,13 @@ class PostgresqlLifecycleAuthority:
         if created_lineage and observed.revision is None:
             observed = EntryExpectation.absent()
         if not self._matches(mutation.spec.expected, observed):
-            raise CacheBlobLifecycleConflictError("Mutation lineage changed before promotion")
+            raise CacheBlobLifecycleConflictError(
+                "Mutation lineage changed before promotion"
+            )
         cursor.execute(
-            sql.SQL("SELECT generation, locator FROM {} WHERE key = %s FOR UPDATE").format(
-                self._table("entries")
-            ),
+            sql.SQL(
+                "SELECT generation, locator FROM {} WHERE key = %s FOR UPDATE"
+            ).format(self._table("entries")),
             (mutation.spec.key,),
         )
         old_entry = cursor.fetchone()
@@ -1920,12 +2040,14 @@ class PostgresqlLifecycleAuthority:
         )
         revision_row = cursor.fetchone()
         if revision_row is None:
-            raise CacheBlobMigrationRequiredError("PostgreSQL lifecycle authority is absent")
+            raise CacheBlobMigrationRequiredError(
+                "PostgreSQL lifecycle authority is absent"
+            )
         next_revision = int(revision_row[0]) + 1
         cursor.execute(
-            sql.SQL("UPDATE {} SET lineage = lineage + 1 WHERE key = %s RETURNING lineage").format(
-                self._table("entry_lineage")
-            ),
+            sql.SQL(
+                "UPDATE {} SET lineage = lineage + 1 WHERE key = %s RETURNING lineage"
+            ).format(self._table("entry_lineage")),
             (mutation.spec.key,),
         )
         lineage_row = cursor.fetchone()
@@ -1945,22 +2067,31 @@ class PostgresqlLifecycleAuthority:
                 "AND {}.revision IS NOT DISTINCT FROM %s AND {}.generation IS NOT DISTINCT FROM %s "
                 "AND {}.manifest_digest IS NOT DISTINCT FROM %s RETURNING generation, locator"
             ).format(
-                self._table("entries"), self._table("entries"), self._table("entries"),
-                self._table("entries"), self._table("entries"),
+                self._table("entries"),
+                self._table("entries"),
+                self._table("entries"),
+                self._table("entries"),
+                self._table("entries"),
             ),
             (
-                mutation.spec.key, mutation.spec.generation, mutation.spec.candidate_locator,
+                mutation.spec.key,
+                mutation.spec.generation,
+                mutation.spec.candidate_locator,
                 mutation.spec.manifest,
                 digest,
                 next_lineage,
                 next_revision,
                 mutation.transport_evidence,
-                mutation.spec.expected.lineage, mutation.spec.expected.revision,
-                mutation.spec.expected.generation, mutation.spec.expected.manifest_digest,
+                mutation.spec.expected.lineage,
+                mutation.spec.expected.revision,
+                mutation.spec.expected.generation,
+                mutation.spec.expected.manifest_digest,
             ),
         )
         if cursor.fetchone() is None:
-            raise CacheBlobLifecycleConflictError("Entry compare-and-swap failed during promotion")
+            raise CacheBlobLifecycleConflictError(
+                "Entry compare-and-swap failed during promotion"
+            )
         cursor.execute(
             sql.SQL(
                 "UPDATE {} SET state = 'promoted', promoted_lineage = %s, "
@@ -1975,7 +2106,9 @@ class PostgresqlLifecycleAuthority:
             ),
         )
         if cursor.fetchone() is None:
-            raise CacheBlobLifecycleConflictError("Prepared mutation cannot be promoted")
+            raise CacheBlobLifecycleConflictError(
+                "Prepared mutation cannot be promoted"
+            )
         if old_entry is not None and old_entry[1] != mutation.spec.candidate_locator:
             cursor.execute(
                 sql.SQL(
@@ -1993,21 +2126,27 @@ class PostgresqlLifecycleAuthority:
             (next_revision, next_revision - 1),
         )
         if cursor.fetchone() is None:
-            raise CacheBlobLifecycleConflictError("Authority revision compare-and-swap failed")
+            raise CacheBlobLifecycleConflictError(
+                "Authority revision compare-and-swap failed"
+            )
         return self._promoted_result(cursor, prepared.operation_id)
 
-    def abort_mutation(self, prepared: PreparedMutation, *, candidate_persisted: bool = False) -> None:
+    def abort_mutation(
+        self, prepared: PreparedMutation, *, candidate_persisted: bool = False
+    ) -> None:
         def abort(cursor: Any) -> None:
             mutation = self._read_mutation(cursor, prepared.operation_id, lock=True)
             if mutation is None or mutation.state == "promoted":
                 return
             if mutation.spec != prepared.spec:
-                raise CacheBlobLifecycleConflictError("Prepared mutation identity is incompatible")
+                raise CacheBlobLifecycleConflictError(
+                    "Prepared mutation identity is incompatible"
+                )
             if not candidate_persisted:
                 cursor.execute(
-                    sql.SQL("DELETE FROM {} WHERE operation_id = %s AND state <> 'promoted'").format(
-                        self._table("mutations")
-                    ),
+                    sql.SQL(
+                        "DELETE FROM {} WHERE operation_id = %s AND state <> 'promoted'"
+                    ).format(self._table("mutations")),
                     (prepared.operation_id,),
                 )
                 return
@@ -2027,7 +2166,9 @@ class PostgresqlLifecycleAuthority:
                     "ON CONFLICT (operation_id, locator, role) DO NOTHING"
                 ).format(self._table("cleanup_debt")),
                 (
-                    prepared.operation_id, mutation.spec.key, mutation.spec.generation,
+                    prepared.operation_id,
+                    mutation.spec.key,
+                    mutation.spec.generation,
                     mutation.spec.candidate_locator,
                 ),
             )
@@ -2054,9 +2195,14 @@ class PostgresqlLifecycleAuthority:
             if len(rows) > self.lifecycle_limits.max_inventory_items:
                 raise CacheBlobBackendError(
                     "PostgreSQL lifecycle authority list_entries exceeds its bounded diagnostic page",
-                    context={"operation": "postgresql_lifecycle_authority", "stage": "list_entries"},
+                    context={
+                        "operation": "postgresql_lifecycle_authority",
+                        "stage": "list_entries",
+                    },
                 )
-            return tuple(self._entry_from_row(row, stage="list_entries") for row in rows)
+            return tuple(
+                self._entry_from_row(row, stage="list_entries") for row in rows
+            )
 
         return self._read_only("list_entries", list_page)
 
@@ -2085,12 +2231,14 @@ class PostgresqlLifecycleAuthority:
         def page(read_cursor: Any) -> CatalogPage:
             metadata = self._metadata(read_cursor)
             if metadata is None:
-                raise CacheBlobMigrationRequiredError("PostgreSQL lifecycle authority is absent")
+                raise CacheBlobMigrationRequiredError(
+                    "PostgreSQL lifecycle authority is absent"
+                )
             _version, store_id, _capability = metadata
             read_cursor.execute(
-                sql.SQL("SELECT authority_revision FROM {} WHERE singleton = TRUE").format(
-                    self._table("authority_meta")
-                )
+                sql.SQL(
+                    "SELECT authority_revision FROM {} WHERE singleton = TRUE"
+                ).format(self._table("authority_meta"))
             )
             revision_row = read_cursor.fetchone()
             if revision_row is None or type(revision_row[0]) is not int:
@@ -2189,7 +2337,10 @@ class PostgresqlLifecycleAuthority:
             if len(rows) > self.lifecycle_limits.operation_page_size:
                 raise CacheBlobBackendError(
                     "PostgreSQL cleanup debt page exceeds its configured bound",
-                    context={"operation": "postgresql_lifecycle_authority", "stage": "pending_cleanup_debts"},
+                    context={
+                        "operation": "postgresql_lifecycle_authority",
+                        "stage": "pending_cleanup_debts",
+                    },
                 )
             try:
                 return tuple(
@@ -2199,7 +2350,10 @@ class PostgresqlLifecycleAuthority:
             except (TypeError, ValueError) as error:
                 raise CacheBlobBackendError(
                     "PostgreSQL cleanup debt row is malformed",
-                    context={"operation": "postgresql_lifecycle_authority", "stage": "pending_cleanup_debts"},
+                    context={
+                        "operation": "postgresql_lifecycle_authority",
+                        "stage": "pending_cleanup_debts",
+                    },
                 ) from error
 
         return self._read_only("pending_cleanup_debts", read_debts)
@@ -2220,7 +2374,10 @@ class PostgresqlLifecycleAuthority:
             if len(rows) > self.lifecycle_limits.operation_page_size:
                 raise CacheBlobBackendError(
                     "PostgreSQL mutation page exceeds its configured bound",
-                    context={"operation": "postgresql_lifecycle_authority", "stage": "pending_mutations"},
+                    context={
+                        "operation": "postgresql_lifecycle_authority",
+                        "stage": "pending_mutations",
+                    },
                 )
             try:
                 return tuple(
@@ -2240,7 +2397,10 @@ class PostgresqlLifecycleAuthority:
             except (TypeError, ValueError) as error:
                 raise CacheBlobBackendError(
                     "PostgreSQL mutation row is malformed",
-                    context={"operation": "postgresql_lifecycle_authority", "stage": "pending_mutations"},
+                    context={
+                        "operation": "postgresql_lifecycle_authority",
+                        "stage": "pending_mutations",
+                    },
                 ) from error
 
         return self._read_only("pending_mutations", read_mutations)
@@ -2288,9 +2448,9 @@ class PostgresqlLifecycleAuthority:
                     "Delete expectation no longer matches authority"
                 )
             cursor.execute(
-                sql.SQL("INSERT INTO {} (key, lineage) VALUES (%s, 0) ON CONFLICT (key) DO NOTHING").format(
-                    self._table("entry_lineage")
-                ),
+                sql.SQL(
+                    "INSERT INTO {} (key, lineage) VALUES (%s, 0) ON CONFLICT (key) DO NOTHING"
+                ).format(self._table("entry_lineage")),
                 (key,),
             )
             cursor.execute(
@@ -2298,21 +2458,23 @@ class PostgresqlLifecycleAuthority:
                 (key,),
             )
             cursor.execute(
-                sql.SQL("UPDATE {} SET lineage = lineage + 1 WHERE key = %s RETURNING lineage").format(
-                    self._table("entry_lineage")
-                ),
+                sql.SQL(
+                    "UPDATE {} SET lineage = lineage + 1 WHERE key = %s RETURNING lineage"
+                ).format(self._table("entry_lineage")),
                 (key,),
             )
             if cursor.fetchone() is None:
                 raise CacheBlobLifecycleConflictError("Entry lineage cannot be retired")
             cursor.execute(
-                sql.SQL("SELECT authority_revision FROM {} WHERE singleton = TRUE FOR UPDATE").format(
-                    self._table("authority_meta")
-                )
+                sql.SQL(
+                    "SELECT authority_revision FROM {} WHERE singleton = TRUE FOR UPDATE"
+                ).format(self._table("authority_meta"))
             )
             revision_row = cursor.fetchone()
             if revision_row is None:
-                raise CacheBlobMigrationRequiredError("PostgreSQL lifecycle authority is absent")
+                raise CacheBlobMigrationRequiredError(
+                    "PostgreSQL lifecycle authority is absent"
+                )
             cursor.execute(
                 sql.SQL(
                     "UPDATE {} SET authority_revision = %s, projection_dirty = TRUE "
@@ -2321,7 +2483,9 @@ class PostgresqlLifecycleAuthority:
                 (int(revision_row[0]) + 1, revision_row[0]),
             )
             if cursor.fetchone() is None:
-                raise CacheBlobLifecycleConflictError("Authority revision compare-and-swap failed")
+                raise CacheBlobLifecycleConflictError(
+                    "Authority revision compare-and-swap failed"
+                )
 
         self._transaction("delete_entry", delete)
 
@@ -2345,16 +2509,21 @@ class PostgresqlLifecycleAuthority:
                 except (TypeError, ValueError) as error:
                     raise CacheBlobBackendError(
                         "PostgreSQL clear run row is malformed",
-                        context={"operation": "postgresql_lifecycle_authority", "stage": "begin_clear"},
+                        context={
+                            "operation": "postgresql_lifecycle_authority",
+                            "stage": "begin_clear",
+                        },
                     ) from error
             cursor.execute(
-                sql.SQL("SELECT authority_revision FROM {} WHERE singleton = TRUE FOR UPDATE").format(
-                    self._table("authority_meta")
-                )
+                sql.SQL(
+                    "SELECT authority_revision FROM {} WHERE singleton = TRUE FOR UPDATE"
+                ).format(self._table("authority_meta"))
             )
             revision = cursor.fetchone()
             if revision is None:
-                raise CacheBlobMigrationRequiredError("PostgreSQL lifecycle authority is absent")
+                raise CacheBlobMigrationRequiredError(
+                    "PostgreSQL lifecycle authority is absent"
+                )
             token = PageToken(uuid.uuid4().hex)
             cursor.execute(
                 sql.SQL(
@@ -2418,7 +2587,11 @@ class PostgresqlLifecycleAuthority:
             sql.SQL(
                 "UPDATE {} SET capture_cursor = %s, snapshot_complete = %s WHERE run_id = %s"
             ).format(self._table("clear_runs")),
-            (capture_cursor, len(rows) <= self.lifecycle_limits.manifest_page_size, token_value),
+            (
+                capture_cursor,
+                len(rows) <= self.lifecycle_limits.manifest_page_size,
+                token_value,
+            ),
         )
 
     def page_clear(self, token: PageToken) -> tuple[EntrySnapshot, ...]:
@@ -2453,11 +2626,17 @@ class PostgresqlLifecycleAuthority:
             entries: list[EntrySnapshot] = []
             for row in selected:
                 entry = self._entry_from_row(row, stage="page_clear")
-                if bytes_seen + len(entry.manifest) > self.lifecycle_limits.max_operation_record_bytes:
+                if (
+                    bytes_seen + len(entry.manifest)
+                    > self.lifecycle_limits.max_operation_record_bytes
+                ):
                     if not entries:
                         raise CacheBlobBackendError(
                             "PostgreSQL clear target exceeds the configured work bound",
-                            context={"operation": "postgresql_lifecycle_authority", "stage": "page_clear"},
+                            context={
+                                "operation": "postgresql_lifecycle_authority",
+                                "stage": "page_clear",
+                            },
                         )
                     break
                 entries.append(entry)
@@ -2487,10 +2666,14 @@ class PostgresqlLifecycleAuthority:
             if target is None and run is not None and run[0] == "completed":
                 return
             if run is None or run[0] != "active":
-                raise CacheBlobLifecycleConflictError("Clear run cannot accept checkpoint")
+                raise CacheBlobLifecycleConflictError(
+                    "Clear run cannot accept checkpoint"
+                )
             if target is None:
                 if not bool(run[1]):
-                    raise CacheBlobLifecycleConflictError("Clear snapshot is not complete")
+                    raise CacheBlobLifecycleConflictError(
+                        "Clear snapshot is not complete"
+                    )
                 cursor.execute(
                     sql.SQL(
                         "UPDATE {} SET state = 'completed' WHERE run_id = %s AND NOT EXISTS "
@@ -2521,7 +2704,9 @@ class PostgresqlLifecycleAuthority:
             )
             row = cursor.fetchone()
             if row is None or row[0] != "pending":
-                raise CacheBlobLifecycleConflictError("Clear target is no longer pending")
+                raise CacheBlobLifecycleConflictError(
+                    "Clear target is no longer pending"
+                )
             cursor.execute(
                 sql.SQL(
                     "SELECT lineage, revision, generation, manifest_digest FROM {} WHERE key = %s"
@@ -2537,7 +2722,11 @@ class PostgresqlLifecycleAuthority:
                     (target.key,),
                 )
                 lineage = cursor.fetchone()
-                if current is not None or lineage is None or lineage[0] <= target.expectation.lineage:
+                if (
+                    current is not None
+                    or lineage is None
+                    or lineage[0] <= target.expectation.lineage
+                ):
                     raise CacheBlobLifecycleConflictError(
                         "Clear target completion lacks exact absence proof"
                     )
@@ -2556,7 +2745,9 @@ class PostgresqlLifecycleAuthority:
                 (state, token_value, target.key),
             )
             if cursor.fetchone() is None:
-                raise CacheBlobLifecycleConflictError("Clear target cannot accept checkpoint")
+                raise CacheBlobLifecycleConflictError(
+                    "Clear target cannot accept checkpoint"
+                )
             cursor.execute(
                 sql.SQL(
                     "UPDATE {} SET last_key = %s, state = CASE WHEN snapshot_complete AND NOT EXISTS "
@@ -2584,20 +2775,33 @@ class PostgresqlLifecycleAuthority:
                 except (TypeError, ValueError) as error:
                     raise CacheBlobBackendError(
                         "PostgreSQL reconciliation run row is malformed",
-                        context={"operation": "postgresql_lifecycle_authority", "stage": "begin_reconciliation"},
+                        context={
+                            "operation": "postgresql_lifecycle_authority",
+                            "stage": "begin_reconciliation",
+                        },
                     ) from error
-            cursor.execute(sql.SQL("SELECT COALESCE(MAX(mutation_id), 0) FROM {}").format(self._table("mutations")))
+            cursor.execute(
+                sql.SQL("SELECT COALESCE(MAX(mutation_id), 0) FROM {}").format(
+                    self._table("mutations")
+                )
+            )
             mutation_high_water = cursor.fetchone()[0]
-            cursor.execute(sql.SQL("SELECT COALESCE(MAX(debt_id), 0) FROM {}").format(self._table("cleanup_debt")))
+            cursor.execute(
+                sql.SQL("SELECT COALESCE(MAX(debt_id), 0) FROM {}").format(
+                    self._table("cleanup_debt")
+                )
+            )
             debt_high_water = cursor.fetchone()[0]
             cursor.execute(
-                sql.SQL("SELECT authority_revision FROM {} WHERE singleton = TRUE FOR UPDATE").format(
-                    self._table("authority_meta")
-                )
+                sql.SQL(
+                    "SELECT authority_revision FROM {} WHERE singleton = TRUE FOR UPDATE"
+                ).format(self._table("authority_meta"))
             )
             revision = cursor.fetchone()
             if revision is None:
-                raise CacheBlobMigrationRequiredError("PostgreSQL lifecycle authority is absent")
+                raise CacheBlobMigrationRequiredError(
+                    "PostgreSQL lifecycle authority is absent"
+                )
             token = PageToken(uuid.uuid4().hex)
             cursor.execute(
                 sql.SQL(
@@ -2627,21 +2831,35 @@ class PostgresqlLifecycleAuthority:
                 )
                 row = cursor.fetchone()
                 if row is None:
-                    raise CacheBlobLifecycleConflictError("Reconciliation run does not exist")
+                    raise CacheBlobLifecycleConflictError(
+                        "Reconciliation run does not exist"
+                    )
                 return ReconciliationSnapshot(row[0], row[1], row[2], token_value)
             cursor.execute(
-                sql.SQL("SELECT authority_revision FROM {} WHERE singleton = TRUE").format(
-                    self._table("authority_meta")
-                )
+                sql.SQL(
+                    "SELECT authority_revision FROM {} WHERE singleton = TRUE"
+                ).format(self._table("authority_meta"))
             )
             revision = cursor.fetchone()
             if revision is None:
-                raise CacheBlobMigrationRequiredError("PostgreSQL lifecycle authority is absent")
-            cursor.execute(sql.SQL("SELECT COALESCE(MAX(mutation_id), 0) FROM {}").format(self._table("mutations")))
+                raise CacheBlobMigrationRequiredError(
+                    "PostgreSQL lifecycle authority is absent"
+                )
+            cursor.execute(
+                sql.SQL("SELECT COALESCE(MAX(mutation_id), 0) FROM {}").format(
+                    self._table("mutations")
+                )
+            )
             mutation_high_water = cursor.fetchone()[0]
-            cursor.execute(sql.SQL("SELECT COALESCE(MAX(debt_id), 0) FROM {}").format(self._table("cleanup_debt")))
+            cursor.execute(
+                sql.SQL("SELECT COALESCE(MAX(debt_id), 0) FROM {}").format(
+                    self._table("cleanup_debt")
+                )
+            )
             debt_high_water = cursor.fetchone()[0]
-            return ReconciliationSnapshot(revision[0], mutation_high_water, debt_high_water)
+            return ReconciliationSnapshot(
+                revision[0], mutation_high_water, debt_high_water
+            )
 
         return self._read_only("reconciliation_snapshot", snapshot)
 
@@ -2667,7 +2885,8 @@ class PostgresqlLifecycleAuthority:
         if len(locators) > self.lifecycle_limits.max_inventory_items:
             raise ValueError("inventory locator page exceeds the configured bound")
         normalized = tuple(
-            _bounded_authority_text(locator, "inventory locator") for locator in locators
+            _bounded_authority_text(locator, "inventory locator")
+            for locator in locators
         )
         if len(set(normalized)) != len(normalized):
             raise ValueError("inventory locator page contains duplicate locators")
@@ -2719,7 +2938,9 @@ class PostgresqlLifecycleAuthority:
                         "stage": "inventory_locator_attribution",
                     },
                 ) from error
-            if not all(type(revision) is int and revision >= 0 for revision in revisions):
+            if not all(
+                type(revision) is int and revision >= 0 for revision in revisions
+            ):
                 raise CacheBlobBackendError(
                     "PostgreSQL inventory attribution row is malformed",
                     context={
@@ -2818,9 +3039,15 @@ class PostgresqlLifecycleAuthority:
                 if len(manifest) > self.lifecycle_limits.max_operation_record_bytes:
                     raise CacheBlobBackendError(
                         "PostgreSQL reconciliation mutation exceeds the configured record bound",
-                        context={"operation": "postgresql_lifecycle_authority", "stage": "page_reconciliation_work"},
+                        context={
+                            "operation": "postgresql_lifecycle_authority",
+                            "stage": "page_reconciliation_work",
+                        },
                     )
-                if bytes_seen + len(manifest) > self.lifecycle_limits.max_operation_record_bytes:
+                if (
+                    bytes_seen + len(manifest)
+                    > self.lifecycle_limits.max_operation_record_bytes
+                ):
                     break
                 works.append(
                     ReconciliationWork(
@@ -2834,7 +3061,9 @@ class PostgresqlLifecycleAuthority:
                                 key=row[2],
                                 generation=row[3],
                                 candidate_locator=row[4],
-                                expected=EntryExpectation(row[5], row[6], row[7], row[8]),
+                                expected=EntryExpectation(
+                                    row[5], row[6], row[7], row[8]
+                                ),
                                 manifest=manifest,
                             ),
                         ),
@@ -2855,7 +3084,9 @@ class PostgresqlLifecycleAuthority:
                         "debt",
                         row[0],
                         row[6],
-                        debt=CleanupDebt(row[1], row[2], row[3], row[4], row[5], row[0]),
+                        debt=CleanupDebt(
+                            row[1], row[2], row[3], row[4], row[5], row[0]
+                        ),
                     )
                 )
                 next_debt = row[0]
@@ -2869,7 +3100,9 @@ class PostgresqlLifecycleAuthority:
                         "debt",
                         row[0],
                         row[6],
-                        debt=CleanupDebt(row[1], row[2], row[3], row[4], row[5], row[0]),
+                        debt=CleanupDebt(
+                            row[1], row[2], row[3], row[4], row[5], row[0]
+                        ),
                     )
                 )
                 next_debt = row[0]
@@ -2890,7 +3123,9 @@ class PostgresqlLifecycleAuthority:
             )
             run = cursor.fetchone()
             if run is None:
-                raise CacheBlobLifecycleConflictError("Reconciliation run does not exist")
+                raise CacheBlobLifecycleConflictError(
+                    "Reconciliation run does not exist"
+                )
             cursor.execute(
                 sql.SQL(
                     "SELECT debt_id, operation_id, locator, key, generation, role FROM {} "
@@ -2902,7 +3137,10 @@ class PostgresqlLifecycleAuthority:
             if len(rows) > self.lifecycle_limits.operation_page_size:
                 raise CacheBlobBackendError(
                     "PostgreSQL reconciliation debt page exceeds its configured bound",
-                    context={"operation": "postgresql_lifecycle_authority", "stage": "page_reconciliation"},
+                    context={
+                        "operation": "postgresql_lifecycle_authority",
+                        "stage": "page_reconciliation",
+                    },
                 )
             return tuple(
                 CleanupDebt(row[1], row[2], row[3], row[4], row[5], row[0])
@@ -2939,7 +3177,9 @@ class PostgresqlLifecycleAuthority:
                 raise ValueError("Reconciliation checkpoint state is unsupported")
             if work.source not in {"mutation", "debt"}:
                 raise ValueError("Reconciliation work source is unsupported")
-            cursor_column = "mutation_cursor" if work.source == "mutation" else "debt_cursor"
+            cursor_column = (
+                "mutation_cursor" if work.source == "mutation" else "debt_cursor"
+            )
             cursor.execute(
                 sql.SQL(
                     "INSERT INTO {} (run_id, source, action_id, state) VALUES (%s, %s, %s, %s) "
@@ -2978,7 +3218,9 @@ class PostgresqlLifecycleAuthority:
             )
             row = cursor.fetchone()
             if row is None:
-                raise CacheBlobMigrationRequiredError("PostgreSQL lifecycle authority is absent")
+                raise CacheBlobMigrationRequiredError(
+                    "PostgreSQL lifecycle authority is absent"
+                )
             revision, dirty = row
             if expected is not None and expected.value != revision:
                 raise CacheBlobLifecycleConflictError("Projection revision changed")
@@ -3007,7 +3249,10 @@ class PostgresqlLifecycleAuthority:
         self._require_open()
         raise CacheBlobBackendError(
             "PostgreSQL lifecycle authority has no local projection backup; use catalog pages",
-            context={"operation": "postgresql_lifecycle_authority", "stage": "projection_backup"},
+            context={
+                "operation": "postgresql_lifecycle_authority",
+                "stage": "projection_backup",
+            },
         )
         yield  # pragma: no cover - preserves context-manager typing.
 

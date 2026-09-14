@@ -60,7 +60,9 @@ class _StageArtifactRecord:
     descriptor: int | None
 
     @classmethod
-    def from_stat(cls, descriptor: int, artifact_stat: os.stat_result) -> _StageArtifactRecord:
+    def from_stat(
+        cls, descriptor: int, artifact_stat: os.stat_result
+    ) -> _StageArtifactRecord:
         """Capture the file identity that publication must reopen exactly."""
         return cls(
             st_dev=artifact_stat.st_dev,
@@ -196,7 +198,9 @@ class GuardedHandlerIO:
                 _raise_invalid_stage_artifact()
             artifact = self._staged_artifact(stage_root, stage_base, raw_result)
             try:
-                yield GuardedStagedArtifact(stage_root, stage_base, artifact, raw_result)
+                yield GuardedStagedArtifact(
+                    stage_root, stage_base, artifact, raw_result
+                )
             finally:
                 artifact.record.close()
 
@@ -243,7 +247,9 @@ class GuardedHandlerIO:
             except ValueError:
                 yield stage_root
             else:
-                raise RuntimeError("Private handler staging directory overlaps storage root")
+                raise RuntimeError(
+                    "Private handler staging directory overlaps storage root"
+                )
 
     @staticmethod
     def _safe_suffix(stage_base: Path, artifact: Path) -> str:
@@ -316,10 +322,7 @@ class GuardedHandlerIO:
                 "Handler staging artifact is unavailable",
                 reason=CacheReason.PATH_RACE,
             ) from exc
-        if (
-            not stat.S_ISREG(descriptor_stat.st_mode)
-            or descriptor_stat.st_nlink != 1
-        ):
+        if not stat.S_ISREG(descriptor_stat.st_mode) or descriptor_stat.st_nlink != 1:
             os.close(descriptor)
             _raise_invalid_stage_artifact()
         if (
@@ -356,9 +359,7 @@ class GuardedHandlerIO:
                     and hasattr(os, "O_NOFOLLOW")
                 )
                 if supports_descriptor_walk:
-                    directory_flags = (
-                        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-                    )
+                    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
                     root_descriptor = os.open(resolved_root, directory_flags)
                     parent_descriptor = root_descriptor
                     try:

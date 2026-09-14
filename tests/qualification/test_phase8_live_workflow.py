@@ -43,15 +43,15 @@ def test_rc_job_checks_out_the_exact_detached_sha_before_services() -> None:
     assert "environment: live-qualification" in release_candidate
     assert "runs-on: ubuntu-latest" in release_candidate
     assert "CANDIDATE_SHA: ${{ inputs.candidate_sha }}" in release_candidate
-    assert "^\"[0-9a-f]{40}\"$" not in release_candidate
+    assert '^"[0-9a-f]{40}"$' not in release_candidate
     assert "^[0-9a-f]{40}$" in release_candidate
     assert "ref: ${{ inputs.candidate_sha }}" in release_candidate
     assert "persist-credentials: false" in release_candidate
     assert "git rev-parse HEAD" in release_candidate
     assert "candidate checkout must be detached" in release_candidate
-    assert release_candidate.index("Prove detached source identity") < release_candidate.index(
-        "Run frozen real-service qualification"
-    )
+    assert release_candidate.index(
+        "Prove detached source identity"
+    ) < release_candidate.index("Run frozen real-service qualification")
 
 
 def test_live_secrets_are_scoped_to_the_fixed_runner_step() -> None:
@@ -59,9 +59,9 @@ def test_live_secrets_are_scoped_to_the_fixed_runner_step() -> None:
     workflow = _workflow()
     release_candidate = _job_block(workflow, "release-candidate", "scheduled-drift")
     runner_step = release_candidate[
-        release_candidate.index("Run frozen real-service qualification") : release_candidate.index(
-            "Upload release-candidate live evidence"
-        )
+        release_candidate.index(
+            "Run frozen real-service qualification"
+        ) : release_candidate.index("Upload release-candidate live evidence")
     ]
 
     for name in (

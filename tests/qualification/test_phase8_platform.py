@@ -58,7 +58,9 @@ def test_python_missing_or_duplicate_stable_rows_fail_closed(runner) -> None:
         runner.aggregate_rows([*rows, rows[0]])
 
 
-def test_python_advisory_result_cannot_satisfy_or_invalidate_stable_slot(runner) -> None:
+def test_python_advisory_result_cannot_satisfy_or_invalidate_stable_slot(
+    runner,
+) -> None:
     """Prerelease evidence is retained as advisory without changing stable outcome."""
     rows = _stable_rows(runner)
     rows.append(

@@ -91,7 +91,8 @@ class InMemoryLifecycleAuthority:
         self._entries: dict[str, EntrySnapshot] = {}
         self._lineages: dict[str, int] = {}
         self._mutations: dict[
-            str, tuple[MutationSpec, VerificationProof | None, str, EntrySnapshot | None]
+            str,
+            tuple[MutationSpec, VerificationProof | None, str, EntrySnapshot | None],
         ] = {}
         self._mutation_order: dict[str, int] = {}
         self._mutation_high_water = 0
@@ -175,7 +176,10 @@ class InMemoryLifecycleAuthority:
             return AuthorityStateSnapshot(
                 self._revision,
                 self._projection_dirty,
-                tuple((operation_id, row[2]) for operation_id, row in sorted(self._mutations.items())),
+                tuple(
+                    (operation_id, row[2])
+                    for operation_id, row in sorted(self._mutations.items())
+                ),
                 tuple(self._debts.values()),
             )
 
@@ -185,9 +189,13 @@ class InMemoryLifecycleAuthority:
             if existing is not None:
                 if existing[0] == spec:
                     return PreparedMutation(spec.operation_id, spec)
-                raise CacheBlobLifecycleConflictError("Operation identifier is not reusable")
+                raise CacheBlobLifecycleConflictError(
+                    "Operation identifier is not reusable"
+                )
             if self._expectation(spec.key) != spec.expected:
-                raise CacheBlobLifecycleConflictError("Mutation expectation no longer matches authority")
+                raise CacheBlobLifecycleConflictError(
+                    "Mutation expectation no longer matches authority"
+                )
             self._mutations[spec.operation_id] = (spec, None, "prepared", None)
             self._mutation_high_water += 1
             self._mutation_order[spec.operation_id] = self._mutation_high_water
@@ -219,11 +227,15 @@ class InMemoryLifecycleAuthority:
                 context={"operation_id": operation_id, "state": state},
             )
 
-    def record_verification(self, prepared: PreparedMutation, proof: VerificationProof) -> None:
+    def record_verification(
+        self, prepared: PreparedMutation, proof: VerificationProof
+    ) -> None:
         def record() -> None:
             mutation = self._mutations.get(prepared.operation_id)
             if mutation is None or mutation[0] != prepared.spec:
-                raise CacheBlobLifecycleConflictError("Prepared mutation cannot accept verification")
+                raise CacheBlobLifecycleConflictError(
+                    "Prepared mutation cannot accept verification"
+                )
             if mutation[2] == "promoted":
                 return
             if mutation[1] is not None:
@@ -250,8 +262,12 @@ class InMemoryLifecycleAuthority:
             raise CacheBlobLifecycleConflictError("Mutation does not exist")
         entry = mutation[3]
         if entry is None:
-            raise CacheBlobLifecycleConflictError("Promoted mutation has no committed entry")
-        debts = tuple(debt for debt in self._debts.values() if debt.operation_id == operation_id)
+            raise CacheBlobLifecycleConflictError(
+                "Promoted mutation has no committed entry"
+            )
+        debts = tuple(
+            debt for debt in self._debts.values() if debt.operation_id == operation_id
+        )
         return PromotionResult(self._copy(entry), debts)
 
     def promote_mutation(self, prepared: PreparedMutation) -> PromotionResult:
@@ -263,17 +279,17 @@ class InMemoryLifecycleAuthority:
             if state == "promoted":
                 return self._promoted_result(prepared.operation_id)
             if proof is None:
-                raise CacheBlobLifecycleConflictError("Mutation is not verified and prepared")
-            if (
-                spec.manifest
-                and proof.manifest
-                and spec.manifest != proof.manifest
-            ):
+                raise CacheBlobLifecycleConflictError(
+                    "Mutation is not verified and prepared"
+                )
+            if spec.manifest and proof.manifest and spec.manifest != proof.manifest:
                 raise CacheBlobLifecycleConflictError(
                     "Verification descriptor differs from prepared descriptor"
                 )
             if self._expectation(spec.key) != spec.expected:
-                raise CacheBlobLifecycleConflictError("Mutation lineage changed before promotion")
+                raise CacheBlobLifecycleConflictError(
+                    "Mutation lineage changed before promotion"
+                )
             previous = self._entries.get(spec.key)
             lineage = self._lineages.get(spec.key, 0) + 1
             self._lineages[spec.key] = lineage
@@ -424,7 +440,9 @@ class InMemoryLifecycleAuthority:
         """Return immutable committed/tombstone entry snapshots by key."""
         self._require_open()
         with self._lock:
-            return tuple(self._copy(entry) for _, entry in sorted(self._entries.items()))
+            return tuple(
+                self._copy(entry) for _, entry in sorted(self._entries.items())
+            )
 
     # The methods below are intentionally not part of LifecycleAuthority.
     # They are an explicit, read-only maintenance seam used only by the
@@ -474,7 +492,8 @@ class InMemoryLifecycleAuthority:
                 (
                     entry
                     for entry in self._entries.values()
-                    if start_after is None or (entry.key, entry.generation) > start_after
+                    if start_after is None
+                    or (entry.key, entry.generation) > start_after
                 ),
                 key=lambda entry: (entry.key, entry.generation),
             )
@@ -569,10 +588,14 @@ class InMemoryLifecycleAuthority:
                     "Verified migration candidate is not recorded by this authority"
                 )
             if len({entry.key for entry in entries}) != len(entries):
-                raise CacheBlobLifecycleConflictError("Migration candidate contains duplicate keys")
+                raise CacheBlobLifecycleConflictError(
+                    "Migration candidate contains duplicate keys"
+                )
 
             next_revision = self._revision + 1
-            prior_entries = {key: self._copy(entry) for key, entry in self._entries.items()}
+            prior_entries = {
+                key: self._copy(entry) for key, entry in self._entries.items()
+            }
             activated: dict[str, EntrySnapshot] = {}
             for candidate in entries:
                 manifest = BlobManifest.from_canonical_bytes(candidate.manifest)
@@ -626,12 +649,19 @@ class InMemoryLifecycleAuthority:
         entries: tuple[AuthorityInventoryEntry, ...],
     ) -> VerifiedCandidateReceipt:
         """Record a complete in-process candidate without selecting it for readers."""
-        if not isinstance(receipt, VerifiedCandidateReceipt) or not isinstance(entries, tuple):
-            raise TypeError("migration candidate receipt and entries must be immutable values")
+        if not isinstance(receipt, VerifiedCandidateReceipt) or not isinstance(
+            entries, tuple
+        ):
+            raise TypeError(
+                "migration candidate receipt and entries must be immutable values"
+            )
 
         def record() -> VerifiedCandidateReceipt:
             identity = self.identity_snapshot()
-            if receipt.destination_identity != identity or receipt.destination_revision != self._revision:
+            if (
+                receipt.destination_identity != identity
+                or receipt.destination_revision != self._revision
+            ):
                 raise CacheBlobLifecycleConflictError(
                     "Migration destination identity or revision changed before candidate recording"
                 )
@@ -645,15 +675,21 @@ class InMemoryLifecycleAuthority:
                     "Migration candidate does not match its verified receipt"
                 )
             if self._migration_state is AuthorityPublicationState.CANDIDATE:
-                if self._migration_receipt == receipt and self._migration_candidates == entries:
+                if (
+                    self._migration_receipt == receipt
+                    and self._migration_candidates == entries
+                ):
                     return receipt
                 if (
                     self._migration_receipt is not None
                     and self._migration_receipt.run_id == receipt.run_id
                     and self._migration_receipt.plan_digest == receipt.plan_digest
-                    and self._migration_receipt.source_identity == receipt.source_identity
-                    and self._migration_receipt.source_revision == receipt.source_revision
-                    and self._migration_candidates == entries[: len(self._migration_candidates)]
+                    and self._migration_receipt.source_identity
+                    == receipt.source_identity
+                    and self._migration_receipt.source_revision
+                    == receipt.source_revision
+                    and self._migration_candidates
+                    == entries[: len(self._migration_candidates)]
                 ):
                     self._migration_receipt = receipt
                     self._migration_candidates = entries
@@ -702,8 +738,12 @@ class InMemoryLifecycleAuthority:
         receipt.  The authority accepts the update only when every descriptor
         remains the exact candidate it already attributed.
         """
-        if not isinstance(receipt, VerifiedCandidateReceipt) or not isinstance(entries, tuple):
-            raise TypeError("migration candidate receipt and entries must be immutable values")
+        if not isinstance(receipt, VerifiedCandidateReceipt) or not isinstance(
+            entries, tuple
+        ):
+            raise TypeError(
+                "migration candidate receipt and entries must be immutable values"
+            )
 
         def record() -> None:
             if (
@@ -714,7 +754,9 @@ class InMemoryLifecycleAuthority:
                 raise CacheBlobLifecycleConflictError(
                     "Migration candidate verification requires its recorded candidate"
                 )
-            for stored, verified in zip(self._migration_candidates, entries, strict=True):
+            for stored, verified in zip(
+                self._migration_candidates, entries, strict=True
+            ):
                 if (
                     stored.key != verified.key
                     or stored.generation != verified.generation
@@ -722,7 +764,8 @@ class InMemoryLifecycleAuthority:
                     or stored.manifest != verified.manifest
                     or stored.payload_digest != verified.payload_digest
                     or stored.byte_size != verified.byte_size
-                    or stored.transport_evidence not in {None, verified.transport_evidence}
+                    or stored.transport_evidence
+                    not in {None, verified.transport_evidence}
                 ):
                     raise CacheBlobLifecycleConflictError(
                         "Migration verification does not match the recorded candidate"
@@ -731,7 +774,9 @@ class InMemoryLifecycleAuthority:
 
         self._transition(record)
 
-    def candidate_entries_for_run(self, *, run_id: str) -> tuple[AuthorityInventoryEntry, ...]:
+    def candidate_entries_for_run(
+        self, *, run_id: str
+    ) -> tuple[AuthorityInventoryEntry, ...]:
         """Return only exact candidate descriptors already held by this authority."""
         self._require_open()
         with self._lock:
@@ -756,8 +801,12 @@ class InMemoryLifecycleAuthority:
         entries: tuple[AuthorityInventoryEntry, ...],
     ) -> None:
         """Clear one exact unactivated candidate after external retirement succeeds."""
-        if not isinstance(receipt, VerifiedCandidateReceipt) or not isinstance(entries, tuple):
-            raise TypeError("migration candidate receipt and entries must be immutable values")
+        if not isinstance(receipt, VerifiedCandidateReceipt) or not isinstance(
+            entries, tuple
+        ):
+            raise TypeError(
+                "migration candidate receipt and entries must be immutable values"
+            )
 
         def discard() -> None:
             if (
@@ -827,7 +876,8 @@ class InMemoryLifecycleAuthority:
                 )
             self._revision += 1
             self._entries = {
-                key: self._copy(entry) for key, entry in self._migration_prior_entries.items()
+                key: self._copy(entry)
+                for key, entry in self._migration_prior_entries.items()
             }
             self._projection_dirty = True
             self._migration_state = AuthorityPublicationState.ROLLED_BACK
@@ -919,7 +969,9 @@ class InMemoryLifecycleAuthority:
                 if cursor_identity is None
                 or (entry.key, entry.generation) > cursor_identity
             )
-            ordered = tuple(sorted(snapshots, key=lambda entry: (entry.key, entry.generation)))
+            ordered = tuple(
+                sorted(snapshots, key=lambda entry: (entry.key, entry.generation))
+            )
             return page_from_canonical_scan(
                 ordered[: work_cap + 1],
                 query=query,
@@ -963,6 +1015,7 @@ class InMemoryLifecycleAuthority:
 
     def retire_cleanup_debt(self, debt: CleanupDebt) -> None:
         """Retire one exact debt idempotently after external reclamation."""
+
         def retire() -> None:
             for row_id, pending in self._debts.items():
                 if pending == debt:
@@ -979,7 +1032,9 @@ class InMemoryLifecycleAuthority:
     def delete_entry(self, key: str, *, expected: EntryExpectation) -> None:
         def delete() -> None:
             if self._expectation(key) != expected:
-                raise CacheBlobLifecycleConflictError("Delete expectation no longer matches authority")
+                raise CacheBlobLifecycleConflictError(
+                    "Delete expectation no longer matches authority"
+                )
             self._lineages[key] = self._lineages.get(key, 0) + 1
             self._entries.pop(key, None)
             self._revision += 1
@@ -1038,7 +1093,9 @@ class InMemoryLifecycleAuthority:
             if target is None and current_state == "completed":
                 return
             if current_state != "active":
-                raise CacheBlobLifecycleConflictError("Clear run cannot accept checkpoint")
+                raise CacheBlobLifecycleConflictError(
+                    "Clear run cannot accept checkpoint"
+                )
             if target is None:
                 self._clear_states[token.value] = "completed"
                 return
@@ -1046,7 +1103,9 @@ class InMemoryLifecycleAuthority:
                 raise ValueError("Clear target state is unsupported")
             stored = self._clear_targets[token.value].get(target.key)
             if stored is None or stored[0] != target or stored[1] != "pending":
-                raise CacheBlobLifecycleConflictError("Clear target is no longer pending")
+                raise CacheBlobLifecycleConflictError(
+                    "Clear target is no longer pending"
+                )
             current = self._entries.get(target.key)
             if state == "completed":
                 lineage = self._lineages.get(target.key, 0)
@@ -1102,7 +1161,9 @@ class InMemoryLifecycleAuthority:
             if token is not None:
                 snapshot = self._reconciliation_snapshots.get(token.value)
                 if snapshot is None:
-                    raise CacheBlobLifecycleConflictError("Reconciliation run does not exist")
+                    raise CacheBlobLifecycleConflictError(
+                        "Reconciliation run does not exist"
+                    )
                 return snapshot
             return ReconciliationSnapshot(
                 self._revision,
@@ -1126,10 +1187,13 @@ class InMemoryLifecycleAuthority:
                 if mutation_cursor < row_id <= snapshot.mutation_high_water
             )[:page_size]
             debts = [
-                (row_id, debt) for row_id, debt in self._debts.items()
+                (row_id, debt)
+                for row_id, debt in self._debts.items()
                 if debt_cursor < row_id <= snapshot.debt_high_water
             ][:page_size]
-            mutation_stop = mutations[-1][0] if mutations else snapshot.mutation_high_water
+            mutation_stop = (
+                mutations[-1][0] if mutations else snapshot.mutation_high_water
+            )
             debt_stop = debts[-1][0] if debts else snapshot.debt_high_water
             works: list[ReconciliationWork] = []
             for row_id, operation_id in mutations:
@@ -1144,16 +1208,16 @@ class InMemoryLifecycleAuthority:
                         )
                     )
             for row_id, debt in debts:
-                works.append(
-                    ReconciliationWork("debt", row_id, "pending", debt=debt)
-                )
+                works.append(ReconciliationWork("debt", row_id, "pending", debt=debt))
             return ReconciliationPage(tuple(works), mutation_stop, debt_stop)
 
     def page_reconciliation(self, token: PageToken) -> tuple[CleanupDebt, ...]:
         self._require_open()
         with self._lock:
             if token.value not in self._reconciliation_states:
-                raise CacheBlobLifecycleConflictError("Reconciliation run does not exist")
+                raise CacheBlobLifecycleConflictError(
+                    "Reconciliation run does not exist"
+                )
             return tuple(self._debts.values())
 
     def checkpoint_reconciliation(

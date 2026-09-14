@@ -115,6 +115,7 @@ filterwarnings = [
 
 [tool.coverage.run]
 source = ["cacheness"]
+branch = true
 omit = [
     "*/tests/*",
     "*/test_*",

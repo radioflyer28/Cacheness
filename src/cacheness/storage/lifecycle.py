@@ -252,7 +252,10 @@ class AuthorityLifecycleEngine:
                     if current_manifest.locator == debt.locator:
                         raise CacheBlobLifecycleConflictError(
                             "Lifecycle cleanup debt still belongs to the current generation",
-                            context={"operation": "cleanup", "generation": debt.generation},
+                            context={
+                                "operation": "cleanup",
+                                "generation": debt.generation,
+                            },
                         )
                 self._reach("cleanup.before_payload_delete", key=debt.key)
                 self.store._delete_or_prove_absent(Path(debt.locator))
@@ -263,18 +266,17 @@ class AuthorityLifecycleEngine:
             except Exception as exc:
                 raise CacheBlobRecoverableCleanupError(
                     "Committed lifecycle state is durable but cleanup needs recovery",
-                    context={"operation_id": debt.operation_id, "generation": debt.generation},
+                    context={
+                        "operation_id": debt.operation_id,
+                        "generation": debt.generation,
+                    },
                 ) from exc
 
     def _abort(self, prepared: PreparedMutation, *, candidate_persisted: bool) -> None:
-        self.authority.abort_mutation(
-            prepared, candidate_persisted=candidate_persisted
-        )
+        self.authority.abort_mutation(prepared, candidate_persisted=candidate_persisted)
         if candidate_persisted:
             self._settle_debts(
-                self.authority.pending_cleanup_debts(
-                    operation_id=prepared.operation_id
-                )
+                self.authority.pending_cleanup_debts(operation_id=prepared.operation_id)
             )
 
     def _manifest_for_replay(
@@ -310,12 +312,12 @@ class AuthorityLifecycleEngine:
             )
         return manifest
 
-    def _result_for_promoted_replay(
-        self, replay: MutationReplay
-    ) -> LifecyclePutResult:
+    def _result_for_promoted_replay(self, replay: MutationReplay) -> LifecyclePutResult:
         """Return one persisted canonical result without re-running publication."""
         if replay.promotion is None:
-            raise CacheBlobLifecycleConflictError("Promoted replay lacks a canonical result")
+            raise CacheBlobLifecycleConflictError(
+                "Promoted replay lacks a canonical result"
+            )
         manifest = self._entry_manifest(replay.promotion.entry)
         self._verify_transport_evidence(
             manifest, replay.promotion.entry.transport_evidence
@@ -576,9 +578,7 @@ class AuthorityLifecycleEngine:
                     raise CacheBlobLifecycleConflictError(
                         "Compatibility metadata cannot change blob identity or integrity fields"
                     )
-            manifest = self._sign(
-                manifest, initialize_new_store=previous is None
-            )
+            manifest = self._sign(manifest, initialize_new_store=previous is None)
             prepared = self.authority.prepare_mutation(
                 MutationSpec.create(
                     operation_id=uuid4().hex if operation_id is None else operation_id,
@@ -643,7 +643,9 @@ class AuthorityLifecycleEngine:
             self._settle_debts(promoted.cleanup_debt)
         except CacheBlobRecoverableCleanupError as error:
             error.context.update(
-                committed=True, key=key, generation=promoted.entry.generation,
+                committed=True,
+                key=key,
+                generation=promoted.entry.generation,
                 expectation=promoted.entry.expectation,
             )
             raise
@@ -715,11 +717,12 @@ class AuthorityLifecycleEngine:
             cleanup_debt=(),
         )
 
-
     def update_metadata(self, key: str, metadata: dict[str, Any]) -> bool:
         """Replace signed user metadata without touching the payload lifecycle."""
         if not isinstance(metadata, dict):
-            raise CacheBlobLifecycleConflictError("BlobStore metadata patches must be dictionaries")
+            raise CacheBlobLifecycleConflictError(
+                "BlobStore metadata patches must be dictionaries"
+            )
         entry = self.authority.read_entry(key)
         if entry is None:
             return False
@@ -752,12 +755,16 @@ class AuthorityLifecycleEngine:
         if entry is None:
             return False
         if expected is not None and expected != entry.expectation:
-            raise CacheBlobLifecycleConflictError("Delete expectation no longer matches authority")
+            raise CacheBlobLifecycleConflictError(
+                "Delete expectation no longer matches authority"
+            )
         manifest = self._entry_manifest(entry, allow_tombstone=True)
         if manifest.state == "tombstoned":
             operation_id = manifest.handler_metadata.get(_TOMBSTONE_OPERATION_ID_FIELD)
             if not isinstance(operation_id, str) or not operation_id:
-                raise CacheBlobLifecycleConflictError("Lifecycle tombstone lacks operation provenance")
+                raise CacheBlobLifecycleConflictError(
+                    "Lifecycle tombstone lacks operation provenance"
+                )
             self._settle_debts(
                 self.authority.pending_cleanup_debts(operation_id=operation_id)
             )
@@ -773,7 +780,9 @@ class AuthorityLifecycleEngine:
                 generation=generation,
                 state="tombstoned",
                 locator=(
-                    Path("tombstones") / self.store._storage_id_for_key(key) / generation
+                    Path("tombstones")
+                    / self.store._storage_id_for_key(key)
+                    / generation
                 ).as_posix(),
                 handler_metadata=tombstone_metadata,
                 signature="",
@@ -828,7 +837,11 @@ class AuthorityLifecycleEngine:
         if entry is None:
             return None
         manifest = self._entry_manifest(entry, allow_tombstone=True)
-        return None if manifest.state == "tombstoned" else self._entry_info(entry, manifest)
+        return (
+            None
+            if manifest.state == "tombstoned"
+            else self._entry_info(entry, manifest)
+        )
 
     @contextmanager
     def open_entry(self, key: str):
@@ -872,7 +885,9 @@ class AuthorityLifecycleEngine:
                     resources.close()
                     if attempt == 0:
                         continue
-                    raise CacheBlobLifecycleConflictError("Entry is no longer committed")
+                    raise CacheBlobLifecycleConflictError(
+                        "Entry is no longer committed"
+                    )
                 digest, byte_size = sha256_and_size(snapshot.path)
                 if digest != manifest.digest or byte_size != manifest.byte_size:
                     raise CacheBlobPayloadTamperedError(
@@ -911,7 +926,11 @@ class AuthorityLifecycleEngine:
         if entry is None:
             return None
         manifest = self._entry_manifest(entry, allow_tombstone=True)
-        return None if manifest.state == "tombstoned" else self.store._manifest_entry_data(manifest)
+        return (
+            None
+            if manifest.state == "tombstoned"
+            else self.store._manifest_entry_data(manifest)
+        )
 
     def list(self, prefix: str | None = None) -> list[str]:
         if (
@@ -925,7 +944,9 @@ class AuthorityLifecycleEngine:
         keys: list[str] = []
         for entry in self.authority.list_entries():
             manifest = self._entry_manifest(entry, allow_tombstone=True)
-            if manifest.state != "committed" or (prefix and not manifest.key.startswith(prefix)):
+            if manifest.state != "committed" or (
+                prefix and not manifest.key.startswith(prefix)
+            ):
                 continue
             keys.append(manifest.key)
         return keys
@@ -949,7 +970,9 @@ class AuthorityLifecycleEngine:
 
     def complete_clear(self, token: PageToken) -> int:
         """Reclaim one already-persisted clear snapshot outside admission gating."""
-        deadline = time.monotonic() + self.lifecycle_limits.authority_busy_timeout_seconds
+        deadline = (
+            time.monotonic() + self.lifecycle_limits.authority_busy_timeout_seconds
+        )
         byte_budget = self.lifecycle_limits.max_operation_record_bytes
         action_budget = self.lifecycle_limits.max_reconcile_actions
         removed = 0
@@ -1015,7 +1038,9 @@ class AuthorityLifecycleEngine:
                         checkpoint_state = "completed"
                     elif current.expectation == target.expectation:
                         self._reach("clear.before_target_delete", key=target.key)
-                        removed += int(self.delete(target.key, expected=target.expectation))
+                        removed += int(
+                            self.delete(target.key, expected=target.expectation)
+                        )
                         self._reach("clear.after_target_delete", key=target.key)
                         checkpoint_state = "completed"
                     else:
@@ -1039,9 +1064,7 @@ class AuthorityLifecycleEngine:
                     CacheBlobManifestUnsupportedVersionError,
                 ):
                     checkpoint_state = "blocked"
-                self.authority.checkpoint_clear(
-                    token, target, state=checkpoint_state
-                )
+                self.authority.checkpoint_clear(token, target, state=checkpoint_state)
                 consumed_actions += 1
                 consumed_bytes += len(target.manifest)
         return removed

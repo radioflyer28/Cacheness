@@ -181,9 +181,7 @@ class CacheMaintenanceResult:
             raise ValueError(
                 "incomplete maintenance requires exactly one continuation or restart cause"
             )
-        if self.state is not None and not isinstance(
-            self.state, CacheMaintenanceState
-        ):
+        if self.state is not None and not isinstance(self.state, CacheMaintenanceState):
             raise ValueError("maintenance continuation must be native state")
         if self.cause is not None and not isinstance(self.cause, BaseException):
             raise ValueError("maintenance restart cause must be an exception")
@@ -266,10 +264,15 @@ class CacheRemovalReport:
             self.retryable,
             self.failed,
         )
-        if any(not isinstance(count, int) or isinstance(count, bool) or count < 0 for count in counts):
+        if any(
+            not isinstance(count, int) or isinstance(count, bool) or count < 0
+            for count in counts
+        ):
             raise ValueError("CacheRemovalReport counts must be non-negative integers")
         if self.attempted != self.removed + self.conflicted + self.failed:
-            raise ValueError("CacheRemovalReport outcomes must account for every attempt")
+            raise ValueError(
+                "CacheRemovalReport outcomes must account for every attempt"
+            )
         if not isinstance(self.complete, bool):
             raise ValueError("CacheRemovalReport completion must be a boolean")
         if self.complete and self.continuation is not None:
@@ -280,8 +283,11 @@ class CacheRemovalReport:
             raise ValueError("Incomplete removals require an opaque continuation")
         if not isinstance(self.failures, tuple) or len(self.failures) != self.failed:
             raise ValueError("CacheRemovalReport failures must match the failed count")
-        if any(not isinstance(failure, CacheRemovalFailure) for failure in self.failures):
+        if any(
+            not isinstance(failure, CacheRemovalFailure) for failure in self.failures
+        ):
             raise ValueError("CacheRemovalReport failures must be native values")
+
 
 @dataclass(frozen=True)
 class _CacheRemovalCandidate:

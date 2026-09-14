@@ -62,7 +62,9 @@ def test_tracer_writes_one_validated_exact_commit_deterministic_pass(
     identity = _clean_identity(runner)
     observed: list[tuple[tuple[str, ...], int]] = []
 
-    def run_child(command: tuple[str, ...], timeout: int) -> subprocess.CompletedProcess[str]:
+    def run_child(
+        command: tuple[str, ...], timeout: int
+    ) -> subprocess.CompletedProcess[str]:
         observed.append((command, timeout))
         return _passing_child()
 
@@ -110,7 +112,9 @@ def test_tracer_rejects_failed_skipped_incomplete_or_unattested_children(
     evidence = _load_evidence()
     runner = _load_runner()
     output = tmp_path / "deterministic.json"
-    monkeypatch.setattr(runner, "current_source_identity", lambda: _clean_identity(runner))
+    monkeypatch.setattr(
+        runner, "current_source_identity", lambda: _clean_identity(runner)
+    )
 
     assert runner.run_deterministic(output=output, run_child=lambda *_args: child) == 1
     envelope = evidence.load_envelope(output)
@@ -133,7 +137,12 @@ def test_tracer_rejects_dirty_or_revision_drifted_source_after_child_run(
     )
     monkeypatch.setattr(runner, "current_source_identity", lambda: next(identities))
 
-    assert runner.run_deterministic(output=output, run_child=lambda *_args: _passing_child()) == 1
+    assert (
+        runner.run_deterministic(
+            output=output, run_child=lambda *_args: _passing_child()
+        )
+        == 1
+    )
     envelope = evidence.load_envelope(output)
     assert envelope.status == "NOT_QUALIFIED"
     assert envelope.payload["result"] == "source_changed"
@@ -145,7 +154,9 @@ def test_tracer_cli_has_no_selectable_child_suite(
     """The public command reports unavailable external classes without a false pass."""
     runner = _load_runner()
     output = tmp_path / "deterministic.json"
-    monkeypatch.setattr(runner, "current_source_identity", lambda: _clean_identity(runner))
+    monkeypatch.setattr(
+        runner, "current_source_identity", lambda: _clean_identity(runner)
+    )
     monkeypatch.setattr(runner, "_run_child", lambda *_args: _passing_child())
 
     assert runner.main(["deterministic", "--output", str(output)]) == 2
@@ -337,15 +348,19 @@ def test_evidence_rejects_duplicate_unsafe_and_oversized_file_inputs(
             "subjects": list(evidence.QUALIFIED_SUBJECTS),
         },
     )
-    canonical = json.dumps(
-        envelope.to_mapping(), ensure_ascii=True, separators=(",", ":"), sort_keys=True
-    ).encode("utf-8") + b"\n"
+    canonical = (
+        json.dumps(
+            envelope.to_mapping(),
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        + b"\n"
+    )
 
     duplicate = tmp_path / "duplicate.json"
     duplicate.write_bytes(
-        canonical.replace(
-            b'"revision":', b'"revision":"c"' * 40 + b',"revision":', 1
-        )
+        canonical.replace(b'"revision":', b'"revision":"c"' * 40 + b',"revision":', 1)
     )
     unsafe = tmp_path / "unsafe.json"
     unsafe.write_bytes(canonical.replace(b"BlobStore", b"password!", 1))
@@ -392,7 +407,9 @@ def test_report_names_each_unproduced_evidence_class_as_unavailable(
     """The local command distinguishes a passing contract from absent external proof."""
     runner = _load_runner()
     output = tmp_path / "deterministic.json"
-    monkeypatch.setattr(runner, "current_source_identity", lambda: _clean_identity(runner))
+    monkeypatch.setattr(
+        runner, "current_source_identity", lambda: _clean_identity(runner)
+    )
     monkeypatch.setattr(runner, "_run_child", lambda *_args: _passing_child())
 
     assert runner.main(["deterministic", "--output", str(output)]) == 2

@@ -92,12 +92,16 @@ class ObstoreGenerationIO:
         if not isinstance(handler_io, GuardedHandlerIO):
             raise TypeError("handler_io must be a GuardedHandlerIO")
         if qualification_identity not in {"filesystem", "memory", "s3"}:
-            raise ValueError("qualification_identity must name a known payload topology")
+            raise ValueError(
+                "qualification_identity must name a known payload topology"
+            )
         self._store = store
         self._handler_io = handler_io
         self._temporary_root = temporary_root
         self.qualification_identity = qualification_identity
-        self.max_upload_bytes = self._transfer_limit(max_upload_bytes, "max_upload_bytes")
+        self.max_upload_bytes = self._transfer_limit(
+            max_upload_bytes, "max_upload_bytes"
+        )
         self.max_download_bytes = self._transfer_limit(
             max_download_bytes, "max_download_bytes"
         )
@@ -214,8 +218,10 @@ class ObstoreGenerationIO:
 
         if not isinstance(bucket, str) or not bucket.strip() or "/" in bucket:
             raise CacheConfigurationError("S3 bucket must be a non-empty string")
-        if not isinstance(region, str) or not region.strip() or any(
-            character.isspace() for character in region
+        if (
+            not isinstance(region, str)
+            or not region.strip()
+            or any(character.isspace() for character in region)
         ):
             raise CacheConfigurationError("S3 region must be a non-empty string")
         prefix = cls._validated_s3_prefix(prefix)
@@ -283,12 +289,16 @@ class ObstoreGenerationIO:
             raise CacheConfigurationError("S3 prefix must be a non-empty string")
         text = prefix.strip("/")
         if not text or "\\" in text or "//" in text:
-            raise CacheConfigurationError("S3 prefix must be a contained canonical path")
+            raise CacheConfigurationError(
+                "S3 prefix must be a contained canonical path"
+            )
         if any(
             part in {"", ".", ".."} or not _LOCATOR_SEGMENT.fullmatch(part)
             for part in text.split("/")
         ):
-            raise CacheConfigurationError("S3 prefix must be a contained canonical path")
+            raise CacheConfigurationError(
+                "S3 prefix must be a contained canonical path"
+            )
         return text
 
     @staticmethod
@@ -308,7 +318,9 @@ class ObstoreGenerationIO:
         return self._handler_io.root
 
     @contextmanager
-    def stage(self, handler: Any, data: Any, config: Any) -> Iterator[GuardedStagedArtifact]:
+    def stage(
+        self, handler: Any, data: Any, config: Any
+    ) -> Iterator[GuardedStagedArtifact]:
         """Delegate all handler-facing staging to the guarded private boundary."""
         self._require_open()
         with self._handler_io.stage(handler, data, config) as staged:
@@ -391,7 +403,10 @@ class ObstoreGenerationIO:
             ) from error
 
         result_metadata = getattr(result, "meta", None)
-        if not isinstance(result_metadata, Mapping) or type(result_metadata.get("size")) is not int:
+        if (
+            not isinstance(result_metadata, Mapping)
+            or type(result_metadata.get("size")) is not int
+        ):
             raise CacheBlobBackendError(
                 "Obstore generation metadata lacks a valid byte size",
                 context={"operation": "obstore.snapshot", "stage": "head"},
@@ -411,13 +426,19 @@ class ObstoreGenerationIO:
                     if not isinstance(chunk, bytes):
                         raise CacheBlobBackendError(
                             "Obstore generation stream yielded non-bytes",
-                            context={"operation": "obstore.snapshot", "stage": "stream"},
+                            context={
+                                "operation": "obstore.snapshot",
+                                "stage": "stream",
+                            },
                         )
                     observed += len(chunk)
                     if observed > expected_size or observed > self.max_download_bytes:
                         raise CacheBlobBackendError(
                             "Obstore generation stream exceeded its declared bound",
-                            context={"operation": "obstore.snapshot", "stage": "stream"},
+                            context={
+                                "operation": "obstore.snapshot",
+                                "stage": "stream",
+                            },
                         )
                     sink.destination.write(chunk)
                 if observed != expected_size:
@@ -515,8 +536,10 @@ class ObstoreGenerationIO:
             )
         if continuation is not None:
             continuation = self._validated_locator(continuation)
-        limit = self.max_inventory_objects if max_objects is None else self._transfer_limit(
-            max_objects, "max_objects"
+        limit = (
+            self.max_inventory_objects
+            if max_objects is None
+            else self._transfer_limit(max_objects, "max_objects")
         )
         if limit > self.max_inventory_objects:
             raise CacheBlobBackendError(
@@ -698,7 +721,10 @@ class ObstoreGenerationIO:
                         context={"operation": "obstore.publish", "stage": "stream"},
                     )
                 observed_size += len(chunk)
-                if observed_size > declared_size or observed_size > self.max_download_bytes:
+                if (
+                    observed_size > declared_size
+                    or observed_size > self.max_download_bytes
+                ):
                     raise CacheBlobBackendError(
                         "Ambiguous immutable publication exceeded its declared bound",
                         context={"operation": "obstore.publish", "stage": "stream"},
@@ -782,9 +808,13 @@ class ObstoreGenerationIO:
                 reason=CacheReason.INVALID_IDENTIFIER,
             )
         parts = PurePosixPath(text).parts
-        if len(parts) != 3 or parts[0] not in allowed_namespaces or any(
-            part in {"", ".", ".."} or not _LOCATOR_SEGMENT.fullmatch(part)
-            for part in parts
+        if (
+            len(parts) != 3
+            or parts[0] not in allowed_namespaces
+            or any(
+                part in {"", ".", ".."} or not _LOCATOR_SEGMENT.fullmatch(part)
+                for part in parts
+            )
         ):
             raise CacheUnsafePathError(
                 error_message,
