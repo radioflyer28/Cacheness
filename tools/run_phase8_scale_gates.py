@@ -15,12 +15,16 @@ import argparse
 import json
 import multiprocessing
 from pathlib import Path
-import resource
 import subprocess
 import sys
 from typing import Any
 
 import phase8_evidence
+
+try:
+    import resource
+except ImportError:  # pragma: no cover - exercised on non-POSIX hosts.
+    resource = None
 
 
 @dataclass
@@ -385,6 +389,8 @@ def _proc_peak_rss_bytes() -> int | None:
 def _resource_peak_rss_bytes() -> int:
     """Normalize resource peak RSS to bytes using the documented OS units."""
 
+    if resource is None:
+        raise MemoryProbeError("resource peak RSS is unavailable")
     raw_peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     if type(raw_peak) not in {int, float} or raw_peak <= 0:
         raise MemoryProbeError("resource peak RSS is invalid")

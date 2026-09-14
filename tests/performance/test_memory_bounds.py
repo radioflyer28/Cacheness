@@ -124,6 +124,17 @@ def test_crashed_child_probe_cannot_be_recorded_as_peak_memory_evidence() -> Non
         )
 
 
+def test_missing_resource_module_fails_closed_before_peak_rss_is_claimed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-POSIX hosts cannot silently relabel unavailable RSS as bytes."""
+
+    monkeypatch.setattr(_RUNNER, "resource", None)
+
+    with pytest.raises(MemoryProbeError, match="resource peak RSS is unavailable"):
+        _RUNNER._resource_peak_rss_bytes()
+
+
 def test_structural_evidence_keeps_counts_and_peak_rss_without_a_timing_claim(
     tmp_path: Path,
 ) -> None:
