@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import importlib
 import json
-import os
 from pathlib import Path
 import re
 import sys
@@ -196,7 +195,12 @@ def test_distribution_preserves_raw_samples_and_deterministic_tails() -> None:
 
 def test_hash_measurements_cover_canonical_sizes_without_changing_sha256() -> None:
     """XXH3 is comparative evidence while SHA-256 remains the stored digest."""
-    assert HASH_SIZES == (4 * 1024, 1 * 1024 * 1024, 16 * 1024 * 1024, 128 * 1024 * 1024)
+    assert HASH_SIZES == (
+        4 * 1024,
+        1 * 1024 * 1024,
+        16 * 1024 * 1024,
+        128 * 1024 * 1024,
+    )
 
     observations = measure_hashes(
         size_bytes=4 * 1024,
@@ -204,13 +208,20 @@ def test_hash_measurements_cover_canonical_sizes_without_changing_sha256() -> No
         loops=2,
     )
 
-    assert {observation["algorithm"] for observation in observations} == {"sha256", "xxh3_64"}
-    assert all(observation["throughput_bytes_per_second"] > 0 for observation in observations)
+    assert {observation["algorithm"] for observation in observations} == {
+        "sha256",
+        "xxh3_64",
+    }
+    assert all(
+        observation["throughput_bytes_per_second"] > 0 for observation in observations
+    )
     assert all(0 < observation["lifecycle_share_p50"] for observation in observations)
     assert _BENCHMARKS.PAYLOAD_DIGEST_ALGORITHM == "sha256"
 
 
-def test_verify_baseline_rejects_mismatched_identity_revision_environment_and_regression() -> None:
+def test_verify_baseline_rejects_mismatched_identity_revision_environment_and_regression() -> (
+    None
+):
     """Only one exact controlled environment can qualify its reviewed envelope."""
     baseline = _baseline_document()
     current = _baseline_document()
@@ -239,7 +250,9 @@ def test_verify_baseline_rejects_mismatched_identity_revision_environment_and_re
         verify_baseline(baseline, regressed)
 
 
-def test_baseline_capture_and_recalibration_are_explicit_and_atomic(tmp_path: Path) -> None:
+def test_baseline_capture_and_recalibration_are_explicit_and_atomic(
+    tmp_path: Path,
+) -> None:
     """Verify reads evidence; reviewed capture/recalibration own all mutations."""
     destination = tmp_path / "phase8_baseline.json"
     baseline = _baseline_document()
@@ -274,7 +287,9 @@ def test_controlled_workflow_requires_exact_sha_and_named_linux_runner() -> None
     ).read_text(encoding="utf-8")
 
     assert "workflow_dispatch:" in workflow
-    assert re.search(r"candidate_sha:\s*\n\s*description:.*\n\s*required: true", workflow)
+    assert re.search(
+        r"candidate_sha:\s*\n\s*description:.*\n\s*required: true", workflow
+    )
     assert "cacheness-perf-linux-x64" in workflow
     assert "environment: controlled-performance" in workflow
     assert "ref: ${{ inputs.candidate_sha }}" in workflow
@@ -295,7 +310,9 @@ def test_controlled_workflow_pins_actions_and_uploads_one_sanitized_envelope() -
 
     action_references = re.findall(r"uses:\s+[^@\s]+@([^\s]+)", workflow)
     assert action_references
-    assert all(re.fullmatch(r"[0-9a-f]{40}", reference) for reference in action_references)
+    assert all(
+        re.fullmatch(r"[0-9a-f]{40}", reference) for reference in action_references
+    )
     assert "name: controlled-performance-envelope" in workflow
     assert "retention-days: 30" in workflow
     assert "build/phase8/controlled-performance.json" in workflow
@@ -330,9 +347,9 @@ def test_preflight_runner_emits_only_the_bounded_eligibility_record(
         "worktree_state": "clean",
     }
     assert record["machine_fingerprint"] == fingerprint
-    assert record["machine_fingerprint_sha256"] == _BENCHMARKS.machine_fingerprint_digest(
-        fingerprint
-    )
+    assert record[
+        "machine_fingerprint_sha256"
+    ] == _BENCHMARKS.machine_fingerprint_digest(fingerprint)
     assert _BENCHMARKS.validate_preflight_record(record) == record
 
 
@@ -380,8 +397,18 @@ def test_preflight_runner_canonical_fingerprint_rejects_drift_and_disclosure() -
         _BENCHMARKS.machine_fingerprint_digest(malformed)
 
     malformed = deepcopy(fingerprint)
+    del malformed["uv"]
+    with pytest.raises(BaselineVerificationError, match="machine fingerprint keys"):
+        _BENCHMARKS.machine_fingerprint_digest(malformed)
+
+    malformed = deepcopy(fingerprint)
     malformed["os"] = {"system": "Linux", "release": "\u2603", "machine": "x86_64"}
     with pytest.raises(BaselineVerificationError, match="release"):
+        _BENCHMARKS.machine_fingerprint_digest(malformed)
+
+    malformed = deepcopy(fingerprint)
+    malformed["cpu"]["logical_cpus"] = "8"
+    with pytest.raises(BaselineVerificationError, match="logical CPU count"):
         _BENCHMARKS.machine_fingerprint_digest(malformed)
 
     malformed = deepcopy(fingerprint)
@@ -425,7 +452,7 @@ def test_preflight_runner_uses_optional_lock_free_git_reads_only(
             return SimpleNamespace(returncode=0, stdout="a" * 40 + "\n", stderr="")
         if command[-3:] == ["symbolic-ref", "-q", "HEAD"]:
             return SimpleNamespace(returncode=1, stdout="", stderr="")
-        assert command[-2:] == ["status", "--porcelain=v1"]
+        assert command[-3:] == ["status", "--untracked-files=all", "--porcelain=v1"]
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(_BENCHMARKS.subprocess, "run", fake_run)
@@ -437,6 +464,70 @@ def test_preflight_runner_uses_optional_lock_free_git_reads_only(
     assert len(calls) == 3
     assert all("--no-optional-locks" in command for command in calls)
     assert all("-C" in command for command in calls)
+
+
+@pytest.mark.parametrize(
+    ("head", "symbolic_ref", "status", "reason"),
+    [
+        ("b" * 40, (1, ""), "", "repository revision"),
+        ("a" * 40, (0, "refs/heads/main\n"), "", "repository head"),
+        ("a" * 40, (1, ""), " M benchmarks/phase8_benchmarks.py\n", "repository state"),
+        ("a" * 40, (1, ""), "?? unexpected-file\n", "repository state"),
+    ],
+)
+def test_preflight_runner_rejects_non_clean_or_attached_repository_state(
+    monkeypatch: pytest.MonkeyPatch,
+    head: str,
+    symbolic_ref: tuple[int, str],
+    status: str,
+    reason: str,
+) -> None:
+    """Exact source proof rejects wrong HEAD, branches, tracked, and untracked state."""
+
+    def fake_run(command: list[str], **kwargs: object) -> SimpleNamespace:
+        del kwargs
+        if command[-2:] == ["rev-parse", "HEAD"]:
+            return SimpleNamespace(returncode=0, stdout=f"{head}\n", stderr="")
+        if command[-3:] == ["symbolic-ref", "-q", "HEAD"]:
+            return SimpleNamespace(
+                returncode=symbolic_ref[0], stdout=symbolic_ref[1], stderr=""
+            )
+        return SimpleNamespace(returncode=0, stdout=status, stderr="")
+
+    monkeypatch.setattr(_BENCHMARKS.subprocess, "run", fake_run)
+
+    with pytest.raises(BaselineVerificationError, match=reason):
+        _BENCHMARKS._repository_preflight("a" * 40)
+
+
+@pytest.mark.parametrize(
+    ("system", "machine"), [("Darwin", "arm64"), ("Linux", "arm64")]
+)
+def test_preflight_runner_rejects_nonqualifying_platforms(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    system: str,
+    machine: str,
+) -> None:
+    """macOS and non-x86 Linux are explicit nonqualifying runner boundaries."""
+    monkeypatch.setattr(
+        _BENCHMARKS, "_machine_fingerprint", _eligible_preflight_fingerprint
+    )
+    monkeypatch.setattr(
+        _BENCHMARKS,
+        "_repository_preflight",
+        lambda revision: {"head_state": "detached", "worktree_state": "clean"},
+    )
+    monkeypatch.setattr(_BENCHMARKS.platform, "system", lambda: system)
+    monkeypatch.setattr(_BENCHMARKS.platform, "machine", lambda: machine)
+
+    assert _BENCHMARKS.main(_preflight_arguments()) == 2
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.strip() == (
+        "runner preflight rejected: controlled runner platform is not eligible"
+    )
 
 
 def test_preflight_runner_never_measures_or_mutates(
@@ -483,6 +574,16 @@ def test_preflight_runner_never_measures_or_mutates(
                 "a" * 40,
                 "--runner-identity",
                 "ordinary-linux",
+            ],
+            "runner label is not eligible",
+        ),
+        (
+            [
+                "--preflight-runner",
+                "--expect-label",
+                "cacheness-perf-linux-x64",
+                "--revision",
+                "a" * 40,
             ],
             "runner label is not eligible",
         ),

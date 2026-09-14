@@ -17,6 +17,8 @@ import math
 import os
 from pathlib import Path
 import platform
+import re
+import sqlite3
 import statistics
 import subprocess
 import sys
@@ -38,6 +40,15 @@ HASH_SIZES = (4 * 1024, 1 * 1024 * 1024, 16 * 1024 * 1024, 128 * 1024 * 1024)
 DEFAULT_WARMUPS = 2
 DEFAULT_SAMPLES = 9
 MAX_CHILD_TIMEOUT_SECONDS = 300
+PREFLIGHT_GIT_TIMEOUT_SECONDS = 5
+PREFLIGHT_SCHEMA = "cacheness.phase8.runner-preflight.v1"
+_PREFLIGHT_FINGERPRINT_KEYS = frozenset(
+    {"os", "cpu", "filesystem", "python", "uv", "sqlite"}
+)
+_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9._-]{1,64}")
+_GOVERNOR_PATTERN = re.compile(r"[a-z0-9_-]{1,64}")
+_HEX_40_PATTERN = re.compile(r"[0-9a-f]{40}")
+_HEX_64_PATTERN = re.compile(r"[0-9a-f]{64}")
 _RELEVANT_SOURCE_PATHS = (
     "benchmarks/phase8_workloads.py",
     "benchmarks/phase8_benchmarks.py",
@@ -70,7 +81,9 @@ def distribution(samples: Sequence[int]) -> dict[str, Any]:
     """Preserve raw nanosecond samples with deterministic median and tails."""
     normalized = list(samples)
     if not normalized or any(type(item) is not int or item <= 0 for item in normalized):
-        raise BaselineVerificationError("distribution samples must be positive integers")
+        raise BaselineVerificationError(
+            "distribution samples must be positive integers"
+        )
     return {
         "samples_ns": normalized,
         "sample_count": len(normalized),
@@ -91,10 +104,14 @@ def _git_revision() -> str:
             text=True,
         )
     except (OSError, subprocess.CalledProcessError) as error:
-        raise BaselineVerificationError("unable to determine benchmark source revision") from error
+        raise BaselineVerificationError(
+            "unable to determine benchmark source revision"
+        ) from error
     revision = result.stdout.strip()
     if len(revision) != 40 or any(char not in "0123456789abcdef" for char in revision):
-        raise BaselineVerificationError("benchmark source revision must be a 40-character SHA")
+        raise BaselineVerificationError(
+            "benchmark source revision must be a 40-character SHA"
+        )
     return revision
 
 
@@ -133,11 +150,378 @@ def environment_fingerprint() -> dict[str, str | int]:
     }
 
 
+def _normalized_ascii(value: object, *, name: str, maximum: int) -> str:
+    """Return one bounded printable ASCII field without retaining raw probe text."""
+    if not isinstance(value, str) or not value or len(value) > maximum:
+        raise BaselineVerificationError(f"{name} is invalid")
+    if any(ord(character) < 32 or ord(character) > 126 for character in value):
+        raise BaselineVerificationError(f"{name} is invalid")
+    normalized = " ".join(value.split())
+    if not normalized or normalized != value:
+        raise BaselineVerificationError(f"{name} is invalid")
+    return normalized
+
+
+def _normalized_printable(value: object, *, name: str, maximum: int) -> str:
+    """Return one bounded normalized printable field without raw diagnostics."""
+    if not isinstance(value, str) or not value or len(value) > maximum:
+        raise BaselineVerificationError(f"{name} is invalid")
+    if any(not character.isprintable() for character in value):
+        raise BaselineVerificationError(f"{name} is invalid")
+    normalized = " ".join(value.split())
+    if not normalized or normalized != value:
+        raise BaselineVerificationError(f"{name} is invalid")
+    return normalized
+
+
+def _normalized_token(value: object, *, name: str, maximum: int = 64) -> str:
+    """Return one fixed-format token accepted by the preflight allow-list."""
+    if (
+        not isinstance(value, str)
+        or len(value) > maximum
+        or not _TOKEN_PATTERN.fullmatch(value)
+    ):
+        raise BaselineVerificationError(f"{name} is invalid")
+    return value
+
+
+def _validate_controlled_platform() -> None:
+    """Require the sole platform that may later produce controlled evidence."""
+    if platform.system() != "Linux" or platform.machine().lower() not in {
+        "x86_64",
+        "amd64",
+    }:
+        raise BaselineVerificationError("controlled runner platform is not eligible")
+
+
+def _linux_cpu_model() -> str:
+    """Read only the bounded CPU model field needed for runner identity."""
+    try:
+        with Path("/proc/cpuinfo").open(
+            "r", encoding="utf-8", errors="replace"
+        ) as source:
+            for line in source:
+                if len(line) > 1024:
+                    raise BaselineVerificationError("CPU model is invalid")
+                label, separator, value = line.partition(":")
+                if separator and label.strip().casefold() in {"model name", "hardware"}:
+                    return _normalized_printable(
+                        " ".join(value.split()), name="CPU model", maximum=256
+                    )
+    except OSError:
+        pass
+    fallback = platform.processor() or "unknown"
+    return _normalized_printable(
+        " ".join(fallback.split()), name="CPU model", maximum=256
+    )
+
+
+def _linux_scaling_governors() -> list[str]:
+    """Return a bounded sorted set of CPU policy tokens, not raw sysfs data."""
+    governors: set[str] = set()
+    inspected = 0
+    try:
+        candidates = Path("/sys/devices/system/cpu").glob(
+            "cpu*/cpufreq/scaling_governor"
+        )
+        for candidate in candidates:
+            inspected += 1
+            if inspected > 4096:
+                raise BaselineVerificationError("CPU governor probe is too large")
+            try:
+                value = candidate.read_text(encoding="utf-8", errors="replace").strip()
+            except OSError:
+                continue
+            if not _GOVERNOR_PATTERN.fullmatch(value):
+                raise BaselineVerificationError("CPU scaling governors are invalid")
+            governors.add(value)
+            if len(governors) > 16:
+                raise BaselineVerificationError("CPU scaling governors are invalid")
+    except OSError:
+        return []
+    return sorted(governors)
+
+
+def _preflight_subprocess(command: Sequence[str]) -> subprocess.CompletedProcess[str]:
+    """Run a bounded non-Git runtime probe without exposing its output."""
+    try:
+        return subprocess.run(
+            list(command),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=PREFLIGHT_GIT_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise BaselineVerificationError("runner probe is unavailable") from error
+
+
+def _filesystem_type() -> str:
+    """Read one filesystem type token for the repository device only."""
+    result = _preflight_subprocess(
+        ("stat", "-f", "-c", "%T", str(Path(__file__).resolve().parents[1]))
+    )
+    if result.returncode != 0:
+        raise BaselineVerificationError("filesystem probe is unavailable")
+    return _normalized_token(result.stdout.strip(), name="filesystem type")
+
+
+def _uv_version() -> str:
+    """Return a bounded uv version token after discarding raw subprocess output."""
+    result = _preflight_subprocess(("uv", "--version"))
+    if result.returncode != 0:
+        raise BaselineVerificationError("uv probe is unavailable")
+    fields = result.stdout.strip().split()
+    if len(fields) != 2 or fields[0] != "uv":
+        raise BaselineVerificationError("uv version is invalid")
+    return _normalized_printable(fields[1], name="uv version", maximum=64)
+
+
+def _machine_fingerprint() -> dict[str, object]:
+    """Build the exact non-identifying machine projection for runner eligibility."""
+    _validate_controlled_platform()
+    logical_cpus = os.cpu_count()
+    if type(logical_cpus) is not int or logical_cpus <= 0:
+        raise BaselineVerificationError("logical CPU count is invalid")
+    fingerprint: dict[str, object] = {
+        "os": {
+            "system": "Linux",
+            "release": _normalized_ascii(
+                " ".join(platform.release().split()), name="release", maximum=128
+            ),
+            "machine": "x86_64",
+        },
+        "cpu": {
+            "model": _linux_cpu_model(),
+            "logical_cpus": logical_cpus,
+            "scaling_governors": _linux_scaling_governors(),
+        },
+        "filesystem": {"type": _filesystem_type()},
+        "python": {
+            "implementation": _normalized_token(
+                platform.python_implementation(),
+                name="Python implementation",
+                maximum=32,
+            ),
+            "version": _normalized_printable(
+                platform.python_version(), name="Python version", maximum=64
+            ),
+        },
+        "uv": {"version": _uv_version()},
+        "sqlite": {
+            "library_version": _normalized_printable(
+                sqlite3.sqlite_version, name="SQLite version", maximum=64
+            )
+        },
+    }
+    return _validate_machine_fingerprint(fingerprint)
+
+
+def _exact_mapping(value: object, *, keys: set[str], name: str) -> Mapping[str, object]:
+    """Require a mapping with no hidden identity or diagnostic fields."""
+    if not isinstance(value, Mapping) or set(value) != keys:
+        raise BaselineVerificationError(f"{name} keys are invalid")
+    return value
+
+
+def _validate_machine_fingerprint(value: object) -> dict[str, object]:
+    """Validate the canonical bounded fingerprint before hashing or emission."""
+    fingerprint = _exact_mapping(
+        value, keys=set(_PREFLIGHT_FINGERPRINT_KEYS), name="machine fingerprint"
+    )
+    os_details = _exact_mapping(
+        value=fingerprint["os"], keys={"system", "release", "machine"}, name="OS"
+    )
+    if os_details["system"] != "Linux" or os_details["machine"] != "x86_64":
+        raise BaselineVerificationError("OS identity is invalid")
+    release = _normalized_ascii(os_details["release"], name="release", maximum=128)
+
+    cpu = _exact_mapping(
+        value=fingerprint["cpu"],
+        keys={"model", "logical_cpus", "scaling_governors"},
+        name="CPU",
+    )
+    model = _normalized_printable(cpu["model"], name="CPU model", maximum=256)
+    logical_cpus = cpu["logical_cpus"]
+    if type(logical_cpus) is not int or logical_cpus <= 0:
+        raise BaselineVerificationError("logical CPU count is invalid")
+    governors = cpu["scaling_governors"]
+    if (
+        not isinstance(governors, list)
+        or len(governors) > 16
+        or governors != sorted(set(governors))
+        or any(
+            not isinstance(governor, str) or not _GOVERNOR_PATTERN.fullmatch(governor)
+            for governor in governors
+        )
+    ):
+        raise BaselineVerificationError("CPU scaling governors are invalid")
+
+    filesystem = _exact_mapping(
+        value=fingerprint["filesystem"], keys={"type"}, name="filesystem"
+    )
+    filesystem_type = _normalized_token(filesystem["type"], name="filesystem type")
+
+    python_details = _exact_mapping(
+        value=fingerprint["python"], keys={"implementation", "version"}, name="Python"
+    )
+    implementation = _normalized_token(
+        python_details["implementation"], name="Python implementation", maximum=32
+    )
+    python_version = _normalized_printable(
+        python_details["version"], name="Python version", maximum=64
+    )
+    uv = _exact_mapping(value=fingerprint["uv"], keys={"version"}, name="uv")
+    uv_version = _normalized_printable(uv["version"], name="uv version", maximum=64)
+    sqlite = _exact_mapping(
+        value=fingerprint["sqlite"], keys={"library_version"}, name="SQLite"
+    )
+    sqlite_version = _normalized_printable(
+        sqlite["library_version"], name="SQLite version", maximum=64
+    )
+    return {
+        "os": {"system": "Linux", "release": release, "machine": "x86_64"},
+        "cpu": {
+            "model": model,
+            "logical_cpus": logical_cpus,
+            "scaling_governors": list(governors),
+        },
+        "filesystem": {"type": filesystem_type},
+        "python": {"implementation": implementation, "version": python_version},
+        "uv": {"version": uv_version},
+        "sqlite": {"library_version": sqlite_version},
+    }
+
+
+def machine_fingerprint_digest(value: object) -> str:
+    """Hash only the exact canonical fingerprint, never a host/process identity."""
+    normalized = _validate_machine_fingerprint(value)
+    canonical = json.dumps(
+        normalized, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _validate_requested_revision(value: object) -> str:
+    """Reject anything except the exact lower-case full release commit SHA."""
+    if not isinstance(value, str) or not _HEX_40_PATTERN.fullmatch(value):
+        raise BaselineVerificationError("requested revision is invalid")
+    return value
+
+
+def _preflight_git(arguments: Sequence[str]) -> subprocess.CompletedProcess[str]:
+    """Run a read-only optional-lock-free Git probe without returning stderr."""
+    command = [
+        "git",
+        "--no-optional-locks",
+        "-C",
+        str(Path(__file__).resolve().parents[1]),
+        *arguments,
+    ]
+    try:
+        return subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=PREFLIGHT_GIT_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise BaselineVerificationError("repository state is unavailable") from error
+
+
+def _repository_preflight(revision: str) -> dict[str, str]:
+    """Prove one exact clean detached source state through read-only Git commands."""
+    head = _preflight_git(("rev-parse", "HEAD"))
+    if head.returncode != 0 or head.stdout.strip() != revision:
+        raise BaselineVerificationError("repository revision is not eligible")
+    detached = _preflight_git(("symbolic-ref", "-q", "HEAD"))
+    if detached.returncode != 1 or detached.stdout.strip():
+        raise BaselineVerificationError("repository head is not detached")
+    status = _preflight_git(("status", "--untracked-files=all", "--porcelain=v1"))
+    if status.returncode != 0 or status.stdout:
+        raise BaselineVerificationError("repository state is not eligible")
+    return {"head_state": "detached", "worktree_state": "clean"}
+
+
+def validate_preflight_record(value: object) -> dict[str, object]:
+    """Validate an emitted record so future capture consumes only safe eligibility proof."""
+    record = _exact_mapping(
+        value,
+        keys={
+            "schema",
+            "status",
+            "revision",
+            "runner_label",
+            "repository",
+            "machine_fingerprint",
+            "machine_fingerprint_sha256",
+        },
+        name="preflight record",
+    )
+    if record["schema"] != PREFLIGHT_SCHEMA or record["status"] != "eligible":
+        raise BaselineVerificationError("preflight record is invalid")
+    revision = _validate_requested_revision(record["revision"])
+    if record["runner_label"] != CONTROLLED_RUNNER_IDENTITY:
+        raise BaselineVerificationError("runner label is not eligible")
+    repository = _exact_mapping(
+        value=record["repository"],
+        keys={"head_state", "worktree_state"},
+        name="repository",
+    )
+    if repository != {"head_state": "detached", "worktree_state": "clean"}:
+        raise BaselineVerificationError("repository state is not eligible")
+    fingerprint = _validate_machine_fingerprint(record["machine_fingerprint"])
+    digest = record["machine_fingerprint_sha256"]
+    if not isinstance(digest, str) or not _HEX_64_PATTERN.fullmatch(digest):
+        raise BaselineVerificationError("machine fingerprint digest is invalid")
+    if digest != machine_fingerprint_digest(fingerprint):
+        raise BaselineVerificationError("machine fingerprint digest is invalid")
+    return {
+        "schema": PREFLIGHT_SCHEMA,
+        "status": "eligible",
+        "revision": revision,
+        "runner_label": CONTROLLED_RUNNER_IDENTITY,
+        "repository": {"head_state": "detached", "worktree_state": "clean"},
+        "machine_fingerprint": fingerprint,
+        "machine_fingerprint_sha256": digest,
+    }
+
+
+def _preflight_runner_record(
+    *, expected_label: object, revision: object, runner_identity: object
+) -> dict[str, object]:
+    """Build a complete no-write eligibility record before any benchmark work."""
+    requested_revision = _validate_requested_revision(revision)
+    if (
+        expected_label != CONTROLLED_RUNNER_IDENTITY
+        or runner_identity != expected_label
+    ):
+        raise BaselineVerificationError("runner label is not eligible")
+    _validate_controlled_platform()
+    repository = _repository_preflight(requested_revision)
+    fingerprint = _machine_fingerprint()
+    record: dict[str, object] = {
+        "schema": PREFLIGHT_SCHEMA,
+        "status": "eligible",
+        "revision": requested_revision,
+        "runner_label": CONTROLLED_RUNNER_IDENTITY,
+        "repository": repository,
+        "machine_fingerprint": fingerprint,
+        "machine_fingerprint_sha256": machine_fingerprint_digest(fingerprint),
+    }
+    return validate_preflight_record(record)
+
+
 def _validate_hex(value: object, *, name: str, length: int) -> str:
     if not isinstance(value, str) or len(value) != length:
-        raise BaselineVerificationError(f"{name} must be a {length}-character hexadecimal string")
+        raise BaselineVerificationError(
+            f"{name} must be a {length}-character hexadecimal string"
+        )
     if any(character not in "0123456789abcdef" for character in value):
-        raise BaselineVerificationError(f"{name} must be a {length}-character hexadecimal string")
+        raise BaselineVerificationError(
+            f"{name} must be a {length}-character hexadecimal string"
+        )
     return value
 
 
@@ -147,9 +531,13 @@ def _validate_environment(value: object) -> dict[str, str | int]:
     normalized: dict[str, str | int] = {}
     for key, item in value.items():
         if not isinstance(key, str) or not key:
-            raise BaselineVerificationError("environment keys must be non-empty strings")
+            raise BaselineVerificationError(
+                "environment keys must be non-empty strings"
+            )
         if type(item) not in {str, int}:
-            raise BaselineVerificationError("environment values must be strings or integers")
+            raise BaselineVerificationError(
+                "environment values must be strings or integers"
+            )
         normalized[key] = item
     return normalized
 
@@ -159,7 +547,9 @@ def _validate_distribution(value: object, *, name: str) -> dict[str, Any]:
         raise BaselineVerificationError(f"distribution for {name} must be a mapping")
     raw_samples = value.get("samples_ns")
     if not isinstance(raw_samples, list):
-        raise BaselineVerificationError(f"distribution for {name} must retain raw samples")
+        raise BaselineVerificationError(
+            f"distribution for {name} must retain raw samples"
+        )
     expected = distribution(raw_samples)
     for field in ("sample_count", "mean_ns", "p50_ns", "p95_ns", "p99_ns"):
         if value.get(field) != expected[field]:
@@ -173,7 +563,9 @@ def _validate_envelopes(
     value: object, distributions: Mapping[str, object]
 ) -> dict[str, dict[str, float]]:
     if not isinstance(value, Mapping) or set(value) != set(distributions):
-        raise BaselineVerificationError("reviewed envelopes must match benchmark distributions")
+        raise BaselineVerificationError(
+            "reviewed envelopes must match benchmark distributions"
+        )
     normalized: dict[str, dict[str, float]] = {}
     for name, envelope in value.items():
         if not isinstance(name, str) or not isinstance(envelope, Mapping):
@@ -205,7 +597,9 @@ def _validate_document(value: object) -> dict[str, Any]:
     if value.get("schema") != BENCHMARK_SCHEMA:
         raise BaselineVerificationError("benchmark document schema is unsupported")
     if value.get("evidence_class") != "controlled-performance":
-        raise BaselineVerificationError("benchmark document is not controlled-performance evidence")
+        raise BaselineVerificationError(
+            "benchmark document is not controlled-performance evidence"
+        )
     runner_identity = value.get("runner_identity")
     if not isinstance(runner_identity, str) or not runner_identity:
         raise BaselineVerificationError("benchmark runner identity is missing")
@@ -218,7 +612,9 @@ def _validate_document(value: object) -> dict[str, Any]:
         if isinstance(name, str) and name
     }
     if len(normalized_distributions) != len(distributions):
-        raise BaselineVerificationError("benchmark distribution names must be non-empty strings")
+        raise BaselineVerificationError(
+            "benchmark distribution names must be non-empty strings"
+        )
     normalized = {
         "schema": BENCHMARK_SCHEMA,
         "evidence_class": "controlled-performance",
@@ -229,7 +625,9 @@ def _validate_document(value: object) -> dict[str, Any]:
         "runner_identity": runner_identity,
         "environment": _validate_environment(value.get("environment")),
         "distributions": normalized_distributions,
-        "envelopes": _validate_envelopes(value.get("envelopes"), normalized_distributions),
+        "envelopes": _validate_envelopes(
+            value.get("envelopes"), normalized_distributions
+        ),
     }
     baseline_change = value.get("baseline_change")
     if baseline_change is not None:
@@ -237,7 +635,9 @@ def _validate_document(value: object) -> dict[str, Any]:
             raise BaselineVerificationError("baseline change record must be a mapping")
         mode = baseline_change.get("mode")
         if mode not in {"capture", "recalibrate"}:
-            raise BaselineVerificationError("baseline change record has an invalid mode")
+            raise BaselineVerificationError(
+                "baseline change record has an invalid mode"
+            )
         change_record: dict[str, str] = {"mode": mode}
         justification = baseline_change.get("justification")
         if mode == "recalibrate":
@@ -279,7 +679,9 @@ def _load_document(source: Mapping[str, Any] | Path) -> dict[str, Any]:
         try:
             loaded = json.loads(source.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as error:
-            raise BaselineVerificationError("baseline is unreadable or invalid JSON") from error
+            raise BaselineVerificationError(
+                "baseline is unreadable or invalid JSON"
+            ) from error
         return _validate_document(loaded)
     return _validate_document(source)
 
@@ -291,15 +693,21 @@ def verify_baseline(
     reviewed = _load_document(baseline)
     observed = _load_document(current)
     if reviewed["runner_identity"] != observed["runner_identity"]:
-        raise BaselineVerificationError("benchmark runner identity does not match baseline")
+        raise BaselineVerificationError(
+            "benchmark runner identity does not match baseline"
+        )
     if reviewed["revision"] != observed["revision"]:
         raise BaselineVerificationError("benchmark revision does not match baseline")
     if reviewed["source_digest"] != observed["source_digest"]:
-        raise BaselineVerificationError("benchmark source digest does not match baseline")
+        raise BaselineVerificationError(
+            "benchmark source digest does not match baseline"
+        )
     if reviewed["environment"] != observed["environment"]:
         raise BaselineVerificationError("benchmark environment does not match baseline")
     if set(reviewed["distributions"]) != set(observed["distributions"]):
-        raise BaselineVerificationError("benchmark workload inventory does not match baseline")
+        raise BaselineVerificationError(
+            "benchmark workload inventory does not match baseline"
+        )
 
     for name, baseline_distribution in reviewed["distributions"].items():
         current_distribution = observed["distributions"][name]
@@ -328,8 +736,12 @@ def atomic_replace_baseline(
         raise BaselineVerificationError("baseline mode must be capture or recalibrate")
     if mode == "capture" and destination.exists():
         raise BaselineVerificationError("baseline already exists; use recalibrate")
-    if mode == "recalibrate" and (not isinstance(justification, str) or not justification.strip()):
-        raise BaselineVerificationError("baseline recalibration requires a justification")
+    if mode == "recalibrate" and (
+        not isinstance(justification, str) or not justification.strip()
+    ):
+        raise BaselineVerificationError(
+            "baseline recalibration requires a justification"
+        )
     normalized["baseline_change"] = {"mode": mode}
     if mode == "recalibrate":
         assert justification is not None
@@ -436,7 +848,9 @@ def _measure_in_worker(
     """Run one workload in a bounded child so setup state cannot leak across tiers."""
     try:
         result = subprocess.run(
-            _worker_command(descriptor, reduced=reduced, warmups=warmups, samples=samples),
+            _worker_command(
+                descriptor, reduced=reduced, warmups=warmups, samples=samples
+            ),
             check=True,
             capture_output=True,
             text=True,
@@ -447,8 +861,13 @@ def _measure_in_worker(
         raise BaselineVerificationError(
             f"benchmark worker failed for {descriptor.identifier}"
         ) from error
-    if not isinstance(payload, Mapping) or payload.get("identifier") != descriptor.identifier:
-        raise BaselineVerificationError("benchmark worker returned mismatched workload evidence")
+    if (
+        not isinstance(payload, Mapping)
+        or payload.get("identifier") != descriptor.identifier
+    ):
+        raise BaselineVerificationError(
+            "benchmark worker returned mismatched workload evidence"
+        )
     record = payload.get("record")
     if not isinstance(record, Mapping):
         raise BaselineVerificationError("benchmark worker omitted its record")
@@ -495,13 +914,19 @@ def measure_hashes(
     return tuple(observations)  # type: ignore[return-value]
 
 
-def _selected_workloads(identifiers: Sequence[str], *, all_workloads: bool) -> tuple[WorkloadDescriptor, ...]:
-    inventory = {descriptor.identifier: descriptor for descriptor in reviewed_workloads()}
+def _selected_workloads(
+    identifiers: Sequence[str], *, all_workloads: bool
+) -> tuple[WorkloadDescriptor, ...]:
+    inventory = {
+        descriptor.identifier: descriptor for descriptor in reviewed_workloads()
+    }
     if identifiers:
         try:
             return tuple(inventory[identifier] for identifier in identifiers)
         except KeyError as error:
-            raise BaselineVerificationError("unknown reviewed workload identifier") from error
+            raise BaselineVerificationError(
+                "unknown reviewed workload identifier"
+            ) from error
     if all_workloads:
         return tuple(inventory.values())
     return (inventory["small-generic-object__blobstore__cold-put"],)
@@ -509,10 +934,15 @@ def _selected_workloads(identifiers: Sequence[str], *, all_workloads: bool) -> t
 
 def _controlled_runner_preflight(runner_identity: str) -> None:
     if runner_identity != CONTROLLED_RUNNER_IDENTITY:
-        raise BaselineVerificationError("controlled capture requires cacheness-perf-linux-x64")
-    environment = environment_fingerprint()
-    if environment["platform"] != "Linux" or environment["machine"] not in {"x86_64", "amd64"}:
-        raise BaselineVerificationError("controlled capture requires a Linux x86_64 runner")
+        raise BaselineVerificationError(
+            "controlled capture requires cacheness-perf-linux-x64"
+        )
+    try:
+        _validate_controlled_platform()
+    except BaselineVerificationError as error:
+        raise BaselineVerificationError(
+            "controlled capture requires a Linux x86_64 runner"
+        ) from error
 
 
 def _measurement_document(
@@ -557,42 +987,62 @@ def _measurement_document(
         "envelopes": envelopes,
         "hash_observations": hash_observations,
         "records": records,
-        "sampling": {"samples": samples, "warmups": warmups, "worker_subprocesses": True},
+        "sampling": {
+            "samples": samples,
+            "warmups": warmups,
+            "worker_subprocesses": True,
+        },
     }
     if controlled:
         _validate_document(document)
     return document
 
 
-def _parse_arguments() -> argparse.Namespace:
+def _parse_arguments(arguments: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--diagnostic", action="store_true")
     mode.add_argument("--capture-baseline", type=Path)
     mode.add_argument("--recalibrate-baseline", type=Path)
     mode.add_argument("--verify-baseline", type=Path)
-    parser.add_argument("--output", type=Path, default=Path("build/phase8/performance.json"))
+    mode.add_argument("--preflight-runner", action="store_true")
+    parser.add_argument(
+        "--output", type=Path, default=Path("build/phase8/performance.json")
+    )
     parser.add_argument("--justification")
-    parser.add_argument("--runner-identity", default=os.environ.get("CACHENESS_PERF_RUNNER", "uncontrolled-local"))
+    parser.add_argument(
+        "--runner-identity",
+        default=os.environ.get("CACHENESS_PERF_RUNNER", "uncontrolled-local"),
+    )
+    parser.add_argument("--expect-label")
+    parser.add_argument("--revision")
     parser.add_argument("--workload", action="append", default=[])
     parser.add_argument("--all-workloads", action="store_true")
     parser.add_argument("--reduced", action="store_true")
     parser.add_argument("--warmups", type=int, default=DEFAULT_WARMUPS)
     parser.add_argument("--samples", type=int, default=DEFAULT_SAMPLES)
     parser.add_argument("--worker", help=argparse.SUPPRESS)
-    return parser.parse_args()
+    return parser.parse_args(arguments)
 
 
-def main() -> int:
+def main(arguments: Sequence[str] | None = None) -> int:
     """Run one diagnostic/capture/recalibration/verify benchmark operation."""
-    arguments = _parse_arguments()
-    if arguments.worker:
+    parsed = _parse_arguments(arguments)
+    if parsed.preflight_runner:
+        try:
+            record = _preflight_runner_record(
+                expected_label=parsed.expect_label,
+                revision=parsed.revision,
+                runner_identity=parsed.runner_identity,
+            )
+        except BaselineVerificationError as error:
+            print(f"runner preflight rejected: {error}", file=sys.stderr)
+            return 2
+        print(json.dumps(record, sort_keys=True, separators=(",", ":")))
+        return 0
+    if parsed.worker:
         descriptor = next(
-            (
-                item
-                for item in reviewed_workloads()
-                if item.identifier == arguments.worker
-            ),
+            (item for item in reviewed_workloads() if item.identifier == parsed.worker),
             None,
         )
         if descriptor is None:
@@ -603,9 +1053,9 @@ def main() -> int:
                     "identifier": descriptor.identifier,
                     "record": measure_workload(
                         descriptor,
-                        reduced=arguments.reduced,
-                        warmups=arguments.warmups,
-                        samples=arguments.samples,
+                        reduced=parsed.reduced,
+                        warmups=parsed.warmups,
+                        samples=parsed.samples,
                     ),
                 },
                 sort_keys=True,
@@ -615,27 +1065,31 @@ def main() -> int:
 
     mode = "diagnostic"
     destination: Path | None = None
-    if arguments.capture_baseline is not None:
-        mode, destination = "capture", arguments.capture_baseline
-    elif arguments.recalibrate_baseline is not None:
-        mode, destination = "recalibrate", arguments.recalibrate_baseline
-    elif arguments.verify_baseline is not None:
-        mode, destination = "verify", arguments.verify_baseline
+    if parsed.capture_baseline is not None:
+        mode, destination = "capture", parsed.capture_baseline
+    elif parsed.recalibrate_baseline is not None:
+        mode, destination = "recalibrate", parsed.recalibrate_baseline
+    elif parsed.verify_baseline is not None:
+        mode, destination = "verify", parsed.verify_baseline
     if mode in {"capture", "recalibrate", "verify"}:
-        _controlled_runner_preflight(arguments.runner_identity)
-        if not arguments.all_workloads:
+        _controlled_runner_preflight(parsed.runner_identity)
+        if not parsed.all_workloads:
             raise SystemExit("controlled baseline operations require --all-workloads")
 
     document = _measurement_document(
-        descriptors=_selected_workloads(arguments.workload, all_workloads=arguments.all_workloads),
-        reduced=arguments.reduced,
-        warmups=arguments.warmups,
-        samples=arguments.samples,
-        runner_identity=arguments.runner_identity,
+        descriptors=_selected_workloads(
+            parsed.workload, all_workloads=parsed.all_workloads
+        ),
+        reduced=parsed.reduced,
+        warmups=parsed.warmups,
+        samples=parsed.samples,
+        runner_identity=parsed.runner_identity,
         controlled=mode != "diagnostic",
     )
-    arguments.output.parent.mkdir(parents=True, exist_ok=True)
-    arguments.output.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    parsed.output.parent.mkdir(parents=True, exist_ok=True)
+    parsed.output.write_text(
+        json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
     if mode == "verify":
         assert destination is not None
         verify_baseline(destination, document)
@@ -646,11 +1100,11 @@ def main() -> int:
             destination,
             document,
             mode=mode,
-            justification=arguments.justification,
+            justification=parsed.justification,
         )
         print(f"{mode}d controlled performance baseline: {destination}")
     else:
-        print(f"wrote diagnostic performance evidence: {arguments.output}")
+        print(f"wrote diagnostic performance evidence: {parsed.output}")
     return 0
 
 

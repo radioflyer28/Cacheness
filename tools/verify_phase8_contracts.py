@@ -44,6 +44,7 @@ _REVIEWED_PLAN_PATHS = (
     f"{PHASE_DIRECTORY}/08-10-PLAN.md",
     f"{PHASE_DIRECTORY}/08-11-PLAN.md",
     f"{PHASE_DIRECTORY}/08-12-PLAN.md",
+    f"{PHASE_DIRECTORY}/08-13-PLAN.md",
 )
 PHASE8_PLAN_PATHS = tuple(_REVIEWED_PLAN_PATHS)
 
@@ -120,6 +121,9 @@ _REVIEWED_THREATS = (
     "T-08-12-04",
     "T-08-12-05",
     "T-08-12-06",
+    "T-08-13-01",
+    "T-08-13-02",
+    "T-08-13-03",
 )
 PHASE8_THREATS = tuple(_REVIEWED_THREATS)
 
@@ -209,6 +213,7 @@ _THREAT_TEST_MODULES = {
     "10": "tests/test_phase8_contract_verifier.py::test_ast_source_audit_rejects_prohibited_architecture_regressions",
     "11": "tests/test_phase8_contract_verifier.py::test_external_statuses_are_explicit_nonclaims",
     "12": "tests/test_phase8_contract_verifier.py::test_external_statuses_are_explicit_nonclaims",
+    "13": "tests/performance/test_phase8_benchmarks.py::test_preflight_runner_emits_only_the_bounded_eligibility_record",
 }
 _REVIEWED_THREAT_NODES = {
     threat: (_THREAT_TEST_MODULES[threat.split("-")[2]],)
