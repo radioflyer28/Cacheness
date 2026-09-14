@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import ast
 from collections.abc import Mapping, Sequence
+import json
 from pathlib import Path, PurePosixPath
 import platform
 import subprocess
@@ -25,6 +26,7 @@ PHASE_DIRECTORY = ".planning/phases/08-production-gates-and-performance-stabiliz
 PHASE8_CONTEXT_PATH = f"{PHASE_DIRECTORY}/08-CONTEXT.md"
 PHASE8_VALIDATION_PATH = f"{PHASE_DIRECTORY}/08-VALIDATION.md"
 PYTEST_TIMEOUT_SECONDS = 900
+MAX_LOCAL_EVIDENCE_BYTES = 64 * 1024
 
 # The reviewed contract is intentionally literal.  In particular, it must not
 # discover planning files, requirements, threats, or tests at runtime: deleting
@@ -454,12 +456,14 @@ def validate_fixed_manifest(root: Path = REPOSITORY_ROOT) -> tuple[str, ...]:
 
 def render_external_statuses(statuses: Mapping[str, str]) -> str:
     """Render explicit nonclaims without choosing a substitute evidence class."""
+    packaging_status = statuses.get("packaging", "NOT_RUN")
     platform_status = statuses.get("platform", "NOT_RUN")
     controlled = statuses.get("controlled_performance", "UNAVAILABLE")
     live = statuses.get("live_services", "UNAVAILABLE")
     windows = statuses.get("windows", "NOT_QUALIFIED")
     return "\n".join(
         (
+            f"packaging: {packaging_status}",
             f"platform: {platform_status}",
             f"controlled_performance: {controlled}",
             f"live_services: {live}",
@@ -515,6 +519,35 @@ def local_gate_commands(output_directory: Path) -> tuple[tuple[str, ...], ...]:
     )
 
 
+def _unavailable_gate_status(command: Sequence[str]) -> tuple[str, str] | None:
+    """Read one bounded local nonclaim envelope without upgrading it to a pass."""
+    gate = command[command.index("tools/run_phase8_local_gates.py") + 1]
+    if gate == "all":
+        output = Path(command[command.index("--output-dir") + 1]) / "packaging.json"
+        evidence_class = "packaging"
+    elif gate == "platform":
+        output = Path(command[command.index("--output") + 1])
+        evidence_class = "platform"
+    else:
+        return None
+    try:
+        if output.is_symlink() or not output.is_file():
+            return None
+        if output.stat().st_size > MAX_LOCAL_EVIDENCE_BYTES:
+            return None
+        envelope = json.loads(output.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(envelope, dict):
+        return None
+    if (
+        envelope.get("evidence_class") != evidence_class
+        or envelope.get("status") != "UNAVAILABLE"
+    ):
+        return None
+    return gate if gate != "all" else evidence_class, "UNAVAILABLE"
+
+
 def _run_local(mode: str) -> tuple[int, dict[str, str]]:
     command = (
         sys.executable,
@@ -547,8 +580,10 @@ def _run_local(mode: str) -> tuple[int, dict[str, str]]:
             gate = local_command[
                 local_command.index("tools/run_phase8_local_gates.py") + 1
             ]
-            if local_result.returncode == 2 and gate == "platform":
-                statuses["platform"] = "UNAVAILABLE"
+            unavailable = _unavailable_gate_status(local_command)
+            if local_result.returncode != 0 and unavailable is not None:
+                evidence_class, status = unavailable
+                statuses[evidence_class] = status
                 continue
             if local_result.returncode != 0:
                 return 1, statuses

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from importlib.util import module_from_spec, spec_from_file_location
+import json
 from pathlib import Path
 import subprocess
 from types import ModuleType
@@ -185,21 +186,39 @@ def test_all_mode_uses_fixed_local_gate_commands_before_external_reporting(
     )
 
 
-def test_all_mode_reports_a_current_host_platform_nonclaim_without_stopping(
+def test_all_mode_reports_unavailable_local_evidence_without_stopping(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """An unavailable non-boundary platform row is not a false local failure."""
+    """Unavailable packaging/platform rows remain blocking nonclaims, not failures."""
     verifier = _load_verifier()
 
     def fake_run(command: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
         if "pytest" in command:
             return subprocess.CompletedProcess(command, 0)
         gate = command[command.index("tools/run_phase8_local_gates.py") + 1]
-        return subprocess.CompletedProcess(command, 2 if gate == "platform" else 0)
+        if gate == "all":
+            output = Path(command[command.index("--output-dir") + 1]) / "packaging.json"
+            output.parent.mkdir(parents=True)
+            output.write_text(
+                json.dumps({"evidence_class": "packaging", "status": "UNAVAILABLE"}),
+                encoding="utf-8",
+            )
+            return subprocess.CompletedProcess(command, 1)
+        output = Path(command[command.index("--output") + 1])
+        output.write_text(
+            json.dumps({"evidence_class": "platform", "status": "UNAVAILABLE"}),
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(command, 1)
 
     monkeypatch.setattr(verifier, "_run", fake_run)
 
-    assert verifier._run_local("all") == (0, {"platform": "UNAVAILABLE"})
+    assert verifier._run_local("all") == (
+        0,
+        {"packaging": "UNAVAILABLE", "platform": "UNAVAILABLE"},
+    )
     assert verifier.main(["--all"]) == 2
-    assert "platform: UNAVAILABLE" in capsys.readouterr().out
+    report = capsys.readouterr().out
+    assert "packaging: UNAVAILABLE" in report
+    assert "platform: UNAVAILABLE" in report
