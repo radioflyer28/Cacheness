@@ -5,12 +5,12 @@ status: planned
 nyquist_compliant: true
 wave_0_complete: false
 created: 2026-09-13
-updated: 2026-09-13
+updated: 2026-09-14
 ---
 
 # Phase 08 — Validation Strategy
 
-> Planning-time Nyquist contract for Plans 08-01 through 08-12. No Phase 8
+> Planning-time Nyquist contract for Plans 08-01 through 08-13. No Phase 8
 > implementation result, live credential, controlled-runner capture, workflow run,
 > or immutable release is claimed to exist. Existing Phase 03/05/07.1 artifacts are
 > implementation analogs or inherited regressions, not substitute Phase 8 evidence.
@@ -119,12 +119,13 @@ pre-gap research percentages are diagnostic and never qualify this dependency.
 | 08-10-01 | 5 | Fixed source/selector/decision verifier | `uv run pytest -q -o log_cli=false tests/test_phase8_contract_verifier.py -x` | Deterministic/local | Wave 0 missing |
 | 08-10-02 | 5 | Exact-SHA workflow dispatch/run-ID wait/fixed artifact collection | `uv run pytest -q -o log_cli=false tests/qualification/test_phase8_release.py -k 'dispatch or run_id or artifact_collection' -x` | External-orchestration self-test | Wave 0 missing |
 | 08-10-03 | 5 | Same-SHA aggregate and published immutable release verifier | `uv run pytest -q -o log_cli=false tests/qualification/test_phase8_release.py tests/test_phase8_contract_verifier.py -x` | Publication self-test | Wave 0 missing |
-| 08-11-01 | 6 | Controlled baseline capture | `uv run --isolated --all-extras --group dev --frozen python benchmarks/phase8_benchmarks.py --verify-baseline benchmarks/phase8_baseline.json` | Controlled performance | External runner checkpoint |
-| 08-11-02 | 6 | Exact-SHA quality/performance/live dispatch, wait, and artifact collection | `uv run --isolated --all-extras --group dev --frozen python tools/verify_phase8_release.py collect --candidate-sha "$(git rev-parse HEAD)" --output-dir build/phase8/evidence --live-output build/phase8/live_qualification.json` | Deterministic/platform/packaging/coverage/structural/controlled/live collection | Controlled runner, protected live service, and exact dispatch checkpoints |
-| 08-11-03 | 6 | Validate and aggregate exact-run artifacts | `uv run --isolated --all-extras --group dev --frozen python tools/verify_phase8_contracts.py --all && uv run --isolated --group dev --frozen python tools/verify_phase8_release.py aggregate --candidate-sha "$(git rev-parse HEAD)" --evidence-dir build/phase8/evidence --live-evidence build/phase8/live_qualification.json --output build/phase8/release_qualification.json` | Publication input | Blocked until exact-run collection passes |
-| 08-12-01 | 7 | Exact draft target/assets/states/digests prepublication report | `uv run --isolated --group dev --frozen python tools/verify_phase8_release.py prepare-draft --tag "$CACHENESS_RELEASE_TAG" --aggregate build/phase8/release_qualification.json --asset-dir build/phase8/evidence --live-evidence build/phase8/live_qualification.json --output build/phase8/release_prepublication.json` | Publication | Immutable-policy/permission precondition checkpoint |
-| 08-12-02 | 7 | Operator/reviewer approval bound to exact report digest | Blocking-human resume signal `publish <tag> <sha> <report-sha256>` | Human authorization | Draft remains unpublished until approved |
-| 08-12-03 | 7 | Publish and final exact immutable state/assets/digests verification | `uv run --isolated --group dev --frozen python tools/verify_phase8_release.py publish-and-verify --tag "$CACHENESS_RELEASE_TAG" --prepublication build/phase8/release_prepublication.json --output build/phase8/release_publication.json` | Publication | One-way authorized transition then read-only proof |
+| 08-13-01 | 6 | Read-only exact-commit controlled-runner preflight | `uv run --isolated --all-extras --group dev --frozen pytest -q -o log_cli=false tests/performance/test_phase8_benchmarks.py -k preflight_runner -x` | Controlled-runner eligibility self-test | Gap predecessor for 08-11; no baseline write |
+| 08-11-01 | 7 | Controlled baseline capture | `uv run --isolated --all-extras --group dev --frozen python benchmarks/phase8_benchmarks.py --verify-baseline benchmarks/phase8_baseline.json` | Controlled performance | External runner checkpoint after 08-13 |
+| 08-11-02 | 7 | Exact-SHA quality/performance/live dispatch, wait, and artifact collection | `uv run --isolated --all-extras --group dev --frozen python tools/verify_phase8_release.py collect --candidate-sha "$(git rev-parse HEAD)" --output-dir build/phase8/evidence --live-output build/phase8/live_qualification.json` | Deterministic/platform/packaging/coverage/structural/controlled/live collection | Controlled runner, protected live service, and exact dispatch checkpoints |
+| 08-11-03 | 7 | Validate and aggregate exact-run artifacts | `uv run --isolated --all-extras --group dev --frozen python tools/verify_phase8_contracts.py --all && uv run --isolated --group dev --frozen python tools/verify_phase8_release.py aggregate --candidate-sha "$(git rev-parse HEAD)" --evidence-dir build/phase8/evidence --live-evidence build/phase8/live_qualification.json --output build/phase8/release_qualification.json` | Publication input | Blocked until exact-run collection passes |
+| 08-12-01 | 8 | Exact draft target/assets/states/digests prepublication report | `uv run --isolated --group dev --frozen python tools/verify_phase8_release.py prepare-draft --tag "$CACHENESS_RELEASE_TAG" --aggregate build/phase8/release_qualification.json --asset-dir build/phase8/evidence --live-evidence build/phase8/live_qualification.json --output build/phase8/release_prepublication.json` | Publication | Immutable-policy/permission precondition checkpoint |
+| 08-12-02 | 8 | Operator/reviewer approval bound to exact report digest | Blocking-human resume signal `publish <tag> <sha> <report-sha256>` | Human authorization | Draft remains unpublished until approved |
+| 08-12-03 | 8 | Publish and final exact immutable state/assets/digests verification | `uv run --isolated --group dev --frozen python tools/verify_phase8_release.py publish-and-verify --tag "$CACHENESS_RELEASE_TAG" --prepublication build/phase8/release_prepublication.json --output build/phase8/release_publication.json` | Publication | One-way authorized transition then read-only proof |
 
 ## Exact-SHA Dispatch, Wait, and Artifact Collection Gate
 
@@ -223,7 +224,7 @@ authorization, or a published release exists.
 | Checkpoint | Type | Owner | Preflight | Resume evidence | Failure disposition |
 |---|---|---|---|---|---|
 | `pyperf` legitimacy | `checkpoint:human-verify` | Maintainer | Review official project provenance and seam `SUS` reason before locking | Explicit approval or documented rejection/fallback | Do not install on silence |
-| Controlled Linux runner | `checkpoint:human-action` | Repository/infrastructure maintainer | Exact label `cacheness-perf-linux-x64`; Linux x86-64; stable fingerprint/noise; clean exact SHA | Machine fingerprint plus successful non-mutating baseline verification | QUAL-06 unavailable; macOS numbers diagnostic only |
+| Controlled Linux runner | `checkpoint:human-action` | Repository/infrastructure maintainer | `benchmarks/phase8_benchmarks.py --preflight-runner --expect-label cacheness-perf-linux-x64 --revision CANDIDATE_SHA` proves the fixed label, Linux x86-64, and clean detached exact SHA without measuring or writing a baseline | Bounded sanitized successful preflight record | QUAL-06 unavailable; macOS numbers diagnostic only |
 | Protected live environment | `checkpoint:human-action` | Cloud/repository admin | Four named variables present; least privilege; real PostgreSQL/Amazon S3; no endpoint override; owner-marker/cleanup caps | Configuration-only preflight succeeds without revealing values | BACK-05 unavailable; no mock/local fallback |
 | Exact live RC execution | `checkpoint:human-verify` | Release operator | Deterministic/package/platform/coverage/structural gates green for committed SHA | Approved candidate SHA, exact run ID, successful conclusion, downloaded named artifact, validated `QUALIFIED`/`CLEAN` envelope | Stop; retain sanitized bounded diagnostics only |
 | Immutable release enablement/authority | `checkpoint:human-action` | Repository admin/release operator | Actual org/repo immutable setting, `gh auth status`, tag-to-SHA, asset permissions, complete same-SHA aggregate | Authorized draft release ready for asset upload | Publication blocked; do not claim immutable release |
@@ -246,15 +247,16 @@ checkpoint rather than inventing values.
   controlled jobs from an untrusted PR.
 - **After Wave 5:** run fixed verifier quick/all modes plus adversarial dispatcher,
   collector, aggregator, and publication-verifier tests.
-- **After Wave 6:** require exact-SHA quality/performance/live dispatch, recorded run-ID
+- **After Wave 6:** require the read-only controlled-runner preflight contract and its fixed-verifier binding.
+- **After Wave 7:** require exact-SHA quality/performance/live dispatch, recorded run-ID
   waits, fixed-name downloads, envelope validation, and same-SHA aggregation.
-- **Phase gate (Wave 7):** satisfy the immutable policy/authority preflight, create
+- **Phase gate (Wave 8):** satisfy the immutable policy/authority preflight, create
   and verify the exact draft, obtain report-digest-bound operator approval, publish,
   and verify immutable state without mutating the release.
 
 ## Validation Sign-Off Criteria
 
-- [ ] Every Plan 01-12 code-producing task has its exact automated command and evidence class; the publication checkpoint has an exact digest-bound resume signal.
+- [ ] Every Plan 01-13 code-producing task has its exact automated command and evidence class; the publication checkpoint has an exact digest-bound resume signal.
 - [ ] Wave 0 creates every missing test/harness/workflow verifier before relying on it.
 - [ ] PostgreSQL DB-API classification, replay, pagination, and rollback selectors
       pass before coverage floors are captured.
