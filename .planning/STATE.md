@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 08
 current_phase_name: Production Gates and Performance Stabilization
 status: executing
-stopped_at: Completed 08-04-PLAN.md
-last_updated: "2026-09-14T00:14:53.100Z"
+stopped_at: Completed 08-06-PLAN.md
+last_updated: "2026-09-14T00:30:23.572Z"
 last_activity: 2026-09-13
 last_activity_desc: Phase 08 Plan 02 completed; isolated wheel matrix and packaging evidence recorded
-state_head: 6ead52f39ba7a15d426de41a88ffed8e4670ede2
+state_head: 681b2159e84c91c7bbe0a4ad7f682153ce0c4992
 progress:
   total_phases: 9
   completed_phases: 7
   total_plans: 128
-  completed_plans: 119
+  completed_plans: 120
 milestone_name: milestone
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-09-13)
 ## Current Position
 
 Phase: 08 — Production Gates and Performance Stabilization
-Plan: 5 of 12
+Plan: 6 of 12
 Status: Ready to execute
 Last activity: 2026-09-13 — Phase 08 Plan 02 completed; isolated wheel matrix and packaging evidence recorded
 
@@ -198,6 +198,7 @@ the deliberately superseded Phase 03 plan; do not fabricate its completion.
 | Phase 08 P02 | 17m | 2 tasks | 3 files |
 | Phase 08 P03 | 8m 33s | 2 tasks | 3 files |
 | Phase 08 P04 | 12m 14s | 2 tasks | 2 files |
+| Phase 08 P06 | 12m 10s | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -476,6 +477,8 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - [Phase 08]: Phase 08 Plan 03: success, conflict, and typed-retryable contention remain valid ADR progress classifications, not portability or coordination failures.
 - [Phase 08]: PostgreSQL DB-API boundary coverage uses deterministic transcript fixtures; live PostgreSQL remains separate qualification evidence.
 - [Phase 08]: Phase 8 coverage baseline capture follows named lifecycle and cache-policy contracts; QUAL-05 remains pending for Plan 08-05.
+- [Phase 08]: Phase 08 Plan 06: structural call and RSS evidence remains separate from controlled timing performance evidence.
+- [Phase 08]: Phase 08 Plan 06: unsupported POSIX RSS measurement fails closed instead of claiming normalized memory evidence.
 
 ### Pending Todos
 
@@ -505,6 +508,6 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 
 ## Session Continuity
 
-Last session: 2026-09-14T00:14:52.831Z
-Stopped at: Completed 08-04-PLAN.md
+Last session: 2026-09-14T00:30:23.300Z
+Stopped at: Completed 08-06-PLAN.md
 Resume file: None

@@ -2,9 +2,9 @@
 schema_version: 1
 open_count: 6
 waived_count: 0
-fixed_count: 50
-total_count: 56
-last_updated: 2026-09-14T00:13:25.560Z
+fixed_count: 53
+total_count: 59
+last_updated: 2026-09-14T00:30:42.096Z
 ---
 
 # Broken Windows Ledger
@@ -71,6 +71,9 @@ last_updated: 2026-09-14T00:13:25.560Z
 | 54 | 08 | deviation | tools/phase8_evidence.py |  | Added the packaging-only evidence allow-list required for sanitized package qualification. | fixed |  | 2026-09-13T23:41:18.763Z | 2026-09-13T23:41:39.408Z |
 | 55 | 08 | deviation | tools/run_phase8_packaging.py |  | Preserved reviewed non-live group order in canonical packaging evidence. | fixed |  | 2026-09-13T23:41:18.902Z | 2026-09-13T23:41:39.553Z |
 | 56 | 08 | deviation | tests/test_phase8_lifecycle_coverage.py |  | Added a test-local SQL-composition fixture because the prescribed focused command omits the optional PostgreSQL extra. | fixed |  | 2026-09-14T00:13:08.922Z | 2026-09-14T00:13:25.560Z |
+| 57 | 08 | deviation | tests/performance/test_memory_bounds.py |  | Spawned RSS child requires an importable runner module. | fixed |  | 2026-09-14T00:30:20.931Z | 2026-09-14T00:30:41.849Z |
+| 58 | 08 | deviation | tools/phase8_evidence.py |  | Structural evidence needed a bounded raw-observation allow-list. | fixed |  | 2026-09-14T00:30:21.066Z | 2026-09-14T00:30:41.975Z |
+| 59 | 08 | deviation | tools/run_phase8_scale_gates.py |  | Unsupported POSIX RSS environments fail closed before a byte claim. | fixed |  | 2026-09-14T00:30:21.194Z | 2026-09-14T00:30:42.096Z |
 
 ````json
 [
@@ -745,6 +748,42 @@ last_updated: 2026-09-14T00:13:25.560Z
     "reason": "",
     "recorded_at": "2026-09-14T00:13:08.922Z",
     "resolved_at": "2026-09-14T00:13:25.560Z"
+  },
+  {
+    "id": 57,
+    "kind": "deviation",
+    "phase": "08",
+    "file": "tests/performance/test_memory_bounds.py",
+    "line": null,
+    "description": "Spawned RSS child requires an importable runner module.",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-09-14T00:30:20.931Z",
+    "resolved_at": "2026-09-14T00:30:41.849Z"
+  },
+  {
+    "id": 58,
+    "kind": "deviation",
+    "phase": "08",
+    "file": "tools/phase8_evidence.py",
+    "line": null,
+    "description": "Structural evidence needed a bounded raw-observation allow-list.",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-09-14T00:30:21.066Z",
+    "resolved_at": "2026-09-14T00:30:41.975Z"
+  },
+  {
+    "id": 59,
+    "kind": "deviation",
+    "phase": "08",
+    "file": "tools/run_phase8_scale_gates.py",
+    "line": null,
+    "description": "Unsupported POSIX RSS environments fail closed before a byte claim.",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-09-14T00:30:21.194Z",
+    "resolved_at": "2026-09-14T00:30:42.096Z"
   }
 ]
 ````
