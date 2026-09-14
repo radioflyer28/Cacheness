@@ -41,7 +41,7 @@ updated: 2026-09-14
 | Platform | `tools/run_phase8_platform_gates.py`, `quality.yml` | PR and release according to row role | Full stable Linux 3.11-3.14 rows, macOS 3.11/3.14 boundary smoke, TensorFlow only on compatible stable rows | Windows support, prerelease support, controlled performance |
 | Coverage/quality | `tools/verify_phase8_coverage.py`, Coverage.py JSON/XML, direct Ruff commands | PR and release | Named behavior selectors plus post-gap repository/critical statement and branch floors; read-only baseline verification | Behavior omitted merely because percentages are green |
 | Structural | `tools/run_phase8_scale_gates.py` | PR and release | Exact authority/participant call formulas and peak-memory bounds at fixed tiers | Wall-clock latency or stronger progress guarantees |
-| Controlled performance | `benchmarks/phase8_benchmarks.py`, `performance.yml` | Release | Stable distributions and RSS on exact `cacheness-perf-linux-x64` fingerprint against checked baseline | Runtime deadlines, remote latency, safety/recovery/progress |
+| Controlled performance | `benchmarks/phase8_benchmarks.py`, `performance.yml` | Release | Exact allow-listed `cacheness-perf-linux-x64` machine fingerprint/digest at preflight, followed separately by stable distributions, CPU-noise checks, and RSS against the checked baseline | Runtime deadlines, remote latency, safety/recovery/progress |
 | Live service | `tools/run_phase8_qualification.py`, `live_qualification.yml` | BACK-05 and release | Real PostgreSQL + authoritative Amazon S3, exact fixed suite, exact SHA/source, `QUALIFIED` and `CLEAN` | Mocks, collection-only, scheduled diagnostics, local proof |
 | Publication | `tools/verify_phase8_release.py` plus final immutable-release verifier | Final release | Every required class shares exact SHA/source; exact tag, published immutable state, exact asset set/states/SHA-256 digests | A local manifest that was never attached/published |
 
@@ -224,7 +224,7 @@ authorization, or a published release exists.
 | Checkpoint | Type | Owner | Preflight | Resume evidence | Failure disposition |
 |---|---|---|---|---|---|
 | `pyperf` legitimacy | `checkpoint:human-verify` | Maintainer | Review official project provenance and seam `SUS` reason before locking | Explicit approval or documented rejection/fallback | Do not install on silence |
-| Controlled Linux runner | `checkpoint:human-action` | Repository/infrastructure maintainer | `benchmarks/phase8_benchmarks.py --preflight-runner --expect-label cacheness-perf-linux-x64 --revision CANDIDATE_SHA` proves the fixed label, Linux x86-64, and clean detached exact SHA without measuring or writing a baseline | Bounded sanitized successful preflight record | QUAL-06 unavailable; macOS numbers diagnostic only |
+| Controlled Linux runner | `checkpoint:human-action` | Repository/infrastructure maintainer | `uv run --isolated --all-extras --group dev --frozen python benchmarks/phase8_benchmarks.py --preflight-runner --expect-label cacheness-perf-linux-x64 --revision CANDIDATE_SHA` proves the fixed logical label, Linux x86-64, exact allow-listed OS/architecture, CPU/governor, filesystem, Python, uv, and SQLite fingerprint/digest, and clean detached exact SHA without measuring or writing a baseline | Bounded sanitized schema-valid preflight record whose canonical fingerprint digest recomputes exactly; no other host/user/account/credential identity is permitted | QUAL-06 unavailable; macOS numbers diagnostic only |
 | Protected live environment | `checkpoint:human-action` | Cloud/repository admin | Four named variables present; least privilege; real PostgreSQL/Amazon S3; no endpoint override; owner-marker/cleanup caps | Configuration-only preflight succeeds without revealing values | BACK-05 unavailable; no mock/local fallback |
 | Exact live RC execution | `checkpoint:human-verify` | Release operator | Deterministic/package/platform/coverage/structural gates green for committed SHA | Approved candidate SHA, exact run ID, successful conclusion, downloaded named artifact, validated `QUALIFIED`/`CLEAN` envelope | Stop; retain sanitized bounded diagnostics only |
 | Immutable release enablement/authority | `checkpoint:human-action` | Repository admin/release operator | Actual org/repo immutable setting, `gh auth status`, tag-to-SHA, asset permissions, complete same-SHA aggregate | Authorized draft release ready for asset upload | Publication blocked; do not claim immutable release |
@@ -247,7 +247,7 @@ checkpoint rather than inventing values.
   controlled jobs from an untrusted PR.
 - **After Wave 5:** run fixed verifier quick/all modes plus adversarial dispatcher,
   collector, aggregator, and publication-verifier tests.
-- **After Wave 6:** require the read-only controlled-runner preflight contract and its fixed-verifier binding.
+- **After Wave 6:** require the read-only controlled-runner preflight contract, canonical fingerprint/digest drift and adversarial tests, optional-lock-free Git/worktree non-mutation tests, Ruff lint plus format-check on every modified Python file, and the fixed-verifier binding.
 - **After Wave 7:** require exact-SHA quality/performance/live dispatch, recorded run-ID
   waits, fixed-name downloads, envelope validation, and same-SHA aggregation.
 - **Phase gate (Wave 8):** satisfy the immutable policy/authority preflight, create
