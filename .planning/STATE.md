@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 08
 current_phase_name: Production Gates and Performance Stabilization
 status: executing
-stopped_at: Completed 08-08-PLAN.md
-last_updated: "2026-09-14T01:05:48.648Z"
+stopped_at: Completed 08-05-PLAN.md
+last_updated: "2026-09-14T02:23:17.188Z"
 last_activity: 2026-09-14
 last_activity_desc: Phase 08 Plan 08 completed; protected real PostgreSQL/Amazon-S3 qualification machinery recorded
-state_head: 928fc42578f485591fc1a18b9cf28bf24e6a5155
+state_head: 57b21a165638507cae3dcb6df60cfdab410484b6
 progress:
   total_phases: 9
   completed_phases: 7
   total_plans: 128
-  completed_plans: 122
+  completed_plans: 123
 milestone_name: milestone
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-09-13)
 ## Current Position
 
 Phase: 08 — Production Gates and Performance Stabilization
-Plan: 8 of 12
+Plan: 9 of 12
 Status: Ready to execute
 Last activity: 2026-09-14 — Phase 08 Plan 08 completed; protected real PostgreSQL/Amazon-S3 qualification machinery recorded
 
@@ -201,6 +201,7 @@ the deliberately superseded Phase 03 plan; do not fabricate its completion.
 | Phase 08 P06 | 12m 10s | 2 tasks | 4 files |
 | Phase 08 P07 | 680s | 3 tasks | 4 files |
 | Phase 08 P08 | 838s | 3 tasks | 5 files |
+| Phase 08 P05 | 4020 | 2 tasks | 23 files |
 
 ## Accumulated Context
 
@@ -487,6 +488,9 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - [Phase 08]: Phase 08 Plan 08: only release_candidate live evidence can be QUALIFIED; scheduled diagnostics remain non-qualifying.
 - [Phase 08]: Phase 08 Plan 08: Phase 8 qualification uses exact q8 marker-owned namespaces while preserving Phase 5 fixture compatibility.
 - [Phase 08]: Phase 08 Plan 08: real-service source identity includes fixed live tests, active obstore/authority code, tools, and workflows.
+- [Phase 08]: Coverage floors compare covered and total statement/branch counts plus derived rates for repository and critical scopes.
+- [Phase 08]: Coverage capture excludes all protected live-service markers; mocks, skips, and unavailable services never become baseline evidence.
+- [Phase 08]: The baseline is an explicit canonical JSON artifact; ordinary verification never mutates it.
 
 ### Pending Todos
 
@@ -516,6 +520,6 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 
 ## Session Continuity
 
-Last session: 2026-09-14T01:05:48.359Z
-Stopped at: Completed 08-08-PLAN.md
+Last session: 2026-09-14T02:23:16.907Z
+Stopped at: Completed 08-05-PLAN.md
 Resume file: None
