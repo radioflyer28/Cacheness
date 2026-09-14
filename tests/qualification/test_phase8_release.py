@@ -316,3 +316,171 @@ def test_artifact_collection_requires_run_id_fixed_name_and_one_bounded_file(
     assert all(
         item.artifact_name in release.ARTIFACT_EVIDENCE_CLASS for item in collected
     )
+
+
+def test_aggregate_requires_one_same_revision_same_digest_qualifying_class(
+    tmp_path: Path,
+) -> None:
+    """One class cannot impersonate another or inherit an earlier candidate pass."""
+    release = _load_release()
+    candidate = "a" * 40
+    collected = release.collect_workflow_evidence(
+        candidate_sha=candidate,
+        output_directory=tmp_path / "collected",
+        execute=FakeGh(revision=candidate),
+    )
+    release.write_collection_manifest(tmp_path / "collected", collected)
+
+    manifest = release.aggregate_collection(
+        candidate_sha=candidate,
+        collection_directory=tmp_path / "collected",
+        output=tmp_path / "aggregate.json",
+    )
+
+    assert manifest["revision"] == candidate
+    assert set(manifest["evidence"]) == set(release.ARTIFACT_EVIDENCE_CLASS.values())
+    assert (tmp_path / "aggregate.json").is_file()
+
+
+def test_aggregate_rejects_stale_duplicate_and_nonqualifying_evidence(
+    tmp_path: Path,
+) -> None:
+    """A stale source, duplicate class, or unclean live evidence blocks release."""
+    release = _load_release()
+    candidate = "a" * 40
+    collected = release.collect_workflow_evidence(
+        candidate_sha=candidate,
+        output_directory=tmp_path / "collected",
+        execute=FakeGh(revision=candidate),
+    )
+    release.write_collection_manifest(tmp_path / "collected", collected)
+    manifest_path = tmp_path / "collected" / release.COLLECTION_MANIFEST_NAME
+    document = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    document["artifacts"][0]["source_digest"] = "d" * 64
+    manifest_path.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(release.ReleaseEvidenceError, match="source digest"):
+        release.aggregate_collection(
+            candidate_sha=candidate,
+            collection_directory=tmp_path / "collected",
+            output=tmp_path / "bad.json",
+        )
+
+    document["artifacts"][0]["source_digest"] = "c" * 64
+    document["artifacts"].append(dict(document["artifacts"][0]))
+    manifest_path.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(release.ReleaseEvidenceError, match="exactly one"):
+        release.aggregate_collection(
+            candidate_sha=candidate,
+            collection_directory=tmp_path / "collected",
+            output=tmp_path / "duplicate.json",
+        )
+
+
+class FakeReleaseInspection:
+    """Read-only Git/GitHub release state adapter for immutable-publication tests."""
+
+    def __init__(
+        self, *, candidate: str, assets: list[dict[str, object]], draft: bool = False
+    ) -> None:
+        self.candidate = candidate
+        self.assets = assets
+        self.draft = draft
+        self.commands: list[tuple[str, ...]] = []
+
+    def __call__(self, command: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
+        self.commands.append(command)
+        if command[:3] == ("git", "rev-parse", "--verify"):
+            return subprocess.CompletedProcess(command, 0, self.candidate + "\n", "")
+        if command[:3] == ("gh", "release", "view"):
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                json.dumps(
+                    {
+                        "tagName": "v1.0.0",
+                        "isDraft": self.draft,
+                        "isImmutable": True,
+                        "assets": self.assets,
+                    }
+                ),
+                "",
+            )
+        if command[:3] in {
+            ("gh", "release", "verify"),
+            ("gh", "release", "verify-asset"),
+        }:
+            return subprocess.CompletedProcess(command, 0, "", "")
+        raise AssertionError(f"unexpected command: {command!r}")
+
+
+def _sha256(value: bytes) -> str:
+    import hashlib
+
+    return hashlib.sha256(value).hexdigest()
+
+
+def test_publication_verifier_requires_exact_published_immutable_assets(
+    tmp_path: Path,
+) -> None:
+    """Tag target, API asset state, digest, and GitHub verification all agree."""
+    release = _load_release()
+    candidate = "a" * 40
+    assets = []
+    asset_paths: list[Path] = []
+    for name, content in (
+        ("phase8-release-qualification.json", b"{}\n"),
+        ("phase8-live.json", b"{}\n"),
+    ):
+        path = tmp_path / name
+        path.write_bytes(content)
+        asset_paths.append(path)
+        assets.append(
+            {"name": name, "state": "uploaded", "digest": "sha256:" + _sha256(content)}
+        )
+    fake = FakeReleaseInspection(candidate=candidate, assets=assets)
+
+    report = release.verify_published_release(
+        candidate_sha=candidate, tag="v1.0.0", assets=asset_paths, execute=fake
+    )
+
+    assert report["revision"] == candidate
+    assert report["immutable"] is True
+    assert any(
+        command[:3] == ("gh", "release", "verify-asset")
+        for command in fake.commands
+    )
+
+
+def test_publication_verifier_rejects_draft_extra_and_digest_mismatch(
+    tmp_path: Path,
+) -> None:
+    """A local file or draft release is never equivalent to immutable publication."""
+    release = _load_release()
+    candidate = "a" * 40
+    asset = tmp_path / "phase8-release-qualification.json"
+    asset.write_bytes(b"{}\n")
+    api_asset = {
+        "name": asset.name,
+        "state": "uploaded",
+        "digest": "sha256:" + _sha256(asset.read_bytes()),
+    }
+    with pytest.raises(release.ReleaseEvidenceError, match="draft"):
+        release.verify_published_release(
+            candidate_sha=candidate,
+            tag="v1.0.0",
+            assets=[asset],
+            execute=FakeReleaseInspection(
+                candidate=candidate, assets=[api_asset], draft=True
+            ),
+        )
+    with pytest.raises(release.ReleaseEvidenceError, match="asset inventory"):
+        release.verify_published_release(
+            candidate_sha=candidate,
+            tag="v1.0.0",
+            assets=[asset],
+            execute=FakeReleaseInspection(
+                candidate=candidate,
+                assets=[api_asset, {**api_asset, "name": "diagnostic.json"}],
+            ),
+        )
