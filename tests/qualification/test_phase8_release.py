@@ -34,13 +34,41 @@ def _load_evidence():
 
 
 def _envelope_bytes(evidence_class: str, revision: str) -> bytes:
+    if evidence_class == "controlled_performance":
+        return json.dumps(
+            {
+                "schema": "cacheness-phase8-performance-v1",
+                "evidence_class": "controlled-performance",
+                "revision": revision,
+                "source_digest": "c" * 64,
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    if evidence_class == "live_services":
+        return json.dumps(
+            {
+                "schema": "phase8-live-qualification-v1",
+                "status": "QUALIFIED",
+                "revision": revision,
+                "source_digest": "c" * 64,
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
     evidence = _load_evidence()
     payload = {
         "result": "passed",
         "claim_categories": {
-            "integrity": "EVIDENCED",
-            "recovery": "EVIDENCED",
-            "progress": "EVIDENCED",
+            "integrity": "NOT_QUALIFIED"
+            if evidence_class == "packaging"
+            else "EVIDENCED",
+            "recovery": "NOT_QUALIFIED"
+            if evidence_class == "packaging"
+            else "EVIDENCED",
+            "progress": "NOT_QUALIFIED"
+            if evidence_class == "packaging"
+            else "EVIDENCED",
             "performance": "NOT_QUALIFIED",
         },
         "non_qualifying_classes": [
@@ -73,9 +101,21 @@ def _envelope_bytes(evidence_class: str, revision: str) -> bytes:
                 "platform": "Linux",
                 "probes": ["base", "optional"],
                 "optional_groups": [
-                    "recommended", "dataframes", "tensorflow", "s3", "postgresql", "cloud"
+                    "recommended",
+                    "dataframes",
+                    "tensorflow",
+                    "s3",
+                    "postgresql",
+                    "cloud",
                 ],
-                "compatibility": ["compatible"],
+                "compatibility": [
+                    "recommended:COMPATIBLE",
+                    "dataframes:COMPATIBLE",
+                    "tensorflow:COMPATIBLE",
+                    "s3:COMPATIBLE",
+                    "postgresql:COMPATIBLE",
+                    "cloud:COMPATIBLE",
+                ],
                 "non_live_groups": ["s3", "postgresql", "cloud"],
             }
         )
@@ -115,7 +155,10 @@ def _envelope_bytes(evidence_class: str, revision: str) -> bytes:
     )
     return (
         json.dumps(
-            envelope.to_mapping(), ensure_ascii=True, separators=(",", ":"), sort_keys=True
+            envelope.to_mapping(),
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
         ).encode("utf-8")
         + b"\n"
     )
@@ -148,14 +191,22 @@ class FakeGh:
                 "status": "completed",
                 "conclusion": "success",
             }
-            values = [run, {**run, "databaseId": spec.run_id + 1}] if self.duplicate else [run]
+            values = (
+                [run, {**run, "databaseId": spec.run_id + 1}]
+                if self.duplicate
+                else [run]
+            )
             return subprocess.CompletedProcess(command, 0, json.dumps(values), "")
         if command[:3] == ("gh", "workflow", "run"):
             self.dispatched.add(command[3])
             return subprocess.CompletedProcess(command, 0, "", "")
         if command[:3] == ("gh", "run", "view"):
             run_id = int(command[3])
-            spec = next(spec for spec in _load_release().WORKFLOW_SPECS.values() if spec.run_id == run_id)
+            spec = next(
+                spec
+                for spec in _load_release().WORKFLOW_SPECS.values()
+                if spec.run_id == run_id
+            )
             value = {
                 "databaseId": run_id,
                 "headSha": "d" * 40 if self.wrong_head else self.revision,
@@ -179,7 +230,9 @@ class FakeGh:
         raise AssertionError(f"unexpected command: {command!r}")
 
 
-def test_dispatch_requires_exact_candidate_sha_and_records_one_run_id(tmp_path: Path) -> None:
+def test_dispatch_requires_exact_candidate_sha_and_records_one_run_id(
+    tmp_path: Path,
+) -> None:
     """Each declared workflow starts from one explicit lowercase full revision."""
     release = _load_release()
     candidate = "a" * 40
@@ -191,8 +244,12 @@ def test_dispatch_requires_exact_candidate_sha_and_records_one_run_id(tmp_path: 
 
     assert {item.workflow for item in collected} == set(release.WORKFLOW_SPECS)
     assert {item.revision for item in collected} == {candidate}
-    assert all(item.run_id > 0 and len(item.artifact_sha256) == 64 for item in collected)
-    dispatches = [command for command in fake.commands if command[:3] == ("gh", "workflow", "run")]
+    assert all(
+        item.run_id > 0 and len(item.artifact_sha256) == 64 for item in collected
+    )
+    dispatches = [
+        command for command in fake.commands if command[:3] == ("gh", "workflow", "run")
+    ]
     assert len(dispatches) == len(release.WORKFLOW_SPECS)
     for command in dispatches:
         assert "--ref" in command and command[command.index("--ref") + 1] == candidate
@@ -200,7 +257,9 @@ def test_dispatch_requires_exact_candidate_sha_and_records_one_run_id(tmp_path: 
 
 
 @pytest.mark.parametrize("candidate", ["A" * 40, "a" * 39, "a" * 41, "main"])
-def test_dispatch_rejects_noncanonical_candidate_sha_before_gh(candidate: str, tmp_path: Path) -> None:
+def test_dispatch_rejects_noncanonical_candidate_sha_before_gh(
+    candidate: str, tmp_path: Path
+) -> None:
     """A branch, abbreviated, or uppercase ref cannot select release evidence."""
     release = _load_release()
     fake = FakeGh(revision="a" * 40)
@@ -213,7 +272,9 @@ def test_dispatch_rejects_noncanonical_candidate_sha_before_gh(candidate: str, t
     assert fake.commands == []
 
 
-def test_run_id_collection_rejects_duplicate_latest_and_wrong_sha_substitutions(tmp_path: Path) -> None:
+def test_run_id_collection_rejects_duplicate_latest_and_wrong_sha_substitutions(
+    tmp_path: Path,
+) -> None:
     """Collector derives one new candidate run rather than choosing a latest run."""
     release = _load_release()
     candidate = "a" * 40
@@ -232,7 +293,9 @@ def test_run_id_collection_rejects_duplicate_latest_and_wrong_sha_substitutions(
         )
 
 
-def test_artifact_collection_requires_run_id_fixed_name_and_one_bounded_file(tmp_path: Path) -> None:
+def test_artifact_collection_requires_run_id_fixed_name_and_one_bounded_file(
+    tmp_path: Path,
+) -> None:
     """Filename-only downloads and arbitrary artifact trees cannot enter a release."""
     release = _load_release()
     candidate = "a" * 40
@@ -242,7 +305,14 @@ def test_artifact_collection_requires_run_id_fixed_name_and_one_bounded_file(tmp
         candidate_sha=candidate, output_directory=tmp_path, execute=fake
     )
 
-    downloads = [command for command in fake.commands if command[:3] == ("gh", "run", "download")]
+    downloads = [
+        command for command in fake.commands if command[:3] == ("gh", "run", "download")
+    ]
     assert downloads
-    assert all(command[3].isdigit() and "-n" in command and "-D" in command for command in downloads)
-    assert all(item.artifact_name in release.ARTIFACT_EVIDENCE_CLASS for item in collected)
+    assert all(
+        command[3].isdigit() and "-n" in command and "-D" in command
+        for command in downloads
+    )
+    assert all(
+        item.artifact_name in release.ARTIFACT_EVIDENCE_CLASS for item in collected
+    )
