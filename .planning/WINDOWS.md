@@ -2,9 +2,9 @@
 schema_version: 1
 open_count: 6
 waived_count: 0
-fixed_count: 49
-total_count: 55
-last_updated: 2026-09-13T23:41:39.553Z
+fixed_count: 50
+total_count: 56
+last_updated: 2026-09-14T00:13:25.560Z
 ---
 
 # Broken Windows Ledger
@@ -70,6 +70,7 @@ last_updated: 2026-09-13T23:41:39.553Z
 | 53 | 08 | deviation | tools/run_phase8_packaging.py |  | Corrected native NPZ metadata assertion to the public nested metadata shape. | fixed |  | 2026-09-13T23:41:18.606Z | 2026-09-13T23:41:39.276Z |
 | 54 | 08 | deviation | tools/phase8_evidence.py |  | Added the packaging-only evidence allow-list required for sanitized package qualification. | fixed |  | 2026-09-13T23:41:18.763Z | 2026-09-13T23:41:39.408Z |
 | 55 | 08 | deviation | tools/run_phase8_packaging.py |  | Preserved reviewed non-live group order in canonical packaging evidence. | fixed |  | 2026-09-13T23:41:18.902Z | 2026-09-13T23:41:39.553Z |
+| 56 | 08 | deviation | tests/test_phase8_lifecycle_coverage.py |  | Added a test-local SQL-composition fixture because the prescribed focused command omits the optional PostgreSQL extra. | fixed |  | 2026-09-14T00:13:08.922Z | 2026-09-14T00:13:25.560Z |
 
 ````json
 [
@@ -732,6 +733,18 @@ last_updated: 2026-09-13T23:41:39.553Z
     "reason": "",
     "recorded_at": "2026-09-13T23:41:18.902Z",
     "resolved_at": "2026-09-13T23:41:39.553Z"
+  },
+  {
+    "id": 56,
+    "kind": "deviation",
+    "phase": "08",
+    "file": "tests/test_phase8_lifecycle_coverage.py",
+    "line": null,
+    "description": "Added a test-local SQL-composition fixture because the prescribed focused command omits the optional PostgreSQL extra.",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-09-14T00:13:08.922Z",
+    "resolved_at": "2026-09-14T00:13:25.560Z"
   }
 ]
 ````
