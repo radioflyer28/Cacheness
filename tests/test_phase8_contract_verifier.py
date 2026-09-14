@@ -164,5 +164,21 @@ def test_all_mode_uses_fixed_local_gate_commands_before_external_reporting(
 
     commands = verifier.local_gate_commands(tmp_path)
 
-    assert [command[2] for command in commands] == ["all", "platform"]
-    assert all("tools/run_phase8_local_gates.py" in command for command in commands)
+    assert [
+        command[command.index("tools/run_phase8_local_gates.py") + 1]
+        for command in commands
+    ] == ["all", "platform"]
+    assert all(
+        command[:8]
+        == (
+            "uv",
+            "run",
+            "--isolated",
+            "--all-extras",
+            "--group",
+            "dev",
+            "--frozen",
+            "python",
+        )
+        for command in commands
+    )

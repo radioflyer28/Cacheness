@@ -480,17 +480,26 @@ def _run(command: Sequence[str]) -> subprocess.CompletedProcess[str]:
 def local_gate_commands(output_directory: Path) -> tuple[tuple[str, ...], ...]:
     """Return every fixed local evidence command for the current host identity."""
     python_minor = f"{sys.version_info.major}.{sys.version_info.minor}"
+    prefix = (
+        "uv",
+        "run",
+        "--isolated",
+        "--all-extras",
+        "--group",
+        "dev",
+        "--frozen",
+        "python",
+        "tools/run_phase8_local_gates.py",
+    )
     return (
         (
-            sys.executable,
-            "tools/run_phase8_local_gates.py",
+            *prefix,
             "all",
             "--output-dir",
             str(output_directory / "all"),
         ),
         (
-            sys.executable,
-            "tools/run_phase8_local_gates.py",
+            *prefix,
             "platform",
             "--expected-os",
             platform.system(),
