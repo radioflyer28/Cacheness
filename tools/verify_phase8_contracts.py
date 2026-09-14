@@ -454,11 +454,13 @@ def validate_fixed_manifest(root: Path = REPOSITORY_ROOT) -> tuple[str, ...]:
 
 def render_external_statuses(statuses: Mapping[str, str]) -> str:
     """Render explicit nonclaims without choosing a substitute evidence class."""
+    platform_status = statuses.get("platform", "NOT_RUN")
     controlled = statuses.get("controlled_performance", "UNAVAILABLE")
     live = statuses.get("live_services", "UNAVAILABLE")
     windows = statuses.get("windows", "NOT_QUALIFIED")
     return "\n".join(
         (
+            f"platform: {platform_status}",
             f"controlled_performance: {controlled}",
             f"live_services: {live}",
             f"windows: {windows}",
@@ -513,7 +515,7 @@ def local_gate_commands(output_directory: Path) -> tuple[tuple[str, ...], ...]:
     )
 
 
-def _run_local(mode: str) -> int:
+def _run_local(mode: str) -> tuple[int, dict[str, str]]:
     command = (
         sys.executable,
         "-m",
@@ -530,20 +532,29 @@ def _run_local(mode: str) -> int:
     try:
         result = _run(command)
     except (OSError, subprocess.TimeoutExpired):
-        return 1
+        return 1, {}
     if result.returncode != 0:
-        return 1
+        return 1, {}
     if mode == "quick":
-        return 0
+        return 0, {}
+    statuses: dict[str, str] = {}
     with tempfile.TemporaryDirectory(prefix="phase8-contract-") as temporary:
         for local_command in local_gate_commands(Path(temporary)):
             try:
                 local_result = _run(local_command)
             except (OSError, subprocess.TimeoutExpired):
-                return 1
+                return 1, statuses
+            gate = local_command[
+                local_command.index("tools/run_phase8_local_gates.py") + 1
+            ]
+            if local_result.returncode == 2 and gate == "platform":
+                statuses["platform"] = "UNAVAILABLE"
+                continue
             if local_result.returncode != 0:
-                return 1
-    return 0
+                return 1, statuses
+            if gate == "platform":
+                statuses["platform"] = "PASS"
+    return 0, statuses
 
 
 def main(arguments: Sequence[str] | None = None) -> int:
@@ -559,10 +570,11 @@ def main(arguments: Sequence[str] | None = None) -> int:
         print("\n".join(f"- {error}" for error in errors), file=sys.stderr)
         return 1
     mode = "quick" if parsed.quick else "all"
-    if _run_local(mode):
+    local_exit_code, statuses = _run_local(mode)
+    if local_exit_code:
         return 1
     print("phase 8 fixed contract passed")
-    print(render_external_statuses({}))
+    print(render_external_statuses(statuses))
     return 0 if mode == "quick" else 2
 
 
