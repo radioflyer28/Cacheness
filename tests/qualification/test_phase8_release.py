@@ -41,6 +41,7 @@ def _envelope_bytes(evidence_class: str, revision: str) -> bytes:
                 "evidence_class": "controlled-performance",
                 "revision": revision,
                 "source_digest": "c" * 64,
+                "runner_identity": "cacheness-perf-linux-x64",
             },
             separators=(",", ":"),
             sort_keys=True,
@@ -52,6 +53,7 @@ def _envelope_bytes(evidence_class: str, revision: str) -> bytes:
                 "status": "QUALIFIED",
                 "revision": revision,
                 "source_digest": "c" * 64,
+                "cleanup_status": "CLEAN",
             },
             separators=(",", ":"),
             sort_keys=True,
@@ -447,8 +449,7 @@ def test_publication_verifier_requires_exact_published_immutable_assets(
     assert report["revision"] == candidate
     assert report["immutable"] is True
     assert any(
-        command[:3] == ("gh", "release", "verify-asset")
-        for command in fake.commands
+        command[:3] == ("gh", "release", "verify-asset") for command in fake.commands
     )
 
 

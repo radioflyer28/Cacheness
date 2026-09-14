@@ -15,10 +15,12 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 import hashlib
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -77,6 +79,13 @@ ARTIFACT_EVIDENCE_CLASS = {
     "controlled-performance-envelope": "controlled_performance",
     "phase8-live-qualification-envelope": "live_services",
 }
+COLLECTION_SCHEMA = "cacheness-phase8-collection-v1"
+COLLECTION_MANIFEST_NAME = "phase8-collection.json"
+RELEASE_MANIFEST_SCHEMA = "cacheness-phase8-release-qualification-v1"
+_FORBIDDEN_MANIFEST_TEXT = re.compile(
+    r"://|access[_-]?key|credential|password|secret|token|private[_-]?key",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -391,22 +400,451 @@ def collect_workflow_evidence(
     return tuple(collected)
 
 
+def _canonical_json(value: Mapping[str, object]) -> str:
+    return (
+        json.dumps(value, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+        + "\n"
+    )
+
+
+def _atomic_write_json(path: Path, value: Mapping[str, object]) -> None:
+    serialized = _canonical_json(value)
+    if len(
+        serialized.encode("utf-8")
+    ) > MAX_ARTIFACT_BYTES or _FORBIDDEN_MANIFEST_TEXT.search(serialized):
+        raise ReleaseEvidenceError(
+            "release record is oversized or contains unsafe text"
+        )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        delete=False,
+    ) as staged:
+        staged.write(serialized)
+        staged.flush()
+        staged_path = Path(staged.name)
+    try:
+        staged_path.replace(path)
+    finally:
+        if staged_path.exists():
+            staged_path.unlink()
+
+
+def write_collection_manifest(
+    collection_directory: Path, collected: Sequence[CollectedArtifact]
+) -> Path:
+    """Persist sanitized run/artifact provenance beside an exact collection."""
+    if not collected:
+        raise ReleaseEvidenceError("collection cannot be empty")
+    revisions = {item.revision for item in collected}
+    if len(revisions) != 1:
+        raise ReleaseEvidenceError("collection has conflicting revisions")
+    document: dict[str, object] = {
+        "schema": COLLECTION_SCHEMA,
+        "revision": next(iter(revisions)),
+        "artifacts": [
+            {
+                "workflow": item.workflow,
+                "run_id": item.run_id,
+                "artifact_name": item.artifact_name,
+                "evidence_class": item.evidence_class,
+                "path": item.path.relative_to(collection_directory).as_posix(),
+                "revision": item.revision,
+                "source_digest": item.source_digest,
+                "artifact_sha256": item.artifact_sha256,
+            }
+            for item in sorted(collected, key=lambda item: item.artifact_name)
+        ],
+    }
+    destination = collection_directory / COLLECTION_MANIFEST_NAME
+    _atomic_write_json(destination, document)
+    return destination
+
+
+def _load_collection_manifest(collection_directory: Path) -> list[dict[str, object]]:
+    path = collection_directory / COLLECTION_MANIFEST_NAME
+    if (
+        path.is_symlink()
+        or not path.is_file()
+        or path.stat().st_size > MAX_ARTIFACT_BYTES
+    ):
+        raise ReleaseEvidenceError("collection manifest is missing or unsafe")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ReleaseEvidenceError("collection manifest is unreadable") from error
+    if not isinstance(value, Mapping) or set(value) != {
+        "schema",
+        "revision",
+        "artifacts",
+    }:
+        raise ReleaseEvidenceError("collection manifest has an unexpected shape")
+    if value.get("schema") != COLLECTION_SCHEMA or not isinstance(
+        value.get("artifacts"), list
+    ):
+        raise ReleaseEvidenceError("collection manifest has an invalid identity")
+    artifacts = value["artifacts"]
+    if len(artifacts) != len(ARTIFACT_EVIDENCE_CLASS):
+        raise ReleaseEvidenceError(
+            "collection must contain exactly one artifact per declared evidence class"
+        )
+    normalized: list[dict[str, object]] = []
+    required_keys = {
+        "workflow",
+        "run_id",
+        "artifact_name",
+        "evidence_class",
+        "path",
+        "revision",
+        "source_digest",
+        "artifact_sha256",
+    }
+    for item in artifacts:
+        if not isinstance(item, Mapping) or set(item) != required_keys:
+            raise ReleaseEvidenceError(
+                "collection artifact record has an unexpected shape"
+            )
+        normalized.append(dict(item))
+    return normalized
+
+
+def _record_path(collection_directory: Path, record: Mapping[str, object]) -> Path:
+    raw_path = record.get("path")
+    if not isinstance(raw_path, str):
+        raise ReleaseEvidenceError("collection artifact path is invalid")
+    relative = PurePosixPath(raw_path)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise ReleaseEvidenceError("collection artifact path escapes its collection")
+    candidate = collection_directory / relative
+    if candidate.is_symlink() or not candidate.is_file():
+        raise ReleaseEvidenceError("collected artifact file is missing or unsafe")
+    return candidate
+
+
+def _validate_recorded_artifact(
+    record: Mapping[str, object], *, collection_directory: Path, candidate_sha: str
+) -> None:
+    artifact_name = record.get("artifact_name")
+    evidence_class = record.get("evidence_class")
+    if (
+        not isinstance(artifact_name, str)
+        or ARTIFACT_EVIDENCE_CLASS.get(artifact_name) != evidence_class
+        or record.get("revision") != candidate_sha
+    ):
+        raise ReleaseEvidenceError(
+            "collection record does not bind a declared candidate artifact"
+        )
+    source_digest = record.get("source_digest")
+    recorded_digest = record.get("artifact_sha256")
+    if not isinstance(source_digest, str) or not _DIGEST_PATTERN.fullmatch(
+        source_digest
+    ):
+        raise ReleaseEvidenceError("collection record source digest is invalid")
+    if not isinstance(recorded_digest, str) or not _DIGEST_PATTERN.fullmatch(
+        recorded_digest
+    ):
+        raise ReleaseEvidenceError("collection record artifact digest is invalid")
+    path = _record_path(collection_directory, record)
+    raw = path.read_bytes()
+    if (
+        len(raw) > MAX_ARTIFACT_BYTES
+        or hashlib.sha256(raw).hexdigest() != recorded_digest
+    ):
+        raise ReleaseEvidenceError(
+            "collected artifact digest does not match its record"
+        )
+    try:
+        value = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ReleaseEvidenceError("collected artifact is not JSON") from error
+    if not isinstance(value, Mapping) or value.get("revision") != candidate_sha:
+        raise ReleaseEvidenceError(
+            "collected artifact revision does not match candidate SHA"
+        )
+    if value.get("source_digest") != source_digest:
+        raise ReleaseEvidenceError(
+            "collected artifact source digest does not match record"
+        )
+    if evidence_class == "controlled_performance":
+        if (
+            value.get("schema") != "cacheness-phase8-performance-v1"
+            or value.get("evidence_class") != "controlled-performance"
+            or value.get("runner_identity") != "cacheness-perf-linux-x64"
+        ):
+            raise ReleaseEvidenceError(
+                "controlled performance evidence has an invalid runner or schema"
+            )
+    elif evidence_class == "live_services":
+        if (
+            value.get("schema") != "phase8-live-qualification-v1"
+            or value.get("status") != "QUALIFIED"
+            or value.get("cleanup_status") != "CLEAN"
+        ):
+            raise ReleaseEvidenceError("live service evidence is not QUALIFIED/CLEAN")
+    elif value.get("evidence_class") != evidence_class or value.get("status") != "PASS":
+        raise ReleaseEvidenceError(
+            "deterministic evidence class is not a passing exact match"
+        )
+
+
+def aggregate_collection(
+    *, candidate_sha: str, collection_directory: Path, output: Path
+) -> dict[str, object]:
+    """Write a canonical aggregate only from one complete exact candidate collection."""
+    if not _SHA_PATTERN.fullmatch(candidate_sha):
+        raise ReleaseEvidenceError("candidate SHA must be lowercase and 40 characters")
+    records = _load_collection_manifest(collection_directory)
+    if {record.get("artifact_name") for record in records} != set(
+        ARTIFACT_EVIDENCE_CLASS
+    ):
+        raise ReleaseEvidenceError(
+            "collection does not contain the exact artifact inventory"
+        )
+    classes = [record.get("evidence_class") for record in records]
+    if len(set(classes)) != len(ARTIFACT_EVIDENCE_CLASS):
+        raise ReleaseEvidenceError(
+            "collection must contain exactly one artifact per evidence class"
+        )
+    source_digests = {record.get("source_digest") for record in records}
+    if len(source_digests) != 1:
+        raise ReleaseEvidenceError(
+            "collection source digest does not bind one reviewed source identity"
+        )
+    for record in records:
+        _validate_recorded_artifact(
+            record,
+            collection_directory=collection_directory,
+            candidate_sha=candidate_sha,
+        )
+    source_digest = next(iter(source_digests))
+    assert isinstance(source_digest, str)
+    evidence = {
+        str(record["evidence_class"]): {
+            "workflow": record["workflow"],
+            "run_id": record["run_id"],
+            "artifact_name": record["artifact_name"],
+            "artifact_sha256": record["artifact_sha256"],
+        }
+        for record in sorted(records, key=lambda item: str(item["evidence_class"]))
+    }
+    manifest: dict[str, object] = {
+        "schema": RELEASE_MANIFEST_SCHEMA,
+        "revision": candidate_sha,
+        "source_digest": source_digest,
+        "evidence": evidence,
+    }
+    _atomic_write_json(output, manifest)
+    return manifest
+
+
+def verify_published_release(
+    *,
+    candidate_sha: str,
+    tag: str,
+    assets: Sequence[Path],
+    execute: CommandExecutor | None = None,
+) -> dict[str, object]:
+    """Read only the exact tag/release/asset state; never repair a release."""
+    if (
+        not _SHA_PATTERN.fullmatch(candidate_sha)
+        or not tag
+        or any(character.isspace() for character in tag)
+    ):
+        raise ReleaseEvidenceError("candidate SHA or release tag is invalid")
+    if not assets:
+        raise ReleaseEvidenceError("published release requires qualifying assets")
+    if execute is None:
+        execute = _run
+    expected: dict[str, str] = {}
+    for asset in assets:
+        if asset.is_symlink() or not asset.is_file() or asset.name in expected:
+            raise ReleaseEvidenceError("local release asset is unsafe or duplicated")
+        expected[asset.name] = hashlib.sha256(asset.read_bytes()).hexdigest()
+    target = _require_success(
+        ("git", "rev-parse", "--verify", f"{tag}^{{commit}}"), execute
+    ).stdout.strip()
+    if target != candidate_sha:
+        raise ReleaseEvidenceError("release tag does not resolve to candidate SHA")
+    completed = _require_success(
+        ("gh", "release", "view", tag, "--json", "tagName,isDraft,isImmutable,assets"),
+        execute,
+    )
+    value = _load_json(completed.stdout, label="release view")
+    if not isinstance(value, Mapping) or set(value) != {
+        "tagName",
+        "isDraft",
+        "isImmutable",
+        "assets",
+    }:
+        raise ReleaseEvidenceError("release view has an unexpected shape")
+    if value.get("tagName") != tag:
+        raise ReleaseEvidenceError("release view returned a different tag")
+    if value.get("isDraft") is True:
+        raise ReleaseEvidenceError("release remains a draft")
+    if value.get("isImmutable") is not True:
+        raise ReleaseEvidenceError("release is not immutable")
+    api_assets = value.get("assets")
+    if not isinstance(api_assets, list):
+        raise ReleaseEvidenceError("release assets are invalid")
+    by_name: dict[str, Mapping[str, object]] = {}
+    for item in api_assets:
+        if not isinstance(item, Mapping) or set(item) != {"name", "state", "digest"}:
+            raise ReleaseEvidenceError("release asset has an unexpected shape")
+        name = item.get("name")
+        if not isinstance(name, str) or name in by_name:
+            raise ReleaseEvidenceError("release asset name is invalid")
+        by_name[name] = item
+    if set(by_name) != set(expected):
+        raise ReleaseEvidenceError(
+            "release asset inventory does not match qualification assets"
+        )
+    _require_success(("gh", "release", "verify", tag), execute)
+    for asset in assets:
+        api_asset = by_name[asset.name]
+        if (
+            api_asset.get("state") != "uploaded"
+            or api_asset.get("digest") != f"sha256:{expected[asset.name]}"
+        ):
+            raise ReleaseEvidenceError(
+                "release asset state or SHA-256 digest does not match"
+            )
+        _require_success(("gh", "release", "verify-asset", tag, str(asset)), execute)
+    return {
+        "tag": tag,
+        "revision": candidate_sha,
+        "immutable": True,
+        "assets": sorted(expected),
+    }
+
+
+def _copy_live_evidence(
+    *,
+    collection_directory: Path,
+    collected: Sequence[CollectedArtifact],
+    destination: Path,
+) -> None:
+    """Expose the exact collected live envelope without selecting another artifact."""
+    live = [item for item in collected if item.evidence_class == "live_services"]
+    if len(live) != 1:
+        raise ReleaseEvidenceError("collection has no unique live-service artifact")
+    source = live[0].path
+    if destination.exists() or destination.is_symlink():
+        raise ReleaseEvidenceError("live evidence destination must not already exist")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source, destination)
+    if hashlib.sha256(destination.read_bytes()).hexdigest() != live[0].artifact_sha256:
+        raise ReleaseEvidenceError(
+            "copied live evidence digest does not match collection"
+        )
+
+
+def _require_matching_live_input(
+    *, collection_directory: Path, live_evidence: Path | None
+) -> None:
+    """Reject a caller-supplied live path unless it is the recorded exact artifact."""
+    if live_evidence is None:
+        return
+    records = _load_collection_manifest(collection_directory)
+    matches = [
+        record for record in records if record.get("evidence_class") == "live_services"
+    ]
+    if len(matches) != 1 or not live_evidence.is_file() or live_evidence.is_symlink():
+        raise ReleaseEvidenceError("live evidence input is unavailable or ambiguous")
+    expected = matches[0].get("artifact_sha256")
+    if (
+        not isinstance(expected, str)
+        or hashlib.sha256(live_evidence.read_bytes()).hexdigest() != expected
+    ):
+        raise ReleaseEvidenceError(
+            "live evidence input does not match the recorded workflow artifact"
+        )
+
+
 def main(arguments: Sequence[str] | None = None) -> int:
-    """Expose only the bounded exact-SHA collection operation in this task."""
+    """Run bounded collection, aggregation, or read-only publication inspection."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("collect",))
+    parser.add_argument("command", choices=("collect", "aggregate", "verify-published"))
     parser.add_argument("--candidate-sha", required=True)
-    parser.add_argument("--output-dir", required=True, type=Path)
+    parser.add_argument("--output-dir", type=Path)
+    parser.add_argument("--evidence-dir", type=Path)
+    parser.add_argument("--live-output", type=Path)
+    parser.add_argument("--live-evidence", type=Path)
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--tag")
+    parser.add_argument("--asset", type=Path, action="append", default=[])
     parsed = parser.parse_args(arguments)
     try:
-        collected = collect_workflow_evidence(
-            candidate_sha=parsed.candidate_sha, output_directory=parsed.output_dir
+        if parsed.command == "collect":
+            if (
+                parsed.output_dir is None
+                or any(
+                    value is not None
+                    for value in (
+                        parsed.evidence_dir,
+                        parsed.live_evidence,
+                        parsed.output,
+                        parsed.tag,
+                    )
+                )
+                or parsed.asset
+            ):
+                parser.error(
+                    "collect requires only --candidate-sha, --output-dir, and optional --live-output"
+                )
+            collected = collect_workflow_evidence(
+                candidate_sha=parsed.candidate_sha, output_directory=parsed.output_dir
+            )
+            write_collection_manifest(parsed.output_dir, collected)
+            if parsed.live_output is not None:
+                _copy_live_evidence(
+                    collection_directory=parsed.output_dir,
+                    collected=collected,
+                    destination=parsed.live_output,
+                )
+            print(f"collected {len(collected)} exact-SHA artifacts")
+            return 0
+        if parsed.command == "aggregate":
+            if (
+                parsed.evidence_dir is None
+                or parsed.output is None
+                or parsed.output_dir is not None
+            ):
+                parser.error(
+                    "aggregate requires --candidate-sha, --evidence-dir, and --output"
+                )
+            _require_matching_live_input(
+                collection_directory=parsed.evidence_dir,
+                live_evidence=parsed.live_evidence,
+            )
+            aggregate_collection(
+                candidate_sha=parsed.candidate_sha,
+                collection_directory=parsed.evidence_dir,
+                output=parsed.output,
+            )
+            print("aggregated exact-SHA release evidence")
+            return 0
+        if (
+            parsed.tag is None
+            or not parsed.asset
+            or parsed.output_dir is not None
+            or parsed.evidence_dir is not None
+        ):
+            parser.error(
+                "verify-published requires --candidate-sha, --tag, and one or more --asset paths"
+            )
+        verify_published_release(
+            candidate_sha=parsed.candidate_sha,
+            tag=parsed.tag,
+            assets=parsed.asset,
         )
+        print("published immutable release verified")
+        return 0
     except ReleaseEvidenceError as error:
-        print(f"release collection failed: {error}", file=sys.stderr)
-        return 2
-    print(f"collected {len(collected)} exact-SHA artifacts")
-    return 0
+        print(f"release verification failed: {error}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":
