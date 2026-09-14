@@ -50,6 +50,7 @@ GATE_CHOICES = (
     "platform",
     "coverage",
     "structural",
+    "core",
     "all",
 )
 PACKAGING_TOOL = REPOSITORY_ROOT / "tools" / "run_phase8_packaging.py"
@@ -417,13 +418,12 @@ def run_structural(*, output: Path) -> int:
     )
 
 
-def run_all(*, output_directory: Path) -> int:
-    """Produce every non-platform local evidence class in a fixed order."""
+def run_core(*, output_directory: Path) -> int:
+    """Produce every non-package local evidence class in a fixed order."""
 
     output_directory.mkdir(parents=True, exist_ok=True)
     commands = (
         ("deterministic", lambda path: run_deterministic(output=path)),
-        ("packaging", lambda path: run_packaging(output=path)),
         ("coverage", lambda path: run_coverage(output=path)),
         ("structural", lambda path: run_structural(output=path)),
     )
@@ -431,6 +431,14 @@ def run_all(*, output_directory: Path) -> int:
         if runner(output_directory / f"{name}.json"):
             return 1
     return 0
+
+
+def run_all(*, output_directory: Path) -> int:
+    """Produce every local class, including packaging on a compatible Python."""
+
+    if run_core(output_directory=output_directory):
+        return 1
+    return run_packaging(output=output_directory / "packaging.json")
 
 
 def render_evidence_report(envelope) -> str:
@@ -459,9 +467,11 @@ def main(arguments: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--advisory", action="store_true")
     parsed = parser.parse_args(arguments)
-    if parsed.gate == "all":
+    if parsed.gate in {"core", "all"}:
         if parsed.output is not None or parsed.output_dir is None:
-            parser.error("all requires --output-dir and rejects --output")
+            parser.error(f"{parsed.gate} requires --output-dir and rejects --output")
+        if parsed.gate == "core":
+            return run_core(output_directory=parsed.output_dir)
         return run_all(output_directory=parsed.output_dir)
     if parsed.output is None or parsed.output_dir is not None:
         parser.error("a single gate requires --output and rejects --output-dir")

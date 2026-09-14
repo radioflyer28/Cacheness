@@ -159,6 +159,16 @@ def test_python_runtime_identity_mismatch_is_rejected(runner, tmp_path: Path) ->
     assert evidence["payload"]["reason"] == "runtime_identity_mismatch"
 
 
+def test_linux_platform_row_runs_only_the_fixed_deterministic_contract(runner) -> None:
+    """A platform row cannot fail because an unrelated optional extra is absent."""
+
+    command = runner._command_for_linux()
+
+    assert command[0] == runner.sys.executable
+    assert command[1].endswith("tools/verify_phase071_contracts.py")
+    assert command[2:] == ("--all",)
+
+
 def _platform_role_rows(runner) -> list[dict[str, object]]:
     return [
         *_stable_rows(runner),

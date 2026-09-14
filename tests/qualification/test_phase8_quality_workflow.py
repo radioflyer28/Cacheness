@@ -36,7 +36,14 @@ def test_local_gate_runner_exposes_only_fixed_quality_classes() -> None:
 
     runner = RUNNER_PATH.read_text(encoding="utf-8")
 
-    for gate in ("deterministic", "packaging", "platform", "coverage", "structural"):
+    for gate in (
+        "deterministic",
+        "packaging",
+        "platform",
+        "coverage",
+        "structural",
+        "core",
+    ):
         assert f'"{gate}"' in runner
     assert "GATE_CHOICES" in runner
     assert "tools/run_phase8_packaging.py" in runner

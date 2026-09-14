@@ -20,6 +20,7 @@ from typing import Mapping, Sequence
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 EVIDENCE_PATH = REPOSITORY_ROOT / "tools" / "phase8_evidence.py"
 LOCAL_GATE_PATH = REPOSITORY_ROOT / "tools" / "run_phase8_local_gates.py"
+PHASE071_CONTRACT_TOOL = REPOSITORY_ROOT / "tools" / "verify_phase071_contracts.py"
 STABLE_PYTHON_MINORS = ("3.11", "3.12", "3.13", "3.14")
 ADVISORY_PYTHON_MINORS = ("3.15",)
 TENSORFLOW_COMPATIBLE_MINORS = ("3.11", "3.12")
@@ -378,7 +379,9 @@ def _source_is_clean() -> bool:
 
 
 def _command_for_linux() -> tuple[str, ...]:
-    return (sys.executable, str(LOCAL_GATE_PATH), "--all")
+    """Run the platform-neutral deterministic contract for one Linux row."""
+
+    return (sys.executable, str(PHASE071_CONTRACT_TOOL), "--all")
 
 
 def macos_boundary_smoke_command() -> tuple[str, ...]:
