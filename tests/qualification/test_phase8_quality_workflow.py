@@ -14,6 +14,7 @@ import re
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW_PATH = REPOSITORY_ROOT / ".github" / "workflows" / "quality.yml"
 RUNNER_PATH = REPOSITORY_ROOT / "tools" / "run_phase8_local_gates.py"
+RELEASE_GUIDE_PATH = REPOSITORY_ROOT / "docs" / "RELEASE_QUALIFICATION.md"
 
 
 def _workflow() -> str:
@@ -130,3 +131,45 @@ def test_quality_actions_are_pinned_and_commands_use_frozen_isolated_uv() -> Non
     assert "uv run --isolated --all-extras --group dev --frozen python" in workflow
     assert "timeout-minutes:" in workflow
     assert "run_phase8_local_gates.py" in workflow
+
+
+def test_documentation_states_all_evidence_classes_and_nonclaims() -> None:
+    """Operators receive one explicit qualification matrix, not an omnibus pass."""
+
+    guide = RELEASE_GUIDE_PATH.read_text(encoding="utf-8")
+
+    for evidence_class in (
+        "Deterministic/local",
+        "Packaging",
+        "Platform",
+        "Coverage/quality",
+        "Structural",
+        "Controlled performance",
+        "Live service",
+        "Publication",
+    ):
+        assert evidence_class in guide
+    for command in (
+        "tools/run_phase8_local_gates.py",
+        "tools/run_phase8_packaging.py",
+        "tools/run_phase8_platform_gates.py",
+        "tools/verify_phase8_coverage.py",
+        "tools/run_phase8_scale_gates.py",
+        "benchmarks/phase8_benchmarks.py",
+        "tools/run_phase8_qualification.py",
+        "tools/verify_phase8_release.py",
+    ):
+        assert command in guide
+    for nonclaim in (
+        "Windows remains `UNAVAILABLE` / `NOT_QUALIFIED`",
+        "cross-resource ACID",
+        "every concurrent contender succeeds",
+        "unattributed pre-checkpoint orphan",
+        "runtime deadline",
+        "diagnostic only",
+    ):
+        assert nonclaim in guide
+    assert "Linux" in guide and "macOS" in guide and "TensorFlow" in guide
+    assert "current and immediately previous" in guide
+    assert "candidate SHA" in guide and "source digest" in guide
+    assert "30 days" in guide
