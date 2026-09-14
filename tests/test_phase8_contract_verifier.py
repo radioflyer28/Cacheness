@@ -47,7 +47,9 @@ def _load_source_mutation(source: str) -> ModuleType:
     return module
 
 
-def test_fixed_manifest_covers_full_phase_decision_requirement_and_threat_sets() -> None:
+def test_fixed_manifest_covers_full_phase_decision_requirement_and_threat_sets() -> (
+    None
+):
     """Planning files cannot redefine the verifier's reviewed evidence surface."""
     verifier = _load_verifier()
 
@@ -81,7 +83,9 @@ def test_fixed_manifest_rejects_source_mutation_that_drops_plan_or_threat() -> N
     assert verifier.validate_fixed_manifest(REPOSITORY_ROOT)
 
 
-def test_selector_validation_rejects_removed_renamed_duplicate_and_unowned_nodes() -> None:
+def test_selector_validation_rejects_removed_renamed_duplicate_and_unowned_nodes() -> (
+    None
+):
     """A selector is syntax-checked against a module-level test before execution."""
     verifier = _load_verifier()
     selector = verifier.DECISION_NODES["D-01"][0]
