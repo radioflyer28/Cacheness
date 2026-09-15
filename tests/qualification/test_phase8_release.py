@@ -379,6 +379,128 @@ def test_aggregate_rejects_stale_duplicate_and_nonqualifying_evidence(
         )
 
 
+def test_preflight_collection_reports_exact_current_inventory(tmp_path: Path) -> None:
+    """Read-only preflight proves only quality/live evidence is currently dispatchable."""
+    release = _load_release()
+    candidate = "a" * 40
+    fake = FakeGh(revision=candidate)
+
+    report = release.preflight_collection(candidate_sha=candidate, execute=fake)
+
+    assert report["candidate_sha"] == candidate
+    assert report["workflows"] == ["quality.yml", "live_qualification.yml"]
+    assert report["artifacts"] == sorted(release.CURRENT_ARTIFACT_EVIDENCE_CLASS)
+    assert not any(command[:3] == ("gh", "workflow", "run") for command in fake.commands)
+    assert ("gh", "auth", "status") in fake.commands
+
+
+def test_required_release_collection_excludes_deferred_performance(tmp_path: Path) -> None:
+    """Current release collection retains, but never dispatches, performance capability."""
+    release = _load_release()
+    candidate = "a" * 40
+    fake = FakeGh(revision=candidate)
+
+    collected = release.collect_workflow_evidence(
+        candidate_sha=candidate, output_directory=tmp_path, execute=fake
+    )
+
+    assert {item.workflow for item in collected} == {
+        "quality.yml",
+        "live_qualification.yml",
+    }
+    assert "performance.yml" in release.WORKFLOW_SPECS
+    assert "controlled-performance-envelope" in release.ARTIFACT_EVIDENCE_CLASS
+    assert all(
+        command[3] != "performance.yml"
+        for command in fake.commands
+        if command[:3] == ("gh", "workflow", "run")
+    )
+
+
+def test_aggregate_records_exact_deferred_performance_nonclaim(tmp_path: Path) -> None:
+    """The current aggregate is complete only with its immutable QUAL-06 nonclaim."""
+    release = _load_release()
+    candidate = "a" * 40
+    collected = release.collect_workflow_evidence(
+        candidate_sha=candidate,
+        output_directory=tmp_path / "collected",
+        execute=FakeGh(revision=candidate),
+    )
+    release.write_collection_manifest(tmp_path / "collected", collected)
+
+    aggregate = release.aggregate_collection(
+        candidate_sha=candidate,
+        collection_directory=tmp_path / "collected",
+        output=tmp_path / "aggregate.json",
+    )
+
+    assert set(aggregate["evidence"]) == set(
+        release.CURRENT_ARTIFACT_EVIDENCE_CLASS.values()
+    )
+    assert aggregate["deferred_requirements"] == [
+        {
+            "decision": "D-23",
+            "qualification": "NOT_QUALIFIED",
+            "requirement": "QUAL-06",
+            "seed": ".planning/seeds/SEED-006-qualify-controlled-linux-performance.md",
+            "status": "DEFERRED",
+        }
+    ]
+
+
+def test_deferred_performance_artifacts_and_macos_diagnostics_are_rejected(
+    tmp_path: Path,
+) -> None:
+    """No timing artifact or altered deferral can enter the current release record."""
+    release = _load_release()
+    candidate = "a" * 40
+    collection = tmp_path / "collected"
+    collected = release.collect_workflow_evidence(
+        candidate_sha=candidate,
+        output_directory=collection,
+        execute=FakeGh(revision=candidate),
+    )
+    release.write_collection_manifest(collection, collected)
+    manifest_path = collection / release.COLLECTION_MANIFEST_NAME
+    document = json.loads(manifest_path.read_text(encoding="utf-8"))
+    document["artifacts"].append(
+        {
+            **document["artifacts"][0],
+            "artifact_name": "controlled-performance-envelope",
+            "evidence_class": "controlled_performance",
+        }
+    )
+    manifest_path.write_text(json.dumps(document), encoding="utf-8")
+
+    with pytest.raises(release.ReleaseEvidenceError, match="exact artifact inventory"):
+        release.aggregate_collection(
+            candidate_sha=candidate,
+            collection_directory=collection,
+            output=tmp_path / "forbidden.json",
+        )
+
+    aggregate = {
+        "schema": "cacheness-phase8-release-qualification-v2",
+        "revision": candidate,
+        "source_digest": "c" * 64,
+        "evidence": {
+            evidence_class: {"artifact_name": artifact_name}
+            for artifact_name, evidence_class in release.CURRENT_ARTIFACT_EVIDENCE_CLASS.items()
+        },
+        "deferred_requirements": [
+            {
+                "decision": "D-23",
+                "qualification": "NOT_QUALIFIED",
+                "requirement": "QUAL-06",
+                "seed": ".planning/seeds/SEED-006-qualify-controlled-linux-performance.md",
+                "status": "QUALIFIED",
+            }
+        ],
+    }
+    with pytest.raises(release.ReleaseEvidenceError, match="deferred requirement"):
+        release.validate_release_aggregate(aggregate, candidate_sha=candidate)
+
+
 class FakeReleaseInspection:
     """Read-only Git/GitHub release state adapter for immutable-publication tests."""
 
