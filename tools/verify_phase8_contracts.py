@@ -47,6 +47,7 @@ _REVIEWED_PLAN_PATHS = (
     f"{PHASE_DIRECTORY}/08-14-PLAN.md",
     f"{PHASE_DIRECTORY}/08-15-PLAN.md",
     f"{PHASE_DIRECTORY}/08-16-PLAN.md",
+    f"{PHASE_DIRECTORY}/08-17-PLAN.md",
 )
 PHASE8_PLAN_PATHS = tuple(_REVIEWED_PLAN_PATHS)
 _REVIEWED_SUPERSEDED_PLAN_PATHS = {
@@ -295,6 +296,20 @@ _REVIEWED_THREAT_NODES.update(
         ),
     }
 )
+PLAN17_CLEAR_DELETE_SELECTORS = (
+    "tests/test_blob_store_concurrency.py::"
+    "test_clear_and_delete_converge_after_an_exact_snapshot",
+    "tests/test_blob_store_concurrency.py::"
+    "test_clear_and_delete_exact_snapshot_stress_preserves_safety_across_valid_outcomes",
+)
+_PLAN17_THREAT_NODES = {
+    "T-08-17-01": (PLAN17_CLEAR_DELETE_SELECTORS[0],),
+    "T-08-17-02": (PLAN17_CLEAR_DELETE_SELECTORS[0],),
+    "T-08-17-03": (PLAN17_CLEAR_DELETE_SELECTORS[0],),
+    "T-08-17-04": (PLAN17_CLEAR_DELETE_SELECTORS[1],),
+    "T-08-17-05": (PLAN17_CLEAR_DELETE_SELECTORS[1],),
+}
+_REVIEWED_THREAT_NODES.update(_PLAN17_THREAT_NODES)
 _REVIEWED_THREATS = (
     *_REVIEWED_THREATS,
     "T-08-14-01",
@@ -311,6 +326,11 @@ _REVIEWED_THREATS = (
     "T-08-16-03",
     "T-08-16-04",
     "T-08-16-05",
+    "T-08-17-01",
+    "T-08-17-02",
+    "T-08-17-03",
+    "T-08-17-04",
+    "T-08-17-05",
 )
 PHASE8_THREATS = tuple(_REVIEWED_THREATS)
 THREAT_NODES = dict(_REVIEWED_THREAT_NODES)
@@ -515,6 +535,24 @@ def _validate_static_exports() -> list[str]:
         errors.append("decision map was mutated")
     if THREAT_NODES != _REVIEWED_THREAT_NODES:
         errors.append("threat map was mutated")
+    plan17_path = f"{PHASE_DIRECTORY}/08-17-PLAN.md"
+    if _REVIEWED_PLAN_PATHS.count(plan17_path) != 1:
+        errors.append("Plan 08-17 is missing or duplicated in the canonical inventory")
+    plan17_threats = tuple(
+        threat for threat in _REVIEWED_THREATS if threat.startswith("T-08-17-")
+    )
+    if set(plan17_threats) != set(_PLAN17_THREAT_NODES):
+        errors.append("Plan 08-17 threat inventory is missing, renamed, or duplicated")
+    if {
+        threat: THREAT_NODES.get(threat) for threat in _PLAN17_THREAT_NODES
+    } != _PLAN17_THREAT_NODES:
+        errors.append("Plan 08-17 threat ownership was lost or reclassified")
+    if {
+        selector
+        for selectors in _PLAN17_THREAT_NODES.values()
+        for selector in selectors
+    } != set(PLAN17_CLEAR_DELETE_SELECTORS):
+        errors.append("Plan 08-17 clear/delete selector inventory was mutated")
     return errors
 
 

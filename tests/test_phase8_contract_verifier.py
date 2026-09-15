@@ -17,7 +17,7 @@ VERIFIER_PATH = REPOSITORY_ROOT / "tools" / "verify_phase8_contracts.py"
 EXPECTED_CANONICAL_PLAN_PATHS = tuple(
     ".planning/phases/08-production-gates-and-performance-stabilization/"
     f"08-{number:02d}-PLAN.md"
-    for number in (*range(1, 11), 13, 14, 15, 16)
+    for number in (*range(1, 11), 13, 14, 15, 16, 17)
 )
 EXPECTED_SUPERSEDED_PLAN_PATHS = {
     ".planning/phases/08-production-gates-and-performance-stabilization/08-11-PLAN.md": {
@@ -37,6 +37,22 @@ EXPECTED_REQUIREMENTS = {
     "QUAL-04",
     "QUAL-05",
     "QUAL-07",
+}
+
+EXACT_CLEAR_DELETE_SELECTOR = (
+    "tests/test_blob_store_concurrency.py::"
+    "test_clear_and_delete_converge_after_an_exact_snapshot"
+)
+EXACT_CLEAR_DELETE_STRESS_SELECTOR = (
+    "tests/test_blob_store_concurrency.py::"
+    "test_clear_and_delete_exact_snapshot_stress_preserves_safety_across_valid_outcomes"
+)
+EXPECTED_PLAN17_THREAT_NODES = {
+    "T-08-17-01": (EXACT_CLEAR_DELETE_SELECTOR,),
+    "T-08-17-02": (EXACT_CLEAR_DELETE_SELECTOR,),
+    "T-08-17-03": (EXACT_CLEAR_DELETE_SELECTOR,),
+    "T-08-17-04": (EXACT_CLEAR_DELETE_STRESS_SELECTOR,),
+    "T-08-17-05": (EXACT_CLEAR_DELETE_STRESS_SELECTOR,),
 }
 
 DEFERRED_PERFORMANCE_REQUIREMENT = "QUAL-06"
@@ -121,6 +137,67 @@ def test_fixed_manifest_binds_live_configuration_preflight_gap() -> None:
         ),
     }
     assert verifier.validate_fixed_manifest(REPOSITORY_ROOT) == ()
+
+
+def test_fixed_manifest_binds_plan17_threats_and_exact_clear_delete_nodes() -> None:
+    """Plan 17's valid-progress regression cannot disappear from local readiness."""
+    verifier = _load_verifier()
+
+    assert verifier.PHASE8_PLAN_PATHS == EXPECTED_CANONICAL_PLAN_PATHS
+    assert {
+        threat: verifier.THREAT_NODES[threat] for threat in EXPECTED_PLAN17_THREAT_NODES
+    } == EXPECTED_PLAN17_THREAT_NODES
+    assert set(verifier.PLAN17_CLEAR_DELETE_SELECTORS) == {
+        EXACT_CLEAR_DELETE_SELECTOR,
+        EXACT_CLEAR_DELETE_STRESS_SELECTOR,
+    }
+    assert verifier.validate_fixed_manifest(REPOSITORY_ROOT) == ()
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        pytest.param(
+            VERIFIER_PATH.read_text(encoding="utf-8").replace(
+                '    f"{PHASE_DIRECTORY}/08-17-PLAN.md",\n', "", 1
+            ),
+            id="removed-plan17",
+        ),
+        pytest.param(
+            VERIFIER_PATH.read_text(encoding="utf-8").replace(
+                "test_clear_and_delete_exact_snapshot_stress_preserves_safety_across_valid_outcomes",
+                "test_clear_and_delete_exact_snapshot_stress_renamed",
+                1,
+            ),
+            id="renamed-stress-selector",
+        ),
+        pytest.param(
+            VERIFIER_PATH.read_text(encoding="utf-8").replace(
+                '    "T-08-17-05",\n', '    "T-08-17-04",\n', 1
+            ),
+            id="duplicate-plan17-threat",
+        ),
+        pytest.param(
+            VERIFIER_PATH.read_text(encoding="utf-8").replace(
+                "THREAT_NODES = dict(_REVIEWED_THREAT_NODES)",
+                "THREAT_NODES = {\n"
+                "    threat: selectors\n"
+                "    for threat, selectors in _REVIEWED_THREAT_NODES.items()\n"
+                "    if threat != 'T-08-17-05'\n"
+                "}",
+                1,
+            ),
+            id="unowned-plan17-threat",
+        ),
+    ],
+)
+def test_fixed_manifest_rejects_plan17_removal_rename_duplication_and_unownership(
+    source: str,
+) -> None:
+    """The Plan 17 binding remains a closed, named local-readiness contract."""
+    verifier = _load_source_mutation(source)
+
+    assert verifier.validate_fixed_manifest(REPOSITORY_ROOT)
 
 
 def test_fixed_manifest_rejects_source_mutation_that_drops_plan_or_threat() -> None:
