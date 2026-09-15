@@ -124,6 +124,15 @@ _DISALLOWED_S3_CONFIGURATION = (
     "CACHENESS_TEST_EXPECTED_BUCKET_OWNER",
     "EXPECTED_BUCKET_OWNER",
 )
+PREFLIGHT_SCHEMA = "phase8-live-preflight-v1"
+PREFLIGHT_MAX_OUTPUT_BYTES = 4 * 1024
+_PREFLIGHT_CLEANUP_CAPS = {
+    "pages": 10,
+    "objects": 1_000,
+    "bytes": 64 * 1024 * 1024,
+}
+_PREFLIGHT_OWNER_MARKER = "__cacheness_qualification_owner__.json"
+_SOURCE_IDENTITY_UNSET = object()
 _NON_AWS_LIVE_SUITE_SOURCE = re.compile(
     r"\b(?:moto|mock_aws|localstack|minio)\b|endpoint_url|127\.0\.0\.1|localhost",
     re.IGNORECASE,
@@ -279,6 +288,167 @@ def _validate_external_configuration(environment: Mapping[str, str]) -> None:
         raise ValueError("invalid external configuration")
 
 
+def _parse_postgresql_dsn(dsn: str) -> str:
+    """Classify a local PostgreSQL target without opening a connection."""
+    try:
+        from psycopg.conninfo import conninfo_to_dict
+    except ImportError:
+        return "unavailable"
+    try:
+        parameters = conninfo_to_dict(dsn)
+    except Exception:
+        return "invalid"
+    has_database = bool(parameters.get("dbname"))
+    has_host = bool(parameters.get("host") or parameters.get("hostaddr"))
+    return "valid" if has_database and has_host else "invalid"
+
+
+def _load_qualification_cleanup_policy() -> dict[str, object] | None:
+    """Read the reviewed fixture policy without creating a live namespace."""
+    fixture_path = REPOSITORY_ROOT / "tests" / "qualification" / "conftest.py"
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "phase8_preflight_cleanup_policy", fixture_path
+        )
+        if spec is None or spec.loader is None:
+            return None
+        fixture_module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = fixture_module
+        try:
+            spec.loader.exec_module(fixture_module)
+        finally:
+            sys.modules.pop(spec.name, None)
+    except Exception:
+        return None
+
+    marker = getattr(fixture_module, "_OWNER_MARKER_NAME", None)
+    caps = {
+        "pages": getattr(fixture_module, "_MAX_CLEANUP_PAGES", None),
+        "objects": getattr(fixture_module, "_MAX_CLEANUP_OBJECTS", None),
+        "bytes": getattr(fixture_module, "_MAX_CLEANUP_BYTES", None),
+    }
+    if marker != _PREFLIGHT_OWNER_MARKER or caps != _PREFLIGHT_CLEANUP_CAPS:
+        return None
+    return {
+        "owner_marker_required": True,
+        "per_run_marker_at_execution": True,
+        "caps": caps,
+    }
+
+
+def _preflight_report(
+    *,
+    status: str,
+    missing_configuration: Sequence[str],
+    configuration_valid: bool,
+    postgresql_dsn: str,
+    endpoint_overrides_absent: bool,
+    owner_overrides_absent: bool,
+    source_identity: SourceIdentity | None,
+    cleanup_policy: Mapping[str, object] | None,
+) -> dict[str, object]:
+    """Build the allow-listed, non-evidence output for local readiness only."""
+    report = {
+        "schema": PREFLIGHT_SCHEMA,
+        "status": status,
+        "service_state": "NOT_RUN",
+        "required_configuration": list(REQUIRED_CONFIGURATION),
+        "missing_configuration": list(missing_configuration),
+        "configuration": {
+            "external_configuration_valid": configuration_valid,
+            "postgresql_dsn": postgresql_dsn,
+            "aws_provider_chain": "standard",
+            "endpoint_overrides_absent": endpoint_overrides_absent,
+            "owner_overrides_absent": owner_overrides_absent,
+        },
+        "source": {
+            "revision": source_identity.revision if source_identity else "unavailable",
+            "digest": source_identity.digest if source_identity else "unavailable",
+            "clean": source_identity is not None,
+        },
+        "cleanup_policy": cleanup_policy
+        if cleanup_policy is not None
+        else {
+            "owner_marker_required": False,
+            "per_run_marker_at_execution": True,
+            "caps": None,
+        },
+    }
+    serialized = json.dumps(report, separators=(",", ":"), sort_keys=True)
+    if len(serialized.encode("utf-8")) > PREFLIGHT_MAX_OUTPUT_BYTES:
+        raise ValueError("preflight report exceeds its fixed output limit")
+    return report
+
+
+def run_preflight(
+    *,
+    environment: Mapping[str, str] | None = None,
+    source_identity: SourceIdentity | None | object = _SOURCE_IDENTITY_UNSET,
+) -> tuple[int, dict[str, object]]:
+    """Validate only local configuration, source, and cleanup policy prerequisites.
+
+    This deliberately does not construct clients, resolve AWS credentials, execute
+    tests, allocate a namespace, invoke cleanup, or write qualification evidence.
+    """
+    supplied_environment = dict(os.environ if environment is None else environment)
+    missing = _missing_configuration(supplied_environment)
+    selected_source = (
+        _qualification_source_identity()
+        if source_identity is _SOURCE_IDENTITY_UNSET
+        else source_identity
+    )
+    cleanup_policy = _load_qualification_cleanup_policy()
+    configuration_valid = False
+    postgresql_dsn = "not_checked"
+    endpoint_overrides_absent = not any(
+        supplied_environment.get(name) for name in _DISALLOWED_S3_CONFIGURATION[:3]
+    )
+    owner_overrides_absent = not any(
+        supplied_environment.get(name) for name in _DISALLOWED_S3_CONFIGURATION[3:]
+    )
+
+    if "CACHENESS_TEST_POSTGRES_DSN" not in missing:
+        postgresql_dsn = _parse_postgresql_dsn(
+            supplied_environment["CACHENESS_TEST_POSTGRES_DSN"]
+        )
+    if not missing:
+        try:
+            _validate_external_configuration(supplied_environment)
+        except ValueError:
+            pass
+        else:
+            configuration_valid = postgresql_dsn == "valid"
+
+    if missing or selected_source is None or postgresql_dsn == "unavailable":
+        status, exit_code = "UNAVAILABLE", 2
+    elif not configuration_valid or cleanup_policy is None:
+        status, exit_code = "INVALID", 1
+    else:
+        status, exit_code = "CONFIGURED", 0
+
+    report = _preflight_report(
+        status=status,
+        missing_configuration=missing,
+        configuration_valid=configuration_valid,
+        postgresql_dsn=postgresql_dsn,
+        endpoint_overrides_absent=endpoint_overrides_absent,
+        owner_overrides_absent=owner_overrides_absent,
+        source_identity=selected_source
+        if isinstance(selected_source, SourceIdentity)
+        else None,
+        cleanup_policy=cleanup_policy,
+    )
+    return exit_code, report
+
+
+def _write_preflight_stdout(report: Mapping[str, object]) -> None:
+    """Emit one canonical bounded JSON object without creating an evidence file."""
+    serialized = json.dumps(report, separators=(",", ":"), sort_keys=True)
+    if len(serialized.encode("utf-8")) > PREFLIGHT_MAX_OUTPUT_BYTES:
+        raise ValueError("preflight report exceeds its fixed output limit")
+    print(serialized)
+
+
 def resolve_aws_service_identity(environment: Mapping[str, str]) -> AwsServiceIdentity:
     """Confirm the standard AWS provider chain without serializing credentials."""
     try:
@@ -345,7 +515,11 @@ def make_evidence(
 
 
 def _validate_safe_text(value: object) -> None:
-    if not isinstance(value, str) or not value or _FORBIDDEN_VALUE_PATTERN.search(value):
+    if (
+        not isinstance(value, str)
+        or not value
+        or _FORBIDDEN_VALUE_PATTERN.search(value)
+    ):
         raise ValueError("evidence contains unsafe text")
 
 
@@ -393,19 +567,32 @@ def validate_evidence(evidence: Mapping[str, object]) -> None:
     if evidence.get("run_role") not in _RUN_ROLES:
         raise ValueError("evidence run role is invalid")
     namespace = evidence.get("run_namespace")
-    if not isinstance(namespace, str) or not re.fullmatch(r"sha256:[0-9a-f]{16}", namespace):
+    if not isinstance(namespace, str) or not re.fullmatch(
+        r"sha256:[0-9a-f]{16}", namespace
+    ):
         raise ValueError("evidence namespace is invalid")
     missing = evidence.get("missing_configuration")
     if not isinstance(missing, list) or any(
-        not isinstance(name, str) or name not in REQUIRED_CONFIGURATION for name in missing
+        not isinstance(name, str) or name not in REQUIRED_CONFIGURATION
+        for name in missing
     ):
         raise ValueError("evidence missing configuration is invalid")
     services = evidence.get("services")
     if not isinstance(services, Mapping) or set(services) != _ALLOWED_SERVICE_KEYS:
         raise ValueError("evidence services violate the exact allow-list")
-    for name in ("python", "pytest", "obstore", "psycopg", "postgresql", "payload_participant"):
+    for name in (
+        "python",
+        "pytest",
+        "obstore",
+        "psycopg",
+        "postgresql",
+        "payload_participant",
+    ):
         _validate_safe_text(services.get(name))
-    if services.get("postgresql") != "real-postgresql" or services.get("payload_participant") != "ObstoreGenerationIO":
+    if (
+        services.get("postgresql") != "real-postgresql"
+        or services.get("payload_participant") != "ObstoreGenerationIO"
+    ):
         raise ValueError("evidence service topology is invalid")
     aws = services.get("aws")
     if aws is not None and not _is_standard_amazon_s3_identity(aws):
@@ -416,9 +603,21 @@ def validate_evidence(evidence: Mapping[str, object]) -> None:
     fixed_suite = evidence.get("fixed_suite")
     if not isinstance(fixed_suite, Mapping) or set(fixed_suite) != _ALLOWED_SUITE_KEYS:
         raise ValueError("evidence fixed suite is invalid")
-    if fixed_suite.get("modules") != list(LIVE_TEST_MODULES) or fixed_suite.get("marker_expression") != LIVE_MARKER_EXPRESSION or not isinstance(fixed_suite.get("complete"), bool):
+    if (
+        fixed_suite.get("modules") != list(LIVE_TEST_MODULES)
+        or fixed_suite.get("marker_expression") != LIVE_MARKER_EXPRESSION
+        or not isinstance(fixed_suite.get("complete"), bool)
+    ):
         raise ValueError("evidence fixed suite is invalid")
-    for value in (evidence["schema"], evidence["status"], timestamp, evidence["run_role"], namespace, evidence["result"], evidence["cleanup_status"]):
+    for value in (
+        evidence["schema"],
+        evidence["status"],
+        timestamp,
+        evidence["run_role"],
+        namespace,
+        evidence["result"],
+        evidence["cleanup_status"],
+    ):
         _validate_safe_text(value)
 
     status = evidence["status"]
@@ -444,7 +643,9 @@ def validate_evidence(evidence: Mapping[str, object]) -> None:
         raise ValueError("complete qualification evidence must be marked qualified")
 
 
-def write_evidence(output: Path, evidence: Mapping[str, object], *, forbidden_fragments: Sequence[str]) -> None:
+def write_evidence(
+    output: Path, evidence: Mapping[str, object], *, forbidden_fragments: Sequence[str]
+) -> None:
     """Validate and atomically write one bounded evidence document."""
     validate_evidence(evidence)
     serialized = json.dumps(evidence, indent=2, sort_keys=True) + "\n"
@@ -453,7 +654,11 @@ def write_evidence(output: Path, evidence: Mapping[str, object], *, forbidden_fr
             raise ValueError("evidence contains a supplied secret fragment")
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(
-        mode="w", encoding="utf-8", dir=output.parent, prefix=f".{output.name}.", delete=False
+        mode="w",
+        encoding="utf-8",
+        dir=output.parent,
+        prefix=f".{output.name}.",
+        delete=False,
     ) as temporary:
         temporary.write(serialized)
         temporary.flush()
@@ -517,13 +722,20 @@ def _timeout_seconds(environment: Mapping[str, str]) -> int:
     return timeout
 
 
-def _run_fixed_suite(arguments: Sequence[str], timeout: int, environment: Mapping[str, str]) -> subprocess.CompletedProcess[str]:
+def _run_fixed_suite(
+    arguments: Sequence[str], timeout: int, environment: Mapping[str, str]
+) -> subprocess.CompletedProcess[str]:
     """Run the sealed suite without forwarding possibly secret-bearing output."""
     if not _fixed_live_suite_is_real():
         return subprocess.CompletedProcess(list(arguments), 1, "", "")
     return subprocess.run(
-        list(arguments), cwd=REPOSITORY_ROOT, capture_output=True, text=True,
-        timeout=timeout, check=False, env=dict(environment)
+        list(arguments),
+        cwd=REPOSITORY_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+        env=dict(environment),
     )
 
 
@@ -546,26 +758,67 @@ def _is_complete_pass(completed: subprocess.CompletedProcess[str]) -> bool:
     """Reject all non-pass, skip, deselection, timeout, and xfail outcomes."""
     output = f"{completed.stdout or ''}\n{completed.stderr or ''}".lower()
     incomplete_markers = (
-        " skipped", " deselected", "no tests ran", "0 items collected", "collected 0 items",
-        " xfailed", " xpassed", " interrupted", " timeout", " timed out", " error",
+        " skipped",
+        " deselected",
+        "no tests ran",
+        "0 items collected",
+        "collected 0 items",
+        " xfailed",
+        " xpassed",
+        " interrupted",
+        " timeout",
+        " timed out",
+        " error",
     )
-    return completed.returncode == 0 and not any(marker in output for marker in incomplete_markers) and re.search(r"\b[1-9][0-9]* passed\b", output) is not None
+    return (
+        completed.returncode == 0
+        and not any(marker in output for marker in incomplete_markers)
+        and re.search(r"\b[1-9][0-9]* passed\b", output) is not None
+    )
 
 
-def _write_terminal_evidence(*, output: Path, status: str, missing_configuration: Sequence[str], run_namespace: str, aws_identity: AwsServiceIdentity | None, result: str, cleanup_status: str, forbidden_fragments: Sequence[str], source_identity: SourceIdentity | None = None, run_role: str = "release_candidate") -> None:
+def _write_terminal_evidence(
+    *,
+    output: Path,
+    status: str,
+    missing_configuration: Sequence[str],
+    run_namespace: str,
+    aws_identity: AwsServiceIdentity | None,
+    result: str,
+    cleanup_status: str,
+    forbidden_fragments: Sequence[str],
+    source_identity: SourceIdentity | None = None,
+    run_role: str = "release_candidate",
+) -> None:
     write_evidence(
         output,
         make_evidence(
-            status=status, missing_configuration=missing_configuration,
-            run_namespace=run_namespace, aws_identity=aws_identity, result=result,
-            cleanup_status=cleanup_status, source_identity=source_identity,
+            status=status,
+            missing_configuration=missing_configuration,
+            run_namespace=run_namespace,
+            aws_identity=aws_identity,
+            result=result,
+            cleanup_status=cleanup_status,
+            source_identity=source_identity,
             run_role=run_role,
         ),
         forbidden_fragments=forbidden_fragments,
     )
 
 
-def run_qualification(*, output: Path, environment: Mapping[str, str] | None = None, run_tests: Callable[[Sequence[str], int], subprocess.CompletedProcess[str]] | None = None, resolve_aws: Callable[[Mapping[str, str]], AwsServiceIdentity] = resolve_aws_service_identity, cleanup: Callable[[Mapping[str, str], str], str] = _cleanup_from_fixtures, run_namespace: str | None = None, run_role: str = "release_candidate") -> int:
+def run_qualification(
+    *,
+    output: Path,
+    environment: Mapping[str, str] | None = None,
+    run_tests: Callable[[Sequence[str], int], subprocess.CompletedProcess[str]]
+    | None = None,
+    resolve_aws: Callable[
+        [Mapping[str, str]], AwsServiceIdentity
+    ] = resolve_aws_service_identity,
+    cleanup: Callable[[Mapping[str, str], str], str] = _cleanup_from_fixtures,
+    run_namespace: str | None = None,
+    run_role: str = "release_candidate",
+) -> int:
     """Write one terminal record and return 0, 1, or 2 for its fixed status."""
     supplied_environment = dict(os.environ if environment is None else environment)
     if run_role not in _RUN_ROLES:
@@ -574,22 +827,63 @@ def run_qualification(*, output: Path, environment: Mapping[str, str] | None = N
     forbidden_fragments = _supplied_secret_fragments(supplied_environment)
     missing = _missing_configuration(supplied_environment)
     if missing:
-        _write_terminal_evidence(output=output, status="UNAVAILABLE", missing_configuration=missing, run_namespace=namespace, aws_identity=None, result="not_run", cleanup_status="NOT_ATTEMPTED", forbidden_fragments=forbidden_fragments, run_role=run_role)
+        _write_terminal_evidence(
+            output=output,
+            status="UNAVAILABLE",
+            missing_configuration=missing,
+            run_namespace=namespace,
+            aws_identity=None,
+            result="not_run",
+            cleanup_status="NOT_ATTEMPTED",
+            forbidden_fragments=forbidden_fragments,
+            run_role=run_role,
+        )
         return 2
     try:
         _validate_external_configuration(supplied_environment)
         timeout = _timeout_seconds(supplied_environment)
     except ValueError:
-        _write_terminal_evidence(output=output, status="NOT_QUALIFIED", missing_configuration=(), run_namespace=namespace, aws_identity=None, result="configuration_error", cleanup_status="NOT_ATTEMPTED", forbidden_fragments=forbidden_fragments, run_role=run_role)
+        _write_terminal_evidence(
+            output=output,
+            status="NOT_QUALIFIED",
+            missing_configuration=(),
+            run_namespace=namespace,
+            aws_identity=None,
+            result="configuration_error",
+            cleanup_status="NOT_ATTEMPTED",
+            forbidden_fragments=forbidden_fragments,
+            run_role=run_role,
+        )
         return 1
     source_identity = _qualification_source_identity()
     if source_identity is None:
-        _write_terminal_evidence(output=output, status="NOT_QUALIFIED", missing_configuration=(), run_namespace=namespace, aws_identity=None, result="not_run", cleanup_status="NOT_ATTEMPTED", forbidden_fragments=forbidden_fragments, run_role=run_role)
+        _write_terminal_evidence(
+            output=output,
+            status="NOT_QUALIFIED",
+            missing_configuration=(),
+            run_namespace=namespace,
+            aws_identity=None,
+            result="not_run",
+            cleanup_status="NOT_ATTEMPTED",
+            forbidden_fragments=forbidden_fragments,
+            run_role=run_role,
+        )
         return 1
     try:
         aws_identity = resolve_aws(supplied_environment)
     except QualificationUnavailableError:
-        _write_terminal_evidence(output=output, status="UNAVAILABLE", missing_configuration=(), run_namespace=namespace, aws_identity=None, result="not_run", cleanup_status="NOT_ATTEMPTED", forbidden_fragments=forbidden_fragments, source_identity=source_identity, run_role=run_role)
+        _write_terminal_evidence(
+            output=output,
+            status="UNAVAILABLE",
+            missing_configuration=(),
+            run_namespace=namespace,
+            aws_identity=None,
+            result="not_run",
+            cleanup_status="NOT_ATTEMPTED",
+            forbidden_fragments=forbidden_fragments,
+            source_identity=source_identity,
+            run_role=run_role,
+        )
         return 2
 
     completed: subprocess.CompletedProcess[str] | None = None
@@ -597,7 +891,13 @@ def run_qualification(*, output: Path, environment: Mapping[str, str] | None = N
     child_environment = dict(supplied_environment)
     child_environment["CACHENESS_PHASE8_QUALIFICATION_RUN_ID"] = namespace
     try:
-        completed = run_tests(_qualification_arguments(), timeout) if run_tests else _run_fixed_suite(_qualification_arguments(), timeout, child_environment)
+        completed = (
+            run_tests(_qualification_arguments(), timeout)
+            if run_tests
+            else _run_fixed_suite(
+                _qualification_arguments(), timeout, child_environment
+            )
+        )
     except (OSError, subprocess.SubprocessError):
         completed = None
     finally:
@@ -614,11 +914,20 @@ def run_qualification(*, output: Path, environment: Mapping[str, str] | None = N
         and run_role == "release_candidate"
     )
     _write_terminal_evidence(
-        output=output, status="QUALIFIED" if qualified else "NOT_QUALIFIED",
-        missing_configuration=(), run_namespace=namespace, aws_identity=aws_identity,
-        result="passed" if complete and source_stable else "incomplete" if completed is None or not source_stable else "failed",
-        cleanup_status=cleanup_status, forbidden_fragments=forbidden_fragments,
-        source_identity=source_identity, run_role=run_role,
+        output=output,
+        status="QUALIFIED" if qualified else "NOT_QUALIFIED",
+        missing_configuration=(),
+        run_namespace=namespace,
+        aws_identity=aws_identity,
+        result="passed"
+        if complete and source_stable
+        else "incomplete"
+        if completed is None or not source_stable
+        else "failed",
+        cleanup_status=cleanup_status,
+        forbidden_fragments=forbidden_fragments,
+        source_identity=source_identity,
+        run_role=run_role,
     )
     return 0 if qualified else 1
 
@@ -626,10 +935,24 @@ def run_qualification(*, output: Path, environment: Mapping[str, str] | None = N
 def main(arguments: Sequence[str] | None = None) -> int:
     """Parse one output location without permitting selector substitution."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
-    parser.add_argument("--role", choices=sorted(_RUN_ROLES), default="release_candidate")
+    parser.add_argument("--preflight", action="store_true")
+    parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--role", choices=sorted(_RUN_ROLES), default="release_candidate"
+    )
     parsed = parser.parse_args(arguments)
-    return run_qualification(output=parsed.output, run_role=parsed.role)
+    if parsed.preflight:
+        if parsed.output is not None:
+            parser.error("--preflight cannot write qualification evidence")
+        if parsed.role != "release_candidate":
+            parser.error("--preflight cannot use a scheduled qualification role")
+        exit_code, report = run_preflight()
+        _write_preflight_stdout(report)
+        return exit_code
+    return run_qualification(
+        output=parsed.output or DEFAULT_OUTPUT,
+        run_role=parsed.role,
+    )
 
 
 if __name__ == "__main__":

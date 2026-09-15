@@ -87,7 +87,9 @@ def test_preflight_accepts_sanitized_configuration_without_external_effects() ->
     _assert_preflight_redaction(report, environment)
 
 
-def test_preflight_rejects_missing_invalid_and_disallowed_configuration_without_external_effects() -> None:
+def test_preflight_rejects_missing_invalid_and_disallowed_configuration_without_external_effects() -> (
+    None
+):
     """Malformed or absent settings are classified locally without service access."""
     runner = _load_runner()
     source_identity = runner.SourceIdentity(revision="a" * 40, digest="b" * 64)
@@ -97,7 +99,7 @@ def test_preflight_rejects_missing_invalid_and_disallowed_configuration_without_
     )
     assert exit_code == 2
     assert missing["status"] == "UNAVAILABLE"
-    assert missing["missing_configuration"] == list(runner.REQUIRED_CONFIGURATION)
+    assert missing["missing_configuration"] == sorted(runner.REQUIRED_CONFIGURATION)
     _assert_preflight_redaction(missing, {})
 
     invalid_environments = (
