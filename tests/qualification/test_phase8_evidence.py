@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 import subprocess
 import sys
@@ -49,6 +50,148 @@ def _configured_environment() -> dict[str, str]:
         "CACHENESS_TEST_MANIFEST_KEY_B64": "bW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW0=",
         "CACHENESS_TEST_AWS_REGION": "us-east-1",
     }
+
+
+def _assert_preflight_redaction(
+    report: dict[str, object], environment: dict[str, str]
+) -> None:
+    """Assert that a preflight report exposes only its fixed public contract."""
+    serialized = json.dumps(report, sort_keys=True)
+    assert len(serialized.encode("utf-8")) <= 4 * 1024
+    assert report["service_state"] == "NOT_RUN"
+    for value in environment.values():
+        assert value not in serialized
+
+
+def test_preflight_accepts_sanitized_configuration_without_external_effects() -> None:
+    """A complete local contract is CONFIGURED without probing either service."""
+    runner = _load_runner()
+    environment = _configured_environment()
+
+    exit_code, report = runner.run_preflight(
+        environment=environment,
+        source_identity=runner.SourceIdentity(revision="a" * 40, digest="b" * 64),
+    )
+
+    assert exit_code == 0
+    assert report["status"] == "CONFIGURED"
+    assert report["source"] == {
+        "revision": "a" * 40,
+        "digest": "b" * 64,
+        "clean": True,
+    }
+    assert report["configuration"]["postgresql_dsn"] == "valid"
+    assert report["configuration"]["aws_provider_chain"] == "standard"
+    assert report["cleanup_policy"]["owner_marker_required"] is True
+    assert report["cleanup_policy"]["per_run_marker_at_execution"] is True
+    _assert_preflight_redaction(report, environment)
+
+
+def test_preflight_rejects_missing_invalid_and_disallowed_configuration_without_external_effects() -> None:
+    """Malformed or absent settings are classified locally without service access."""
+    runner = _load_runner()
+    source_identity = runner.SourceIdentity(revision="a" * 40, digest="b" * 64)
+
+    exit_code, missing = runner.run_preflight(
+        environment={}, source_identity=source_identity
+    )
+    assert exit_code == 2
+    assert missing["status"] == "UNAVAILABLE"
+    assert missing["missing_configuration"] == list(runner.REQUIRED_CONFIGURATION)
+    _assert_preflight_redaction(missing, {})
+
+    invalid_environments = (
+        {**_configured_environment(), "CACHENESS_TEST_S3_BUCKET": "Uppercase"},
+        {**_configured_environment(), "CACHENESS_TEST_AWS_REGION": "invalid"},
+        {**_configured_environment(), "CACHENESS_TEST_MANIFEST_KEY_B64": "invalid"},
+        {**_configured_environment(), "CACHENESS_TEST_POSTGRES_DSN": "postgresql://"},
+        {
+            **_configured_environment(),
+            "AWS_ENDPOINT_URL_S3": "http://localhost:4566",
+        },
+        {
+            **_configured_environment(),
+            "CACHENESS_TEST_EXPECTED_BUCKET_OWNER": "123456789012",
+        },
+    )
+    for environment in invalid_environments:
+        exit_code, report = runner.run_preflight(
+            environment=environment, source_identity=source_identity
+        )
+        assert exit_code == 1
+        assert report["status"] == "INVALID"
+        _assert_preflight_redaction(report, environment)
+
+
+def test_preflight_requires_clean_source_and_reviewed_cleanup_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A local prerequisite or reviewed cleanup-policy failure cannot configure a run."""
+    runner = _load_runner()
+    environment = _configured_environment()
+
+    exit_code, unavailable = runner.run_preflight(
+        environment=environment, source_identity=None
+    )
+    assert exit_code == 2
+    assert unavailable["status"] == "UNAVAILABLE"
+    _assert_preflight_redaction(unavailable, environment)
+
+    monkeypatch.setattr(runner, "_load_qualification_cleanup_policy", lambda: None)
+    exit_code, invalid = runner.run_preflight(
+        environment=environment,
+        source_identity=runner.SourceIdentity(revision="a" * 40, digest="b" * 64),
+    )
+    assert exit_code == 1
+    assert invalid["status"] == "INVALID"
+    _assert_preflight_redaction(invalid, environment)
+
+    monkeypatch.setattr(runner, "_parse_postgresql_dsn", lambda _dsn: "unavailable")
+    exit_code, unavailable_parser = runner.run_preflight(
+        environment=environment,
+        source_identity=runner.SourceIdentity(revision="a" * 40, digest="b" * 64),
+    )
+    assert exit_code == 2
+    assert unavailable_parser["status"] == "UNAVAILABLE"
+    _assert_preflight_redaction(unavailable_parser, environment)
+
+
+def test_preflight_cli_never_runs_or_writes_qualification_evidence(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The CLI isolates pure readiness from every live qualification seam."""
+    runner = _load_runner()
+    environment = _configured_environment()
+    monkeypatch.setattr(runner.os, "environ", environment)
+    monkeypatch.setattr(
+        runner,
+        "_qualification_source_identity",
+        lambda: runner.SourceIdentity(revision="a" * 40, digest="b" * 64),
+    )
+    default_output = tmp_path / "live_qualification.json"
+    monkeypatch.setattr(runner, "DEFAULT_OUTPUT", default_output)
+
+    def forbidden(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("preflight invoked an effect-bearing qualification seam")
+
+    monkeypatch.setattr(runner, "resolve_aws_service_identity", forbidden)
+    monkeypatch.setattr(runner, "_run_fixed_suite", forbidden)
+    monkeypatch.setattr(runner, "_cleanup_from_fixtures", forbidden)
+    monkeypatch.setattr(runner, "_new_run_namespace", forbidden)
+    monkeypatch.setattr(runner, "write_evidence", forbidden)
+
+    assert runner.main(["--preflight"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "CONFIGURED"
+    _assert_preflight_redaction(report, environment)
+    assert not default_output.exists()
+
+    with pytest.raises(SystemExit):
+        runner.main(["--preflight", "--output", str(tmp_path / "forbidden.json")])
+    with pytest.raises(SystemExit):
+        runner.main(["--preflight", "--role", "scheduled_diagnostic"])
 
 
 def test_runner_uses_only_the_frozen_live_obstore_suite() -> None:
