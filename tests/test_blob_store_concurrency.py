@@ -266,9 +266,7 @@ def test_distinct_key_put_completes_while_another_key_is_pre_cas(tmp_path):
     key_a_thread = threading.Thread(target=put, args=("key-a", "a"))
     key_a_thread.start()
     assert key_a_entered.wait(timeout=5)
-    key_b_thread = threading.Thread(
-        target=put, args=("key-b", "b", key_b_finished)
-    )
+    key_b_thread = threading.Thread(target=put, args=("key-b", "b", key_b_finished))
     key_b_thread.start()
     try:
         assert key_b_finished.wait(timeout=5)
@@ -281,9 +279,9 @@ def test_distinct_key_put_completes_while_another_key_is_pre_cas(tmp_path):
     assert errors == []
 
 
-def _run_exact_snapshot_clear_delete_collision(root: Path) -> tuple[
-    int, bool | CacheBlobLifecycleConflictError
-]:
+def _run_exact_snapshot_clear_delete_collision(
+    root: Path,
+) -> tuple[int, bool | CacheBlobLifecycleConflictError]:
     """Exercise one bounded clear/delete collision and assert its safe terminal state."""
     store = _store(root)
     gate = ReleaseGate()
@@ -500,9 +498,7 @@ def test_distinct_key_put_completes_during_paused_authority_promotion(
             errors.append(exc)
 
     first = threading.Thread(target=put, args=("key-a", "value-a"))
-    second = threading.Thread(
-        target=put, args=("key-b", "value-b", second_done)
-    )
+    second = threading.Thread(target=put, args=("key-b", "value-b", second_done))
     try:
         first.start()
         assert entered.wait(timeout=5)
@@ -592,7 +588,9 @@ def test_independent_process_put_completes_during_paused_authority_promotion(
         reopened.close()
 
 
-def _retired_scheduler_live_clear_transition_lease_preserves_creator_return_count(tmp_path: Path) -> None:
+def _retired_scheduler_live_clear_transition_lease_preserves_creator_return_count(
+    tmp_path: Path,
+) -> None:
     """Constructor recovery waits for a live clearer after snapshot admission ends."""
     root = tmp_path / "live-clear-transition-lease"
     owner = _store(root)
@@ -648,7 +646,9 @@ def _retired_scheduler_live_clear_transition_lease_preserves_creator_return_coun
         owner.close()
 
 
-def _retired_scheduler_clear_snapshot_excludes_a_later_independent_process_write(tmp_path):
+def _retired_scheduler_clear_snapshot_excludes_a_later_independent_process_write(
+    tmp_path,
+):
     """Cross-process admission holds the exact clear snapshot stable."""
     root = tmp_path / "cross-process-clear-admission"
     store = _store(root)
