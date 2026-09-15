@@ -63,6 +63,32 @@ SEED-006/SEED-007 nonclaims. It does not contact PostgreSQL/AWS, dispatch a
 workflow, create a GitHub draft, publish a release, or convert an unavailable
 optional/platform row into support evidence.
 
+Run the bounded local command from a clean reviewed checkout:
+
+```bash
+uv run --isolated --all-extras --group dev --frozen python \
+  tools/verify_phase8_contracts.py --local-ready \
+  --output .planning/phases/08-production-gates-and-performance-stabilization/08-LOCAL-READINESS.json
+```
+
+It writes one canonical `cacheness-phase8-local-readiness-v1` record only after
+the inherited deterministic integrity/recovery contracts, coverage-plus-Ruff
+ratchet, structural call/RSS contracts, and a source-free base wheel public
+round trip have passed for one clean revision and reviewed-source digest. The
+record has a bounded host observation and exactly four local evidence classes:
+`deterministic`, `coverage`, `structural`, and `base_wheel`. Its only deferred
+records are `QUAL-06`/SEED-006 and `BACK-05`/SEED-007; publication is exactly
+`NOT_PUBLISHED`/SEED-007. It contains no workflow, run ID, tag, draft, asset,
+endpoint, credential, service, Linux-equivalence, Windows, or timing claim.
+
+This local result identifies only the machine that ran it. It does not qualify a
+Linux matrix, Windows, controlled performance, real PostgreSQL/Amazon S3, a
+remote service, or immutable publication. A malformed, stale, dirty,
+wrong-revision, wrong-digest, skipped, duplicated, or contradictory record is
+not local readiness. The strict `collect`, `aggregate`, and publication commands
+remain the separate SEED-007 path and continue to require real exact-SHA live
+`QUALIFIED`/`CLEAN` evidence plus immutable remote state.
+
 ## Protected service and performance boundaries
 
 Only `workflow_dispatch` release-candidate jobs may receive the protected

@@ -35,6 +35,35 @@ updated: 2026-09-15
    `DEFERRED`/`NOT_QUALIFIED` and publication remains `DEFERRED`/`NOT_PUBLISHED`
    under SEED-007. These are closed local-milestone nonclaims, not inferred passes.
 
+## Executable Local-Readiness Record
+
+Plan 08-16 produces only
+`08-LOCAL-READINESS.json`, with schema
+`cacheness-phase8-local-readiness-v1`, through this fixed command:
+
+```bash
+uv run --isolated --all-extras --group dev --frozen python \
+  tools/verify_phase8_contracts.py --local-ready \
+  --output .planning/phases/08-production-gates-and-performance-stabilization/08-LOCAL-READINESS.json
+```
+
+The record is `LOCAL_READY` only when one clean revision and reviewed-source
+digest bind four exact local evidence classes: deterministic integrity/recovery,
+coverage plus scoped Ruff, structural call/RSS bounds, and a source-free base
+wheel public round trip. It stores only those compact pass records plus observed
+OS/Python/machine facts. It has no field that can carry a live-service,
+workflow-run, tag, draft, asset, Linux-matrix, Windows, controlled-performance,
+or publication result.
+
+The record must include exactly these nonclaims: `QUAL-06` is
+`DEFERRED`/`NOT_QUALIFIED` to SEED-006; `BACK-05` is
+`DEFERRED`/`NOT_QUALIFIED` to SEED-007; publication is
+`DEFERRED`/`NOT_PUBLISHED` to SEED-007. Missing, stale, dirty, malformed,
+duplicate, wrong-class, wrong-source, skipped, or contradictory local evidence
+fails closed. The retained live collector/aggregator and publication controller
+remain the stricter SEED-007 path; mocked/local/preflight evidence is never an
+input to it.
+
 ## Evidence Classes and Non-Substitution Rules
 
 | Evidence class | Producer | Blocking scope | Required proof | Never substitutes for |

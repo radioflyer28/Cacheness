@@ -466,6 +466,47 @@ def test_aggregate_records_exact_deferred_performance_nonclaim(tmp_path: Path) -
     ]
 
 
+def test_local_readiness_rejects_remote_or_publication_substitution() -> None:
+    """A local record has no route to qualify live services or publication."""
+    release = _load_release()
+    record = release.build_local_readiness(
+        revision="a" * 40,
+        source_digest="b" * 64,
+        observed_host={"machine": "arm64", "os": "Darwin", "python": "3.13.0"},
+        evidence={
+            evidence_class: {
+                "result": "passed",
+                "revision": "a" * 40,
+                "source_digest": "b" * 64,
+                "status": "PASS",
+            }
+            for evidence_class in ("deterministic", "coverage", "structural")
+        }
+        | {
+            "base_wheel": {
+                "probes": list(release.BASE_WHEEL_PROBES),
+                "revision": "a" * 40,
+                "source_digest": "b" * 64,
+                "status": "PASS",
+                "wheel_sha256": "c" * 64,
+            }
+        },
+    )
+
+    release.validate_local_readiness(record, revision="a" * 40, source_digest="b" * 64)
+    assert record["deferred_requirements"] == [
+        release.DEFERRED_PERFORMANCE_RECORD,
+        release.DEFERRED_LIVE_RECORD,
+    ]
+    assert record["publication"] == release.DEFERRED_PUBLICATION_RECORD
+
+    record["evidence"]["live_services"] = {"status": "QUALIFIED"}
+    with pytest.raises(release.ReleaseEvidenceError, match="unexpected shape"):
+        release.validate_local_readiness(
+            record, revision="a" * 40, source_digest="b" * 64
+        )
+
+
 def test_deferred_performance_artifacts_and_macos_diagnostics_are_rejected(
     tmp_path: Path,
 ) -> None:

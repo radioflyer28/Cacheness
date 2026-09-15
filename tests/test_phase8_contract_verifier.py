@@ -14,14 +14,23 @@ import pytest
 REPOSITORY_ROOT = Path(__file__).parents[1]
 VERIFIER_PATH = REPOSITORY_ROOT / "tools" / "verify_phase8_contracts.py"
 
-EXPECTED_PLAN_PATHS = tuple(
+EXPECTED_CANONICAL_PLAN_PATHS = tuple(
     ".planning/phases/08-production-gates-and-performance-stabilization/"
     f"08-{number:02d}-PLAN.md"
-    for number in range(1, 16)
+    for number in (*range(1, 11), 13, 14, 15, 16)
 )
-EXPECTED_DECISIONS = {f"D-{number:02d}" for number in range(1, 24)}
+EXPECTED_SUPERSEDED_PLAN_PATHS = {
+    ".planning/phases/08-production-gates-and-performance-stabilization/08-11-PLAN.md": {
+        "status": "superseded",
+        "superseded_by": "SEED-007",
+    },
+    ".planning/phases/08-production-gates-and-performance-stabilization/08-12-PLAN.md": {
+        "status": "superseded",
+        "superseded_by": "SEED-007",
+    },
+}
+EXPECTED_DECISIONS = {f"D-{number:02d}" for number in range(1, 25)}
 EXPECTED_REQUIREMENTS = {
-    "BACK-05",
     "QUAL-01",
     "QUAL-02",
     "QUAL-03",
@@ -31,7 +40,11 @@ EXPECTED_REQUIREMENTS = {
 }
 
 DEFERRED_PERFORMANCE_REQUIREMENT = "QUAL-06"
+DEFERRED_LIVE_REQUIREMENT = "BACK-05"
 SEED006_PATH = ".planning/seeds/SEED-006-qualify-controlled-linux-performance.md"
+SEED007_PATH = (
+    ".planning/seeds/SEED-007-qualify-real-postgresql-s3-and-publish-release.md"
+)
 
 
 def _load_verifier() -> ModuleType:
@@ -57,7 +70,8 @@ def test_fixed_manifest_covers_full_phase_decision_requirement_and_threat_sets()
     """Planning files cannot redefine the verifier's reviewed evidence surface."""
     verifier = _load_verifier()
 
-    assert verifier.PHASE8_PLAN_PATHS == EXPECTED_PLAN_PATHS
+    assert verifier.PHASE8_PLAN_PATHS == EXPECTED_CANONICAL_PLAN_PATHS
+    assert verifier.SUPERSEDED_PLAN_PATHS == EXPECTED_SUPERSEDED_PLAN_PATHS
     assert set(verifier.DECISION_NODES) == EXPECTED_DECISIONS
     assert set(verifier.PHASE8_REQUIREMENTS) == EXPECTED_REQUIREMENTS
     assert set(verifier.THREAT_NODES) == set(verifier.PHASE8_THREATS)
@@ -79,7 +93,7 @@ def test_fixed_manifest_binds_live_configuration_preflight_gap() -> None:
     """Plan 15 keeps its protected-live prerequisite boundary executable."""
     verifier = _load_verifier()
 
-    assert verifier.PHASE8_PLAN_PATHS == EXPECTED_PLAN_PATHS
+    assert verifier.PHASE8_PLAN_PATHS == EXPECTED_CANONICAL_PLAN_PATHS
     assert {
         threat: verifier.THREAT_NODES[threat]
         for threat in (
@@ -278,14 +292,78 @@ def test_fixed_manifest_covers_deferred_performance_decision() -> None:
     assert verifier.PHASE8_REQUIREMENTS == tuple(
         requirement
         for requirement in verifier._REVIEWED_REQUIREMENTS
-        if requirement != DEFERRED_PERFORMANCE_REQUIREMENT
+        if requirement not in verifier.DEFERRED_REQUIREMENTS
     )
-    assert verifier.DEFERRED_REQUIREMENTS == (DEFERRED_PERFORMANCE_REQUIREMENT,)
+    assert verifier.DEFERRED_REQUIREMENTS == (
+        DEFERRED_PERFORMANCE_REQUIREMENT,
+        DEFERRED_LIVE_REQUIREMENT,
+    )
     assert "D-23" in verifier.DECISION_NODES
     assert {f"T-08-14-{number:02d}" for number in range(1, 5)}.issubset(
         verifier.THREAT_NODES
     )
     assert verifier.validate_fixed_manifest(REPOSITORY_ROOT) == ()
+
+
+def test_local_readiness_inventory_binds_d24_and_superseded_release_plans() -> None:
+    """D-24 narrows the current claim without erasing the future release path."""
+    verifier = _load_verifier()
+
+    assert verifier.PHASE8_PLAN_PATHS == EXPECTED_CANONICAL_PLAN_PATHS
+    assert verifier.SUPERSEDED_PLAN_PATHS == EXPECTED_SUPERSEDED_PLAN_PATHS
+    assert verifier.PHASE8_REQUIREMENTS == tuple(sorted(EXPECTED_REQUIREMENTS))
+    assert verifier.DEFERRED_REQUIREMENTS == ("QUAL-06", "BACK-05")
+    assert "D-24" in verifier.DECISION_NODES
+    assert {f"T-08-16-{number:02d}" for number in range(1, 6)}.issubset(
+        verifier.THREAT_NODES
+    )
+    assert verifier.validate_fixed_manifest(REPOSITORY_ROOT) == ()
+
+
+def test_local_ready_mode_accepts_only_the_bounded_local_record(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The local command delegates no remote/release authority to its record."""
+    verifier = _load_verifier()
+    output = tmp_path / "local-readiness.json"
+
+    def write_valid_local_record(path: Path) -> int:
+        release = verifier._load_release_module()
+        release.write_local_readiness(
+            path,
+            release.build_local_readiness(
+                revision="a" * 40,
+                source_digest="b" * 64,
+                observed_host={"machine": "arm64", "os": "Darwin", "python": "3.13.0"},
+                evidence={
+                    evidence_class: {
+                        "result": "passed",
+                        "revision": "a" * 40,
+                        "source_digest": "b" * 64,
+                        "status": "PASS",
+                    }
+                    for evidence_class in ("deterministic", "coverage", "structural")
+                }
+                | {
+                    "base_wheel": {
+                        "probes": list(release.BASE_WHEEL_PROBES),
+                        "revision": "a" * 40,
+                        "source_digest": "b" * 64,
+                        "status": "PASS",
+                        "wheel_sha256": "c" * 64,
+                    }
+                },
+            ),
+        )
+        return 0
+
+    monkeypatch.setattr(verifier, "_run_local_readiness", write_valid_local_record)
+
+    assert verifier.main(["--local-ready", "--output", str(output)]) == 0
+    result = json.loads(output.read_text(encoding="utf-8"))
+    assert result["status"] == "LOCAL_READY"
+    assert "live_services" not in result["evidence"]
+    assert result["publication"]["status"] == "NOT_PUBLISHED"
 
 
 def test_deferred_performance_status_is_nonblocking_but_not_qualified() -> None:

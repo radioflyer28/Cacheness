@@ -102,6 +102,39 @@ DEFERRED_PERFORMANCE_RECORD = {
     "seed": ".planning/seeds/SEED-006-qualify-controlled-linux-performance.md",
     "status": "DEFERRED",
 }
+DEFERRED_LIVE_RECORD = {
+    "decision": "D-24",
+    "qualification": "NOT_QUALIFIED",
+    "requirement": "BACK-05",
+    "seed": ".planning/seeds/SEED-007-qualify-real-postgresql-s3-and-publish-release.md",
+    "status": "DEFERRED",
+}
+DEFERRED_PUBLICATION_RECORD = {
+    "decision": "D-24",
+    "seed": ".planning/seeds/SEED-007-qualify-real-postgresql-s3-and-publish-release.md",
+    "status": "NOT_PUBLISHED",
+}
+LOCAL_READINESS_SCHEMA = "cacheness-phase8-local-readiness-v1"
+LOCAL_READINESS_EVIDENCE_CLASSES = (
+    "deterministic",
+    "coverage",
+    "structural",
+    "base_wheel",
+)
+BASE_WHEEL_PROBES = (
+    "public_exports",
+    "blobstore_generic",
+    "blobstore_numpy_pickle",
+    "blobstore_numpy_npz",
+    "unified_cache_generic",
+)
+LOCAL_READINESS_NONCLAIMS = (
+    "controlled_performance",
+    "linux_matrix",
+    "windows",
+    "live_services",
+    "immutable_publication",
+)
 COLLECTION_SCHEMA = "cacheness-phase8-collection-v2"
 COLLECTION_MANIFEST_NAME = "phase8-collection.json"
 RELEASE_MANIFEST_SCHEMA = "cacheness-phase8-release-qualification-v2"
@@ -538,6 +571,157 @@ def _atomic_write_json(path: Path, value: Mapping[str, object]) -> None:
     finally:
         if staged_path.exists():
             staged_path.unlink()
+
+
+def _validate_local_text(value: object, *, label: str) -> str:
+    """Accept one bounded, non-secret fact for the local-only record."""
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > 128
+        or any(ord(character) < 32 for character in value)
+        or _FORBIDDEN_MANIFEST_TEXT.search(value)
+        or "/" in value
+        or "\\" in value
+    ):
+        raise ReleaseEvidenceError(f"local readiness {label} is invalid")
+    return value
+
+
+def _validate_local_identity(
+    value: object, *, label: str, revision: str, source_digest: str
+) -> None:
+    """Require each local class to bind the one reviewed source identity."""
+    if not isinstance(value, Mapping) or value.get("revision") != revision:
+        raise ReleaseEvidenceError(f"local readiness {label} revision is invalid")
+    if value.get("source_digest") != source_digest:
+        raise ReleaseEvidenceError(f"local readiness {label} source digest is invalid")
+    if value.get("status") != "PASS" or value.get("result") != "passed":
+        raise ReleaseEvidenceError(f"local readiness {label} is not passing")
+
+
+def build_local_readiness(
+    *,
+    revision: str,
+    source_digest: str,
+    observed_host: Mapping[str, object],
+    evidence: Mapping[str, Mapping[str, object]],
+) -> dict[str, object]:
+    """Build one closed local-only record without release authority fields."""
+    record: dict[str, object] = {
+        "schema": LOCAL_READINESS_SCHEMA,
+        "status": "LOCAL_READY",
+        "revision": revision,
+        "source_digest": source_digest,
+        "observed_host": dict(observed_host),
+        "evidence": {name: dict(value) for name, value in evidence.items()},
+        "deferred_requirements": [
+            dict(DEFERRED_PERFORMANCE_RECORD),
+            dict(DEFERRED_LIVE_RECORD),
+        ],
+        "publication": dict(DEFERRED_PUBLICATION_RECORD),
+        "nonclaims": list(LOCAL_READINESS_NONCLAIMS),
+    }
+    validate_local_readiness(record, revision=revision, source_digest=source_digest)
+    return record
+
+
+def validate_local_readiness(
+    record: Mapping[str, object], *, revision: str, source_digest: str
+) -> None:
+    """Fail closed on local evidence that could imply remote qualification."""
+    if not _SHA_PATTERN.fullmatch(revision) or not _DIGEST_PATTERN.fullmatch(
+        source_digest
+    ):
+        raise ReleaseEvidenceError("local readiness identity is invalid")
+    if set(record) != {
+        "schema",
+        "status",
+        "revision",
+        "source_digest",
+        "observed_host",
+        "evidence",
+        "deferred_requirements",
+        "publication",
+        "nonclaims",
+    }:
+        raise ReleaseEvidenceError("local readiness has an unexpected shape")
+    if (
+        record.get("schema") != LOCAL_READINESS_SCHEMA
+        or record.get("status") != "LOCAL_READY"
+        or record.get("revision") != revision
+        or record.get("source_digest") != source_digest
+    ):
+        raise ReleaseEvidenceError("local readiness identity is invalid")
+    observed_host = record.get("observed_host")
+    if not isinstance(observed_host, Mapping) or set(observed_host) != {
+        "machine",
+        "os",
+        "python",
+    }:
+        raise ReleaseEvidenceError("local readiness host is invalid")
+    for key, value in observed_host.items():
+        _validate_local_text(value, label=f"host {key}")
+    evidence = record.get("evidence")
+    if (
+        not isinstance(evidence, Mapping)
+        or tuple(evidence) != LOCAL_READINESS_EVIDENCE_CLASSES
+    ):
+        raise ReleaseEvidenceError("local readiness evidence has an unexpected shape")
+    for evidence_class in ("deterministic", "coverage", "structural"):
+        item = evidence.get(evidence_class)
+        if not isinstance(item, Mapping) or set(item) != {
+            "result",
+            "revision",
+            "source_digest",
+            "status",
+        }:
+            raise ReleaseEvidenceError(
+                f"local readiness {evidence_class} has an unexpected shape"
+            )
+        _validate_local_identity(
+            item,
+            label=evidence_class,
+            revision=revision,
+            source_digest=source_digest,
+        )
+    base_wheel = evidence.get("base_wheel")
+    if not isinstance(base_wheel, Mapping) or set(base_wheel) != {
+        "probes",
+        "revision",
+        "source_digest",
+        "status",
+        "wheel_sha256",
+    }:
+        raise ReleaseEvidenceError("local readiness base wheel has an unexpected shape")
+    if (
+        base_wheel.get("revision") != revision
+        or base_wheel.get("source_digest") != source_digest
+        or base_wheel.get("status") != "PASS"
+        or base_wheel.get("probes") != list(BASE_WHEEL_PROBES)
+        or not isinstance(base_wheel.get("wheel_sha256"), str)
+        or not _DIGEST_PATTERN.fullmatch(str(base_wheel["wheel_sha256"]))
+    ):
+        raise ReleaseEvidenceError("local readiness base wheel is invalid")
+    if record.get("deferred_requirements") != [
+        DEFERRED_PERFORMANCE_RECORD,
+        DEFERRED_LIVE_RECORD,
+    ]:
+        raise ReleaseEvidenceError("local readiness deferred requirements are invalid")
+    if record.get("publication") != DEFERRED_PUBLICATION_RECORD:
+        raise ReleaseEvidenceError("local readiness publication is invalid")
+    if record.get("nonclaims") != list(LOCAL_READINESS_NONCLAIMS):
+        raise ReleaseEvidenceError("local readiness nonclaims are invalid")
+
+
+def write_local_readiness(path: Path, record: Mapping[str, object]) -> None:
+    """Atomically persist one already-validated local-readiness record."""
+    revision = record.get("revision")
+    source_digest = record.get("source_digest")
+    if not isinstance(revision, str) or not isinstance(source_digest, str):
+        raise ReleaseEvidenceError("local readiness identity is invalid")
+    validate_local_readiness(record, revision=revision, source_digest=source_digest)
+    _atomic_write_json(path, record)
 
 
 def write_collection_manifest(

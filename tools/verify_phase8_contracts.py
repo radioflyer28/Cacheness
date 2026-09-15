@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import ast
 from collections.abc import Mapping, Sequence
+import importlib.util
 import json
 from pathlib import Path, PurePosixPath
 import platform
@@ -42,13 +43,23 @@ _REVIEWED_PLAN_PATHS = (
     f"{PHASE_DIRECTORY}/08-08-PLAN.md",
     f"{PHASE_DIRECTORY}/08-09-PLAN.md",
     f"{PHASE_DIRECTORY}/08-10-PLAN.md",
-    f"{PHASE_DIRECTORY}/08-11-PLAN.md",
-    f"{PHASE_DIRECTORY}/08-12-PLAN.md",
     f"{PHASE_DIRECTORY}/08-13-PLAN.md",
     f"{PHASE_DIRECTORY}/08-14-PLAN.md",
     f"{PHASE_DIRECTORY}/08-15-PLAN.md",
+    f"{PHASE_DIRECTORY}/08-16-PLAN.md",
 )
 PHASE8_PLAN_PATHS = tuple(_REVIEWED_PLAN_PATHS)
+_REVIEWED_SUPERSEDED_PLAN_PATHS = {
+    f"{PHASE_DIRECTORY}/08-11-PLAN.md": {
+        "status": "superseded",
+        "superseded_by": "SEED-007",
+    },
+    f"{PHASE_DIRECTORY}/08-12-PLAN.md": {
+        "status": "superseded",
+        "superseded_by": "SEED-007",
+    },
+}
+SUPERSEDED_PLAN_PATHS = dict(_REVIEWED_SUPERSEDED_PLAN_PATHS)
 
 _REVIEWED_REQUIREMENTS = (
     "BACK-05",
@@ -60,7 +71,7 @@ _REVIEWED_REQUIREMENTS = (
     "QUAL-06",
     "QUAL-07",
 )
-DEFERRED_REQUIREMENTS = ("QUAL-06",)
+DEFERRED_REQUIREMENTS = ("QUAL-06", "BACK-05")
 PHASE8_REQUIREMENTS = tuple(
     requirement
     for requirement in _REVIEWED_REQUIREMENTS
@@ -131,6 +142,11 @@ _REVIEWED_THREATS = (
     "T-08-13-01",
     "T-08-13-02",
     "T-08-13-03",
+)
+_REVIEWED_THREATS = tuple(
+    threat
+    for threat in _REVIEWED_THREATS
+    if not threat.startswith(("T-08-11-", "T-08-12-"))
 )
 PHASE8_THREATS = tuple(_REVIEWED_THREATS)
 
@@ -204,6 +220,9 @@ _DECISION_TESTS = {
     "D-23": (
         "tests/test_phase8_contract_verifier.py::test_fixed_manifest_covers_deferred_performance_decision",
     ),
+    "D-24": (
+        "tests/test_phase8_contract_verifier.py::test_local_readiness_inventory_binds_d24_and_superseded_release_plans",
+    ),
 }
 DECISION_NODES = dict(_DECISION_TESTS)
 
@@ -259,6 +278,21 @@ _REVIEWED_THREAT_NODES.update(
         "T-08-15-05": (
             "tests/qualification/test_phase8_evidence.py::test_preflight_cli_never_runs_or_writes_qualification_evidence",
         ),
+        "T-08-16-01": (
+            "tests/test_phase8_contract_verifier.py::test_local_ready_mode_accepts_only_the_bounded_local_record",
+        ),
+        "T-08-16-02": (
+            "tests/qualification/test_phase8_release.py::test_local_readiness_rejects_remote_or_publication_substitution",
+        ),
+        "T-08-16-03": (
+            "tests/test_phase8_contract_verifier.py::test_local_readiness_inventory_binds_d24_and_superseded_release_plans",
+        ),
+        "T-08-16-04": (
+            "tests/qualification/test_phase8_release.py::test_local_readiness_rejects_remote_or_publication_substitution",
+        ),
+        "T-08-16-05": (
+            "tests/test_phase8_contract_verifier.py::test_local_ready_mode_accepts_only_the_bounded_local_record",
+        ),
     }
 )
 _REVIEWED_THREATS = (
@@ -272,6 +306,11 @@ _REVIEWED_THREATS = (
     "T-08-15-03",
     "T-08-15-04",
     "T-08-15-05",
+    "T-08-16-01",
+    "T-08-16-02",
+    "T-08-16-03",
+    "T-08-16-04",
+    "T-08-16-05",
 )
 PHASE8_THREATS = tuple(_REVIEWED_THREATS)
 THREAT_NODES = dict(_REVIEWED_THREAT_NODES)
@@ -312,6 +351,7 @@ _REVIEWED_SOURCE_PATHS = (
     "tests/test_phase8_release_tracer.py",
 )
 SOURCE_PATHS = tuple(_REVIEWED_SOURCE_PATHS)
+LOCAL_READINESS_SOURCE_PATHS = (*SOURCE_PATHS, PHASE8_VALIDATION_PATH)
 WORKFLOW_PATHS = (
     ".github/workflows/quality.yml",
     ".github/workflows/performance.yml",
@@ -320,6 +360,9 @@ WORKFLOW_PATHS = (
 EXTERNAL_EVIDENCE_CLASSES = ("controlled_performance", "live_services")
 CONTROLLED_PERFORMANCE_SEED = (
     ".planning/seeds/SEED-006-qualify-controlled-linux-performance.md"
+)
+LIVE_SERVICE_SEED = (
+    ".planning/seeds/SEED-007-qualify-real-postgresql-s3-and-publish-release.md"
 )
 
 
@@ -458,6 +501,8 @@ def _validate_static_exports() -> list[str]:
     errors: list[str] = []
     if PHASE8_PLAN_PATHS != _REVIEWED_PLAN_PATHS:
         errors.append("plan inventory was mutated")
+    if SUPERSEDED_PLAN_PATHS != _REVIEWED_SUPERSEDED_PLAN_PATHS:
+        errors.append("superseded plan inventory was mutated")
     if PHASE8_REQUIREMENTS != tuple(
         requirement
         for requirement in _REVIEWED_REQUIREMENTS
@@ -500,6 +545,16 @@ def validate_fixed_manifest(root: Path = REPOSITORY_ROOT) -> tuple[str, ...]:
             ):
                 if threat not in text:
                     errors.append(f"plan omits threat {threat}")
+    for path, disposition in SUPERSEDED_PLAN_PATHS.items():
+        candidate = root / path
+        if not candidate.is_file() or candidate.is_symlink():
+            errors.append(f"missing superseded planning source: {path}")
+            continue
+        text = candidate.read_text(encoding="utf-8")
+        if "status: superseded" not in text:
+            errors.append(f"superseded plan is missing status: {path}")
+        if disposition["superseded_by"] not in text or "D-24" not in text:
+            errors.append(f"superseded plan is missing D-24/SEED-007: {path}")
     for requirement in (*PHASE8_REQUIREMENTS, *DEFERRED_REQUIREMENTS):
         if requirement not in (root / ".planning/REQUIREMENTS.md").read_text(
             encoding="utf-8"
@@ -521,6 +576,163 @@ def validate_fixed_manifest(root: Path = REPOSITORY_ROOT) -> tuple[str, ...]:
     return tuple(errors)
 
 
+def _load_tool_module(name: str, path: Path):
+    """Load one reviewed sibling without treating ``tools`` as a package."""
+    specification = importlib.util.spec_from_file_location(name, path)
+    if specification is None or specification.loader is None:
+        raise RuntimeError(f"reviewed tool is unavailable: {path.name}")
+    module = importlib.util.module_from_spec(specification)
+    sys.modules[name] = module
+    specification.loader.exec_module(module)
+    return module
+
+
+def _load_release_module():
+    """Load the local-record validator, never its remote command interface."""
+    return _load_tool_module(
+        "phase8_local_readiness_release",
+        REPOSITORY_ROOT / "tools" / "verify_phase8_release.py",
+    )
+
+
+def _load_packaging_module():
+    """Load only the reviewed wheel builder and base public probe."""
+    return _load_tool_module(
+        "phase8_local_readiness_packaging",
+        REPOSITORY_ROOT / "tools" / "run_phase8_packaging.py",
+    )
+
+
+def _load_evidence_module():
+    """Load the canonical evidence parser used for inherited local envelopes."""
+    return _load_tool_module(
+        "phase8_local_readiness_evidence",
+        REPOSITORY_ROOT / "tools" / "phase8_evidence.py",
+    )
+
+
+def _local_readiness_identity() -> tuple[str, str] | None:
+    """Return one clean revision/digest for all reviewed local-readiness inputs."""
+    try:
+        revision_result = subprocess.run(
+            ("git", "rev-parse", "HEAD"),
+            cwd=REPOSITORY_ROOT,
+            capture_output=True,
+            check=True,
+            text=True,
+            timeout=10,
+        )
+        clean_result = subprocess.run(
+            (
+                "git",
+                "status",
+                "--porcelain",
+                "--untracked-files=all",
+                "--",
+                *LOCAL_READINESS_SOURCE_PATHS,
+            ),
+            cwd=REPOSITORY_ROOT,
+            capture_output=True,
+            check=True,
+            text=True,
+            timeout=10,
+        )
+        evidence = _load_evidence_module()
+        source_digest = evidence.relevant_source_digest(
+            REPOSITORY_ROOT, LOCAL_READINESS_SOURCE_PATHS
+        )
+    except (OSError, RuntimeError, subprocess.SubprocessError, ValueError):
+        return None
+    revision = revision_result.stdout.strip()
+    if (
+        len(revision) != 40
+        or any(character not in "0123456789abcdef" for character in revision)
+        or clean_result.stdout.strip()
+    ):
+        return None
+    return revision, source_digest
+
+
+def _run_local_readiness(output: Path) -> int:
+    """Produce one bounded record from fixed local commands and a base wheel only."""
+    before = _local_readiness_identity()
+    if before is None:
+        return 1
+    try:
+        release = _load_release_module()
+        evidence = _load_evidence_module()
+        packaging = _load_packaging_module()
+        with tempfile.TemporaryDirectory(prefix="phase8-local-readiness-") as temporary:
+            workspace = Path(temporary)
+            core_command = (
+                "uv",
+                "run",
+                "--isolated",
+                "--all-extras",
+                "--group",
+                "dev",
+                "--frozen",
+                "python",
+                "tools/run_phase8_local_gates.py",
+                "core",
+                "--output-dir",
+                str(workspace / "core"),
+            )
+            core_result = _run(core_command)
+            if core_result.returncode != 0 or _local_readiness_identity() != before:
+                return 1
+            local_evidence: dict[str, dict[str, object]] = {}
+            for evidence_class in ("deterministic", "coverage", "structural"):
+                envelope = evidence.load_envelope(
+                    workspace / "core" / f"{evidence_class}.json"
+                )
+                if (
+                    envelope.evidence_class != evidence_class
+                    or envelope.status != "PASS"
+                    or envelope.revision != before[0]
+                    or envelope.payload.get("result") != "passed"
+                ):
+                    return 1
+                local_evidence[evidence_class] = {
+                    "result": "passed",
+                    "revision": before[0],
+                    "source_digest": before[1],
+                    "status": "PASS",
+                }
+            artifact = packaging.build_wheel(workspace / "wheel")
+            probe = packaging.run_base_probe(artifact, workspace=workspace / "base")
+            if _local_readiness_identity() != before:
+                return 1
+            local_evidence["base_wheel"] = {
+                "probes": list(probe.probes),
+                "revision": before[0],
+                "source_digest": before[1],
+                "status": "PASS",
+                "wheel_sha256": artifact.sha256,
+            }
+        record = release.build_local_readiness(
+            revision=before[0],
+            source_digest=before[1],
+            observed_host={
+                "machine": platform.machine(),
+                "os": platform.system(),
+                "python": platform.python_version(),
+            },
+            evidence=local_evidence,
+        )
+        if _local_readiness_identity() != before:
+            return 1
+        release.write_local_readiness(output, record)
+        return 0
+    except (
+        OSError,
+        RuntimeError,
+        subprocess.SubprocessError,
+        ValueError,
+    ):
+        return 1
+
+
 def render_external_statuses(statuses: Mapping[str, str]) -> str:
     """Render explicit nonclaims without choosing a substitute evidence class."""
     packaging_status = statuses.get("packaging", "NOT_RUN")
@@ -537,6 +749,12 @@ def render_external_statuses(statuses: Mapping[str, str]) -> str:
             "controlled_performance requirement: QUAL-06",
             f"controlled_performance deferred_to: {CONTROLLED_PERFORMANCE_SEED}",
             f"live_services: {live}",
+            "live_services qualification: NOT_QUALIFIED",
+            "live_services requirement: BACK-05",
+            f"live_services deferred_to: {LIVE_SERVICE_SEED}",
+            "publication: DEFERRED",
+            "publication status: NOT_PUBLISHED",
+            f"publication deferred_to: {LIVE_SERVICE_SEED}",
             f"windows: {windows}",
         )
     )
@@ -677,12 +895,20 @@ def main(arguments: Sequence[str] | None = None) -> int:
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--quick", action="store_true")
     group.add_argument("--all", action="store_true")
+    group.add_argument("--local-ready", action="store_true")
+    parser.add_argument("--output", type=Path)
     parsed = parser.parse_args(arguments)
     errors = validate_fixed_manifest()
     if errors:
         print("Phase 8 fixed contract failed:", file=sys.stderr)
         print("\n".join(f"- {error}" for error in errors), file=sys.stderr)
         return 1
+    if parsed.local_ready:
+        if parsed.output is None:
+            parser.error("--local-ready requires --output")
+        return _run_local_readiness(parsed.output)
+    if parsed.output is not None:
+        parser.error("--output is valid only with --local-ready")
     mode = "quick" if parsed.quick else "all"
     local_exit_code, statuses = _run_local(mode)
     if local_exit_code:
