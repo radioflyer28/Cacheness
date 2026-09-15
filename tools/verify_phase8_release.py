@@ -105,8 +105,16 @@ DEFERRED_PERFORMANCE_RECORD = {
 COLLECTION_SCHEMA = "cacheness-phase8-collection-v2"
 COLLECTION_MANIFEST_NAME = "phase8-collection.json"
 RELEASE_MANIFEST_SCHEMA = "cacheness-phase8-release-qualification-v2"
+PREPUBLICATION_SCHEMA = "cacheness-phase8-release-prepublication-v1"
+PUBLICATION_SCHEMA = "cacheness-phase8-release-publication-v1"
+PUBLICATION_INCIDENT_SCHEMA = "cacheness-phase8-release-incident-v1"
 _FORBIDDEN_MANIFEST_TEXT = re.compile(
     r"://|access[_-]?key|credential|password|secret|token|private[_-]?key",
+    re.IGNORECASE,
+)
+_FORBIDDEN_RELEASE_ASSET_NAME = re.compile(
+    r"controlled|performance|macos|diagnostic|failed|unavailable|scheduled|raw|"
+    r"starter|secret|credential|token",
     re.IGNORECASE,
 )
 
@@ -786,6 +794,446 @@ def validate_release_aggregate(
         raise ReleaseEvidenceError("release aggregate deferred requirement is invalid")
 
 
+def _load_json_mapping_file(path: Path, *, label: str) -> dict[str, object]:
+    """Load one bounded, regular JSON file without following a symlink."""
+    if (
+        path.is_symlink()
+        or not path.is_file()
+        or path.stat().st_size > MAX_ARTIFACT_BYTES
+    ):
+        raise ReleaseEvidenceError(f"{label} is missing or unsafe")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ReleaseEvidenceError(f"{label} is unreadable") from error
+    if not isinstance(value, Mapping):
+        raise ReleaseEvidenceError(f"{label} is not a JSON object")
+    return dict(value)
+
+
+def _file_sha256(path: Path, *, label: str) -> str:
+    """Return a bounded regular file digest for one prospective release asset."""
+    if (
+        path.is_symlink()
+        or not path.is_file()
+        or path.stat().st_size > MAX_ARTIFACT_BYTES
+    ):
+        raise ReleaseEvidenceError(f"{label} is missing or unsafe")
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError as error:
+        raise ReleaseEvidenceError(f"{label} is unreadable") from error
+
+
+def _validate_evidence_payload(
+    *,
+    path: Path,
+    evidence_class: str,
+    candidate_sha: str,
+    source_digest: str,
+) -> None:
+    """Reparse one current evidence asset before release publication."""
+    value = _load_json_mapping_file(path, label="qualification asset")
+    if (
+        value.get("revision") != candidate_sha
+        or value.get("source_digest") != source_digest
+    ):
+        raise ReleaseEvidenceError(
+            "qualification asset does not match aggregate identity"
+        )
+    if evidence_class == "live_services":
+        if (
+            value.get("schema") != "phase8-live-qualification-v1"
+            or value.get("status") != "QUALIFIED"
+            or value.get("cleanup_status") != "CLEAN"
+        ):
+            raise ReleaseEvidenceError(
+                "live qualification asset is not QUALIFIED/CLEAN"
+            )
+        return
+    if value.get("evidence_class") != evidence_class or value.get("status") != "PASS":
+        raise ReleaseEvidenceError("qualification asset is not a passing exact match")
+
+
+def _release_asset_records(
+    *,
+    aggregate_path: Path,
+    asset_directory: Path,
+    live_evidence: Path | None = None,
+) -> tuple[dict[str, object], list[dict[str, object]]]:
+    """Return the closed aggregate plus only its non-deferred local evidence files."""
+    aggregate = _load_json_mapping_file(aggregate_path, label="release aggregate")
+    candidate_sha = aggregate.get("revision")
+    if not isinstance(candidate_sha, str):
+        raise ReleaseEvidenceError("release aggregate revision is invalid")
+    validate_release_aggregate(aggregate, candidate_sha=candidate_sha)
+    source_digest = aggregate["source_digest"]
+    assert isinstance(source_digest, str)
+    evidence = aggregate["evidence"]
+    assert isinstance(evidence, Mapping)
+    records = [
+        {
+            "evidence_class": "aggregate",
+            "name": aggregate_path.name,
+            "path": str(aggregate_path),
+            "sha256": f"sha256:{_file_sha256(aggregate_path, label='release aggregate')}",
+        }
+    ]
+    for evidence_class in sorted(CURRENT_RELEASE_EVIDENCE_CLASSES):
+        reference = evidence.get(evidence_class)
+        if not isinstance(reference, Mapping):
+            raise ReleaseEvidenceError(
+                "release aggregate evidence reference is invalid"
+            )
+        recorded_digest = reference.get("artifact_sha256")
+        if not isinstance(recorded_digest, str) or not _DIGEST_PATTERN.fullmatch(
+            recorded_digest
+        ):
+            raise ReleaseEvidenceError("release aggregate evidence digest is invalid")
+        path = (
+            live_evidence
+            if evidence_class == "live_services" and live_evidence is not None
+            else asset_directory / f"{evidence_class}.json"
+        )
+        digest = _file_sha256(path, label="qualification asset")
+        if digest != recorded_digest:
+            raise ReleaseEvidenceError(
+                "qualification asset digest does not match aggregate"
+            )
+        _validate_evidence_payload(
+            path=path,
+            evidence_class=evidence_class,
+            candidate_sha=candidate_sha,
+            source_digest=source_digest,
+        )
+        records.append(
+            {
+                "evidence_class": evidence_class,
+                "name": path.name,
+                "path": str(path),
+                "sha256": f"sha256:{digest}",
+            }
+        )
+    names = [record["name"] for record in records]
+    if len(set(names)) != len(names) or any(
+        not isinstance(name, str) or _FORBIDDEN_RELEASE_ASSET_NAME.search(name)
+        for name in names
+    ):
+        raise ReleaseEvidenceError("release asset inventory is unsafe or ambiguous")
+    return aggregate, records
+
+
+def _release_view(
+    *, tag: str, execute: CommandExecutor, allow_absent: bool
+) -> dict[str, object] | None:
+    """Read one exact GitHub release state without treating a CLI failure as proof."""
+    command = (
+        "gh",
+        "release",
+        "view",
+        tag,
+        "--json",
+        "tagName,isDraft,isImmutable,assets",
+    )
+    try:
+        completed = execute(command)
+    except (OSError, subprocess.SubprocessError) as error:
+        raise ReleaseEvidenceError(
+            "GitHub release inspection could not be completed"
+        ) from error
+    if completed.returncode != 0:
+        text = f"{completed.stdout}\n{completed.stderr}".casefold()
+        if allow_absent and "not found" in text:
+            return None
+        raise ReleaseEvidenceError("GitHub release inspection failed")
+    value = _load_json(completed.stdout, label="release view")
+    if not isinstance(value, Mapping) or set(value) != {
+        "tagName",
+        "isDraft",
+        "isImmutable",
+        "assets",
+    }:
+        raise ReleaseEvidenceError("release view has an unexpected shape")
+    return dict(value)
+
+
+def _validate_remote_assets(
+    *,
+    view: Mapping[str, object],
+    tag: str,
+    records: Sequence[Mapping[str, object]],
+    draft: bool,
+    immutable: bool,
+) -> None:
+    """Compare one GitHub release view to the exact local asset allow-list."""
+    if view.get("tagName") != tag or view.get("isDraft") is not draft:
+        raise ReleaseEvidenceError("release tag or draft state does not match")
+    if immutable and view.get("isImmutable") is not True:
+        raise ReleaseEvidenceError("release is not immutable")
+    assets = view.get("assets")
+    if not isinstance(assets, list):
+        raise ReleaseEvidenceError("release assets are invalid")
+    expected = {record["name"]: record for record in records}
+    observed: dict[str, Mapping[str, object]] = {}
+    for asset in assets:
+        if not isinstance(asset, Mapping) or set(asset) != {"name", "state", "digest"}:
+            raise ReleaseEvidenceError("release asset has an unexpected shape")
+        name = asset.get("name")
+        if not isinstance(name, str) or name in observed:
+            raise ReleaseEvidenceError("release asset name is invalid")
+        observed[name] = asset
+    if set(observed) != set(expected):
+        raise ReleaseEvidenceError(
+            "release asset inventory does not match qualification assets"
+        )
+    for name, record in expected.items():
+        asset = observed[name]
+        if asset.get("state") != "uploaded" or asset.get("digest") != record["sha256"]:
+            raise ReleaseEvidenceError(
+                "release asset state or SHA-256 digest does not match"
+            )
+
+
+def prepublication_report_digest(report: Mapping[str, object]) -> str:
+    """Hash a report's approval surface while excluding its derived digest field."""
+    unsigned = dict(report)
+    unsigned.pop("report_sha256", None)
+    return hashlib.sha256(_canonical_json(unsigned).encode("utf-8")).hexdigest()
+
+
+def publication_preflight(
+    *,
+    tag: str,
+    aggregate_path: Path,
+    asset_directory: Path,
+    live_evidence: Path | None = None,
+    execute: CommandExecutor | None = None,
+) -> dict[str, object]:
+    """Verify draft publication prerequisites without creating or modifying a release."""
+    if not tag or any(character.isspace() for character in tag):
+        raise ReleaseEvidenceError("release tag is invalid")
+    if execute is None:
+        execute = _run
+    aggregate, records = _release_asset_records(
+        aggregate_path=aggregate_path,
+        asset_directory=asset_directory,
+        live_evidence=live_evidence,
+    )
+    candidate_sha = aggregate["revision"]
+    assert isinstance(candidate_sha, str)
+    _require_success(("gh", "auth", "status"), execute)
+    target = _require_success(
+        ("git", "rev-parse", "--verify", f"{tag}^{{commit}}"), execute
+    ).stdout.strip()
+    if target != candidate_sha:
+        raise ReleaseEvidenceError("release tag does not resolve to aggregate revision")
+    if _release_view(tag=tag, execute=execute, allow_absent=True) is not None:
+        raise ReleaseEvidenceError("release tag already has a GitHub release")
+    return {
+        "tag": tag,
+        "revision": candidate_sha,
+        "aggregate_sha256": records[0]["sha256"],
+        "assets": [dict(record) for record in records],
+        "deferred_requirements": [dict(DEFERRED_PERFORMANCE_RECORD)],
+    }
+
+
+def prepare_draft(
+    *,
+    tag: str,
+    aggregate_path: Path,
+    asset_directory: Path,
+    output: Path,
+    live_evidence: Path | None = None,
+    execute: CommandExecutor | None = None,
+) -> dict[str, object]:
+    """Create one exact draft and freeze a verified prepublication report."""
+    if output.exists() or output.is_symlink():
+        raise ReleaseEvidenceError("prepublication output must not already exist")
+    if execute is None:
+        execute = _run
+    preflight = publication_preflight(
+        tag=tag,
+        aggregate_path=aggregate_path,
+        asset_directory=asset_directory,
+        live_evidence=live_evidence,
+        execute=execute,
+    )
+    records = [dict(record) for record in preflight["assets"]]
+    paths = [Path(str(record["path"])) for record in records]
+    _require_success(
+        (
+            "gh",
+            "release",
+            "create",
+            tag,
+            "--target",
+            str(preflight["revision"]),
+            "--draft",
+            "--verify-tag",
+            "--",
+            *(str(path) for path in paths),
+        ),
+        execute,
+    )
+    view = _release_view(tag=tag, execute=execute, allow_absent=False)
+    assert view is not None
+    _validate_remote_assets(
+        view=view,
+        tag=tag,
+        records=records,
+        draft=True,
+        immutable=False,
+    )
+    reported_records = [{**record, "state": "uploaded"} for record in records]
+    report: dict[str, object] = {
+        "schema": PREPUBLICATION_SCHEMA,
+        "tag": tag,
+        "revision": preflight["revision"],
+        "aggregate_sha256": preflight["aggregate_sha256"],
+        "assets": reported_records,
+        "deferred_requirements": [dict(DEFERRED_PERFORMANCE_RECORD)],
+    }
+    report["report_sha256"] = prepublication_report_digest(report)
+    _atomic_write_json(output, report)
+    return report
+
+
+def _load_prepublication_report(path: Path, *, tag: str) -> dict[str, object]:
+    """Load the exact digest-bound report that an operator approved."""
+    report = _load_json_mapping_file(path, label="prepublication report")
+    if set(report) != {
+        "schema",
+        "tag",
+        "revision",
+        "aggregate_sha256",
+        "assets",
+        "deferred_requirements",
+        "report_sha256",
+    }:
+        raise ReleaseEvidenceError("prepublication report has an unexpected shape")
+    if (
+        report.get("schema") != PREPUBLICATION_SCHEMA
+        or report.get("tag") != tag
+        or not isinstance(report.get("revision"), str)
+        or not _SHA_PATTERN.fullmatch(report["revision"])
+        or report.get("deferred_requirements") != [DEFERRED_PERFORMANCE_RECORD]
+        or not isinstance(report.get("report_sha256"), str)
+        or not _DIGEST_PATTERN.fullmatch(report["report_sha256"])
+        or report["report_sha256"] != prepublication_report_digest(report)
+    ):
+        raise ReleaseEvidenceError("prepublication report is invalid or altered")
+    assets = report.get("assets")
+    if (
+        not isinstance(assets, list)
+        or len(assets) != len(CURRENT_RELEASE_EVIDENCE_CLASSES) + 1
+    ):
+        raise ReleaseEvidenceError("prepublication report asset inventory is invalid")
+    for record in assets:
+        if not isinstance(record, Mapping) or set(record) != {
+            "evidence_class",
+            "name",
+            "path",
+            "sha256",
+            "state",
+        }:
+            raise ReleaseEvidenceError("prepublication report asset record is invalid")
+        if record.get("state") != "uploaded":
+            raise ReleaseEvidenceError("prepublication report asset is not uploaded")
+    return report
+
+
+def _write_publication_incident(
+    *, output: Path, tag: str, revision: str, error: ReleaseEvidenceError
+) -> None:
+    """Record a post-publication mismatch without changing remote state or evidence."""
+    if output.exists() or output.is_symlink():
+        return
+    _atomic_write_json(
+        output,
+        {
+            "schema": PUBLICATION_INCIDENT_SCHEMA,
+            "status": "NOT_QUALIFIED",
+            "tag": tag,
+            "revision": revision,
+            "reason": str(error),
+            "deferred_requirements": [dict(DEFERRED_PERFORMANCE_RECORD)],
+        },
+    )
+
+
+def publish_and_verify(
+    *,
+    tag: str,
+    prepublication: Path,
+    approved_report_sha256: str,
+    output: Path,
+    execute: CommandExecutor | None = None,
+) -> dict[str, object]:
+    """Publish only an approved unchanged draft, then verify remote immutable state."""
+    if output.exists() or output.is_symlink():
+        raise ReleaseEvidenceError("publication output must not already exist")
+    report = _load_prepublication_report(prepublication, tag=tag)
+    revision = report["revision"]
+    assert isinstance(revision, str)
+    if approved_report_sha256 != report["report_sha256"]:
+        raise ReleaseEvidenceError(
+            "approved prepublication digest does not match report"
+        )
+    if execute is None:
+        execute = _run
+    records = [dict(record) for record in report["assets"]]
+    try:
+        for record in records:
+            path = Path(str(record["path"]))
+            if (
+                _file_sha256(path, label="prepublication asset")
+                != str(record["sha256"])[7:]
+            ):
+                raise ReleaseEvidenceError(
+                    "prepublication asset changed after approval"
+                )
+        target = _require_success(
+            ("git", "rev-parse", "--verify", f"{tag}^{{commit}}"), execute
+        ).stdout.strip()
+        if target != revision:
+            raise ReleaseEvidenceError(
+                "release tag does not resolve to approved revision"
+            )
+        view = _release_view(tag=tag, execute=execute, allow_absent=False)
+        assert view is not None
+        _validate_remote_assets(
+            view=view,
+            tag=tag,
+            records=records,
+            draft=True,
+            immutable=False,
+        )
+        _require_success(("gh", "release", "edit", tag, "--draft=false"), execute)
+        final = verify_published_release(
+            candidate_sha=revision,
+            tag=tag,
+            assets=[Path(str(record["path"])) for record in records],
+            execute=execute,
+        )
+    except ReleaseEvidenceError as error:
+        _write_publication_incident(
+            output=output, tag=tag, revision=revision, error=error
+        )
+        raise
+    result: dict[str, object] = {
+        "schema": PUBLICATION_SCHEMA,
+        "status": "QUALIFIED",
+        "tag": tag,
+        "revision": revision,
+        "immutable": final["immutable"],
+        "assets": records,
+        "deferred_requirements": [dict(DEFERRED_PERFORMANCE_RECORD)],
+    }
+    _atomic_write_json(output, result)
+    return result
+
+
 def verify_published_release(
     *,
     candidate_sha: str,
@@ -910,13 +1358,21 @@ def _require_matching_live_input(
 
 
 def main(arguments: Sequence[str] | None = None) -> int:
-    """Run bounded collection, aggregation, or read-only publication inspection."""
+    """Run bounded exact-SHA collection and immutable publication verification."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "command",
-        choices=("preflight-collection", "collect", "aggregate", "verify-published"),
+        choices=(
+            "preflight-collection",
+            "collect",
+            "aggregate",
+            "publication-preflight",
+            "prepare-draft",
+            "publish-and-verify",
+            "verify-published",
+        ),
     )
-    parser.add_argument("--candidate-sha", required=True)
+    parser.add_argument("--candidate-sha")
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--evidence-dir", type=Path)
     parser.add_argument("--live-output", type=Path)
@@ -924,11 +1380,20 @@ def main(arguments: Sequence[str] | None = None) -> int:
     parser.add_argument("--output", type=Path)
     parser.add_argument("--tag")
     parser.add_argument("--asset", type=Path, action="append", default=[])
+    parser.add_argument("--aggregate", type=Path)
+    parser.add_argument("--asset-dir", type=Path)
+    parser.add_argument("--prepublication", type=Path)
+    parser.add_argument("--approved-report-sha256")
     parsed = parser.parse_args(arguments)
     try:
         if parsed.command == "preflight-collection":
             if (
-                any(
+                parsed.candidate_sha is None
+                or parsed.aggregate is not None
+                or parsed.asset_dir is not None
+                or parsed.prepublication is not None
+                or parsed.approved_report_sha256 is not None
+                or any(
                     value is not None
                     for value in (
                         parsed.output_dir,
@@ -947,7 +1412,8 @@ def main(arguments: Sequence[str] | None = None) -> int:
             return 0
         if parsed.command == "collect":
             if (
-                parsed.output_dir is None
+                parsed.candidate_sha is None
+                or parsed.output_dir is None
                 or any(
                     value is not None
                     for value in (
@@ -976,7 +1442,8 @@ def main(arguments: Sequence[str] | None = None) -> int:
             return 0
         if parsed.command == "aggregate":
             if (
-                parsed.evidence_dir is None
+                parsed.candidate_sha is None
+                or parsed.evidence_dir is None
                 or parsed.output is None
                 or parsed.output_dir is not None
             ):
@@ -994,8 +1461,73 @@ def main(arguments: Sequence[str] | None = None) -> int:
             )
             print("aggregated exact-SHA release evidence")
             return 0
+        if parsed.command == "publication-preflight":
+            if (
+                parsed.tag is None
+                or parsed.aggregate is None
+                or parsed.candidate_sha is not None
+                or parsed.output is not None
+                or parsed.prepublication is not None
+                or parsed.approved_report_sha256 is not None
+                or parsed.asset
+            ):
+                parser.error("publication-preflight requires --tag and --aggregate")
+            publication_preflight(
+                tag=parsed.tag,
+                aggregate_path=parsed.aggregate,
+                asset_directory=parsed.asset_dir
+                or parsed.aggregate.parent / "evidence",
+                live_evidence=parsed.live_evidence,
+            )
+            print("publication preflight passed without release mutation")
+            return 0
+        if parsed.command == "prepare-draft":
+            if (
+                parsed.tag is None
+                or parsed.aggregate is None
+                or parsed.output is None
+                or parsed.candidate_sha is not None
+                or parsed.prepublication is not None
+                or parsed.approved_report_sha256 is not None
+                or parsed.asset
+            ):
+                parser.error("prepare-draft requires --tag, --aggregate, and --output")
+            prepare_draft(
+                tag=parsed.tag,
+                aggregate_path=parsed.aggregate,
+                asset_directory=parsed.asset_dir
+                or parsed.aggregate.parent / "evidence",
+                live_evidence=parsed.live_evidence,
+                output=parsed.output,
+            )
+            print("exact draft release prepared and verified")
+            return 0
+        if parsed.command == "publish-and-verify":
+            if (
+                parsed.tag is None
+                or parsed.prepublication is None
+                or parsed.approved_report_sha256 is None
+                or parsed.output is None
+                or parsed.candidate_sha is not None
+                or parsed.aggregate is not None
+                or parsed.asset_dir is not None
+                or parsed.asset
+            ):
+                parser.error(
+                    "publish-and-verify requires --tag, --prepublication, "
+                    "--approved-report-sha256, and --output"
+                )
+            publish_and_verify(
+                tag=parsed.tag,
+                prepublication=parsed.prepublication,
+                approved_report_sha256=parsed.approved_report_sha256,
+                output=parsed.output,
+            )
+            print("published immutable release verified")
+            return 0
         if (
-            parsed.tag is None
+            parsed.candidate_sha is None
+            or parsed.tag is None
             or not parsed.asset
             or parsed.output_dir is not None
             or parsed.evidence_dir is not None

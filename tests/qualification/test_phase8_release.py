@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import json
 from pathlib import Path
 import subprocess
@@ -629,3 +630,255 @@ def test_publication_verifier_rejects_draft_extra_and_digest_mismatch(
                 assets=[api_asset, {**api_asset, "name": "diagnostic.json"}],
             ),
         )
+
+
+def _publication_inputs(tmp_path: Path):
+    """Create one complete local non-deferred aggregate and its exact assets."""
+    release = _load_release()
+    candidate = "a" * 40
+    asset_directory = tmp_path / "evidence"
+    asset_directory.mkdir()
+    evidence: dict[str, dict[str, object]] = {}
+    for evidence_class in sorted(release.CURRENT_RELEASE_EVIDENCE_CLASSES):
+        path = asset_directory / f"{evidence_class}.json"
+        raw = _envelope_bytes(evidence_class, candidate)
+        path.write_bytes(raw)
+        evidence[evidence_class] = {
+            "workflow": "quality.yml",
+            "run_id": 1001,
+            "artifact_name": f"phase8-{evidence_class}-envelope",
+            "artifact_sha256": hashlib.sha256(raw).hexdigest(),
+        }
+    aggregate = {
+        "schema": release.RELEASE_MANIFEST_SCHEMA,
+        "revision": candidate,
+        "source_digest": "c" * 64,
+        "evidence": evidence,
+        "deferred_requirements": [dict(release.DEFERRED_PERFORMANCE_RECORD)],
+    }
+    aggregate_path = tmp_path / "release_qualification.json"
+    aggregate_path.write_text(json.dumps(aggregate), encoding="utf-8")
+    return release, candidate, aggregate_path, asset_directory
+
+
+class FakePublicationGh:
+    """Mutable release seam with exact uploaded-state and digest reporting."""
+
+    def __init__(
+        self,
+        *,
+        candidate: str,
+        mismatch_after_publish: bool = False,
+        immutable_after_publish: bool = True,
+    ) -> None:
+        self.candidate = candidate
+        self.mismatch_after_publish = mismatch_after_publish
+        self.immutable_after_publish = immutable_after_publish
+        self.commands: list[tuple[str, ...]] = []
+        self.assets: list[dict[str, object]] = []
+        self.created = False
+        self.published = False
+
+    def __call__(self, command: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
+        self.commands.append(command)
+        if command[:3] == ("git", "rev-parse", "--verify"):
+            return subprocess.CompletedProcess(command, 0, self.candidate + "\n", "")
+        if command[:3] == ("gh", "auth", "status"):
+            return subprocess.CompletedProcess(command, 0, "authenticated\n", "")
+        if command[:3] == ("gh", "release", "view"):
+            if not self.created:
+                return subprocess.CompletedProcess(command, 1, "", "release not found")
+            assets = list(self.assets)
+            if self.published and self.mismatch_after_publish:
+                assets.append(
+                    {
+                        "name": "macos-performance-diagnostic.json",
+                        "state": "uploaded",
+                        "digest": "sha256:" + "d" * 64,
+                    }
+                )
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                json.dumps(
+                    {
+                        "tagName": command[3],
+                        "isDraft": not self.published,
+                        "isImmutable": self.published and self.immutable_after_publish,
+                        "assets": assets,
+                    }
+                ),
+                "",
+            )
+        if command[:3] == ("gh", "release", "create"):
+            self.created = True
+            local_assets = [Path(value) for value in command[command.index("--") + 1 :]]
+            self.assets = [
+                {
+                    "name": path.name,
+                    "state": "uploaded",
+                    "digest": "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest(),
+                }
+                for path in local_assets
+            ]
+            return subprocess.CompletedProcess(command, 0, "", "")
+        if command[:3] == ("gh", "release", "edit"):
+            self.published = True
+            return subprocess.CompletedProcess(command, 0, "", "")
+        if command[:3] in {
+            ("gh", "release", "verify"),
+            ("gh", "release", "verify-asset"),
+        }:
+            return subprocess.CompletedProcess(command, 0, "", "")
+        raise AssertionError(f"unexpected command: {command!r}")
+
+
+def test_publication_preflight_fails_before_mutation(tmp_path: Path) -> None:
+    """A bad deferral, evidence, tag, or permission stops before draft creation."""
+    release, candidate, aggregate, asset_directory = _publication_inputs(tmp_path)
+    fake = FakePublicationGh(candidate=candidate)
+
+    aggregate_value = json.loads(aggregate.read_text(encoding="utf-8"))
+    aggregate_value["deferred_requirements"][0]["status"] = "QUALIFIED"
+    aggregate.write_text(json.dumps(aggregate_value), encoding="utf-8")
+
+    with pytest.raises(release.ReleaseEvidenceError, match="deferred requirement"):
+        release.publication_preflight(
+            tag="v1.0.0",
+            aggregate_path=aggregate,
+            asset_directory=asset_directory,
+            execute=fake,
+        )
+
+    assert not fake.created
+    assert not any(
+        command[:3] == ("gh", "release", "create") for command in fake.commands
+    )
+
+
+def test_prepare_draft_uploads_exact_non_deferred_asset_set(tmp_path: Path) -> None:
+    """Draft upload includes the aggregate and exact current assets, never diagnostics."""
+    release, candidate, aggregate, asset_directory = _publication_inputs(tmp_path)
+    fake = FakePublicationGh(candidate=candidate)
+
+    report = release.prepare_draft(
+        tag="v1.0.0",
+        aggregate_path=aggregate,
+        asset_directory=asset_directory,
+        output=tmp_path / "prepublication.json",
+        execute=fake,
+    )
+
+    assert fake.created and not fake.published
+    assert report["revision"] == candidate
+    assert {item["name"] for item in report["assets"]} == {
+        aggregate.name,
+        *(f"{item}.json" for item in release.CURRENT_RELEASE_EVIDENCE_CLASSES),
+    }
+    assert all("performance" not in item["name"] for item in report["assets"])
+
+
+def test_prepare_draft_verifies_uploaded_states_digests_and_content(
+    tmp_path: Path,
+) -> None:
+    """A prepublication report follows only verified uploaded API content."""
+    release, candidate, aggregate, asset_directory = _publication_inputs(tmp_path)
+    fake = FakePublicationGh(candidate=candidate)
+
+    report = release.prepare_draft(
+        tag="v1.0.0",
+        aggregate_path=aggregate,
+        asset_directory=asset_directory,
+        output=tmp_path / "prepublication.json",
+        execute=fake,
+    )
+
+    assert report["report_sha256"] == release.prepublication_report_digest(report)
+    assert all(item["state"] == "uploaded" for item in report["assets"])
+    assert all(item["sha256"].startswith("sha256:") for item in report["assets"])
+
+
+def test_publish_requires_exact_approved_prepublication_digest(tmp_path: Path) -> None:
+    """A stale or altered report cannot authorize the one-way draft transition."""
+    release, candidate, aggregate, asset_directory = _publication_inputs(tmp_path)
+    fake = FakePublicationGh(candidate=candidate)
+    prepublication = tmp_path / "prepublication.json"
+    report = release.prepare_draft(
+        tag="v1.0.0",
+        aggregate_path=aggregate,
+        asset_directory=asset_directory,
+        output=prepublication,
+        execute=fake,
+    )
+
+    with pytest.raises(release.ReleaseEvidenceError, match="approved prepublication"):
+        release.publish_and_verify(
+            tag="v1.0.0",
+            prepublication=prepublication,
+            approved_report_sha256="0" * 64,
+            output=tmp_path / "publication.json",
+            execute=fake,
+        )
+    assert not fake.published
+
+    result = release.publish_and_verify(
+        tag="v1.0.0",
+        prepublication=prepublication,
+        approved_report_sha256=report["report_sha256"],
+        output=tmp_path / "publication.json",
+        execute=fake,
+    )
+    assert result["revision"] == candidate
+
+
+def test_publish_and_verify_requires_immutable_exact_remote_state(
+    tmp_path: Path,
+) -> None:
+    """A published mutable release is not equivalent to immutable qualification."""
+    release, candidate, aggregate, asset_directory = _publication_inputs(tmp_path)
+    fake = FakePublicationGh(candidate=candidate, immutable_after_publish=False)
+    prepublication = tmp_path / "prepublication.json"
+    report = release.prepare_draft(
+        tag="v1.0.0",
+        aggregate_path=aggregate,
+        asset_directory=asset_directory,
+        output=prepublication,
+        execute=fake,
+    )
+
+    with pytest.raises(release.ReleaseEvidenceError, match="immutable"):
+        release.publish_and_verify(
+            tag="v1.0.0",
+            prepublication=prepublication,
+            approved_report_sha256=report["report_sha256"],
+            output=tmp_path / "publication.json",
+            execute=fake,
+        )
+
+
+def test_postpublication_mismatch_records_unqualified_incident(tmp_path: Path) -> None:
+    """A remote mismatch records a nonrepairing incident instead of a false pass."""
+    release, candidate, aggregate, asset_directory = _publication_inputs(tmp_path)
+    fake = FakePublicationGh(candidate=candidate, mismatch_after_publish=True)
+    prepublication = tmp_path / "prepublication.json"
+    output = tmp_path / "publication.json"
+    report = release.prepare_draft(
+        tag="v1.0.0",
+        aggregate_path=aggregate,
+        asset_directory=asset_directory,
+        output=prepublication,
+        execute=fake,
+    )
+
+    with pytest.raises(release.ReleaseEvidenceError, match="asset inventory"):
+        release.publish_and_verify(
+            tag="v1.0.0",
+            prepublication=prepublication,
+            approved_report_sha256=report["report_sha256"],
+            output=output,
+            execute=fake,
+        )
+
+    incident = json.loads(output.read_text(encoding="utf-8"))
+    assert incident["status"] == "NOT_QUALIFIED"
+    assert incident["revision"] == candidate
