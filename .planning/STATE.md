@@ -33,6 +33,9 @@ Plan: 19 of 19 (08-11 and 08-12 superseded; 08-19 precedes 08-16)
 Status: Ready to execute 08-19 coverage-ratchet recovery, then resume 08-16 local-readiness closure
 Last activity: 2026-09-15 — converted the post-08-18 measured coverage deficit into deterministic SQLite validation/error tests with no lifecycle change
 
+Current execution chain: **08-18 complete → 08-19 pending → 08-16 pending final
+local-readiness closure**. No older Phase 8 ordering statement overrides this chain.
+
 Phase 07.1 closed with 11/11 plans summarized and an independent 46/46
 must-have verification pass. Built-in filesystem, memory, and S3 payload
 mechanics now use one guarded `ObstoreGenerationIO`; `BlobStore` still owns the
@@ -543,9 +546,9 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - Phase 8 edited: edited fields: depends_on
 - Phase 8 replanned: D-23 removes controlled-Linux performance from the current blocking aggregate, adds Plan 08-14, and preserves SEED-006 as the future qualification path.
 - Phase 8 gap plan 08-15 adds the missing configuration-only `tools/run_phase8_qualification.py --preflight` contract before Plan 08-11; it cannot contact services, mutate resources, write evidence, or qualify BACK-05.
-- Phase 8 local-readiness replan supersedes 08-11 and 08-12, preserves their tooling and evidence standard under SEED-007, and adds 08-16 as the only remaining canonical plan.
-- Phase 8 gap Plan 08-17 transfers the first resolved executor checkpoint into a bounded clear/delete test-contract correction; Plan 08-18 follows it before Plan 08-16 resumes.
-- Phase 8 gap Plan 08-18 transfers the second resolved executor checkpoint into an explicit-initialization test-contract correction and becomes the final prerequisite before Plan 08-16 resumes.
+- Historical before gap discovery (superseded): the D-24 replan added 08-16 as the only remaining canonical plan after deferring 08-11/08-12 to SEED-007. The current chain includes later gap Plans 08-17 through 08-19.
+- Historical before the second gap (superseded): Plan 08-17 was once expected to lead directly through Plan 08-18 to 08-16. The current chain is 08-18 complete → 08-19 pending → 08-16 pending.
+- Historical before the coverage measurement (superseded): Plan 08-18 was once described as the final prerequisite for 08-16. The exact post-08-18 report made Plan 08-19 the final prerequisite instead.
 - Phase 8 gap Plan 08-19 restores the coverage ratchet after the approved Plan 08-18 test correction; it becomes the final prerequisite before Plan 08-16 resumes and cannot edit production code or the baseline.
 
 ## Deferred Items
