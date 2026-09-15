@@ -607,7 +607,7 @@ Plans:
 - [~] 08-11-PLAN.md — Superseded: exact-SHA real PostgreSQL/Amazon-S3 collection moved intact to SEED-007; `BACK-05` remains NOT_QUALIFIED.
 - [~] 08-12-PLAN.md — Superseded: immutable GitHub release publication moved intact to SEED-007; publication remains NOT_PUBLISHED.
 - [x] 08-17-PLAN.md — Correct the inherited exact-snapshot clear/delete test to accept the ADR-defined typed contention outcome while preserving every safety and recovery assertion.
-- [ ] 08-18-PLAN.md — Replace the stale concurrent-first-creation assertion with the approved explicit-initialization-before-shared-workers SQLite contract.
+- [x] 08-18-PLAN.md — Replace the stale concurrent-first-creation assertion with the approved explicit-initialization-before-shared-workers SQLite contract.
 - [ ] 08-16-PLAN.md — Close deterministic local readiness and encode the remote/performance/platform/publication nonclaims after 08-18 passes.
 
 ## Progress
@@ -622,7 +622,7 @@ Plans:
 | 6. UnifiedCache Policy Composition | 11/11 | Complete    | 2026-09-09 |
 | 7. Explicit Migration and Rebuild Cutover | 24/24 | Complete    | 2026-09-11 |
 | 07.1. Obstore Payload Participant Unification | 11/11 | Complete | 2026-09-13 |
-| 8. Production Gates and Performance Stabilization | 14/16 | In Progress|  |
+| 8. Production Gates and Performance Stabilization | 15/16 | In Progress|  |
 
 ## Backlog
 
