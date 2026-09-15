@@ -135,7 +135,15 @@ status: complete
 - **Verification:** All 21 release qualification tests passed.
 - **Committed in:** `e924d4c`
 
-**Total deviations:** 2 auto-fixed Rule 1 issues.
+**3. [Rule 2 - Missing Critical] Carried the approval digest into the future publication invocation**
+- **Found during:** Task 3 handoff review
+- **Issue:** The existing Plan 08-12 command omitted the required approval-bound report digest.
+- **Fix:** Added the exact `--approved-report-sha256` argument to the future irreversible publication command.
+- **Files modified:** `.planning/phases/08-production-gates-and-performance-stabilization/08-12-PLAN.md`
+- **Verification:** The focused approval-digest adversarial test passes.
+- **Committed in:** pending metadata amendment
+
+**Total deviations:** 3 auto-fixed issues (2 Rule 1, 1 Rule 2).
 
 **Impact on plan:** Both fixes enforce the planned fail-closed publication contract; no scope expansion occurred.
 
