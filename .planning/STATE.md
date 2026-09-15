@@ -88,10 +88,10 @@ delivers explicit offline migration/rebuild tooling for future released versions
 
 Phase 03 rows in this historical table include superseded attempts and do not
 define current completion. The roadmap records Phases 1 through 7 complete and
-Phase 8 is at 16/17 canonical plans executed: 08-11 and 08-12 are superseded by
+Phase 8 is at 17/17 canonical plans complete: 08-11 and 08-12 are superseded by
 D-24/SEED-007, 08-17 corrected one inherited progress assertion, 08-18 corrected
-one inherited initialization assertion, 08-19 restores the frozen coverage
-ratchet, and 08-16 then resumes the local-readiness evidence run.
+one inherited initialization assertion, 08-19 restored the frozen coverage
+ratchet, and 08-16 produced the read-back-validated local-readiness evidence.
 Raw file counts include superseded plans and therefore are not completion claims.
 
 | Plan | Duration | Tasks | Files |
