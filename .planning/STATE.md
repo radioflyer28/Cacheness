@@ -3,17 +3,17 @@ gsd_state_version: 1.0
 milestone: v1.0
 current_phase: 08
 current_phase_name: Production Gates and Performance Stabilization
-status: executing
-stopped_at: Completed 08-19 coverage-ratchet recovery; resume 08-16 local-readiness closure
-last_updated: "2026-09-15T20:37:05.168Z"
+status: ready_for_verification
+stopped_at: Completed 08-16-PLAN.md; Phase 08 ready for verification
+last_updated: "2026-09-15T21:06:53.637Z"
 last_activity: 2026-09-15
-last_activity_desc: Restored the frozen coverage ratchet through deterministic SQLite validation/error contracts; 08-16 local-readiness closure is next
-state_head: 759e947af793d51217ee1e09709e50ddfa11a31f
+last_activity_desc: Completed exact-source local-readiness closure and preserved all deferred remote, performance, platform, and publication nonclaims
+state_head: d5e2cc4630c82754720177d3714f689f9c9684c0
 progress:
   total_phases: 9
   completed_phases: 7
   total_plans: 133
-  completed_plans: 131
+  completed_plans: 132
 milestone_name: milestone
 ---
 
@@ -29,12 +29,11 @@ See: .planning/PROJECT.md (updated 2026-09-15)
 ## Current Position
 
 Phase: 08 — Production Gates and Performance Stabilization
-Plan: 19 of 19 (08-11 and 08-12 superseded; 08-19 precedes 08-16)
-Status: Ready to execute 08-16 local-readiness closure after completed coverage-ratchet recovery
-Last activity: 2026-09-15 — restored the post-08-18 raw coverage floors through deterministic SQLite validation/error tests with no lifecycle change
+Plan: 19 of 19 (08-11 and 08-12 superseded; 08-16 closes the canonical chain)
+Status: Ready for independent Phase 08 verification
+Last activity: 2026-09-15 — produced and read-back validated exact-source local readiness with explicit remote, platform, performance, and publication nonclaims
 
-Current execution chain: **08-18 complete → 08-19 complete → 08-16 pending final
-local-readiness closure**. No older Phase 8 ordering statement overrides this chain.
+Current execution chain: **08-18 complete → 08-19 complete → 08-16 complete → independent Phase 08 verification**. No older Phase 8 ordering statement overrides this chain.
 
 Phase 07.1 closed with 11/11 plans summarized and an independent 46/46
 must-have verification pass. Built-in filesystem, memory, and S3 payload
@@ -219,6 +218,7 @@ Raw file counts include superseded plans and therefore are not completion claims
 | Phase 08 P17 | 7m | 2 tasks | 1 files |
 | Phase 08 P18 | 8min | 1 tasks | 1 files |
 | Phase 08 P19 | 9m | 2 tasks | 1 files |
+| Phase 08 P16 | 2h 57m | 2 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -529,12 +529,12 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - [Phase 08]: Phase 08 Plan 18: Worker diagnostics must equal SQLITE_APPLICATION_ID and the initializer store identity, not merely agree with each other.
 - [Phase 08]: The post-08-18 coverage deficit is a tests-only validation gap: Plan 08-19 exercises exact SQLite configuration, deadline, error-translation, identity, and schema rejection paths without lowering the baseline or changing lifecycle code.
 - [Phase 08]: Phase 08 Plan 19 restores QUAL-05 only through meaningful SQLite validation and fail-closed corruption tests; no lifecycle, baseline, or concurrency semantics changed.
+- [Phase 08]: Canonical JSON local-readiness evidence validates against the exact key set and cardinality, not mapping iteration order.
 
 ### Pending Todos
 
 - Apply ADR 0001 and the Phase 7 maintenance boundaries during Phase 8 qualification; a failing contention probe does not authorize another coordination mechanism.
-- Execute Plan 08-16 local-readiness closure with the restored frozen raw statement/branch floors and no production lifecycle change.
-- Close Phase 8 with deterministic local, base-package, coverage/Ruff, structural, and integrity/recovery evidence. Preserve supported-Python and live-service tooling, but keep unrun remote/platform claims explicit and defer BACK-05/publication to SEED-007, controlled performance to SEED-006, and native Windows to Phase 999.1.
+- Run independent Phase 08 verification over the completed deterministic local, base-package, coverage/Ruff, structural, and integrity/recovery evidence. Preserve the unrun remote/platform claims: BACK-05/publication remain deferred to SEED-007, controlled performance remains deferred to SEED-006, and native Windows remains unqualified.
 
 ### Blockers/Concerns
 
@@ -567,6 +567,6 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 
 ## Session Continuity
 
-Last session: 2026-09-15T20:37:05.007Z
-Stopped at: Completed 08-19 coverage-ratchet recovery; resume 08-16 local-readiness closure
-Resume file: .planning/phases/08-production-gates-and-performance-stabilization/08-16-PLAN.md
+Last session: 2026-09-15T21:06:53.438Z
+Stopped at: Completed 08-16-PLAN.md; Phase 08 ready for verification
+Resume file: None
