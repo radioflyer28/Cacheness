@@ -11,7 +11,7 @@ updated: 2026-09-15
 # Phase 08 — Validation Strategy
 
 > Nyquist contract for canonical Plans 08-01 through 08-10 and 08-13 through
-> 08-18. Plans 08-11/08-12 are superseded by D-24 and preserved for SEED-007;
+> 08-19. Plans 08-11/08-12 are superseded by D-24 and preserved for SEED-007;
 > they are not completion evidence. No live credential, exact live run, controlled-
 > Linux capture, or immutable release is claimed here. D-23 defers controlled-Linux
 > qualification to SEED-006, and D-24 defers BACK-05/publication to SEED-007.
@@ -42,6 +42,10 @@ updated: 2026-09-15
    completed. Concurrent first creation is not a qualification requirement;
    exact current application identity, bounded worker completion, and subsequent
    authority usability remain mandatory.
+8. The coverage baseline is immutable during ordinary verification. A tests-only
+   correction that removes incidental coverage must be followed by meaningful,
+   deterministic validation/error contracts with measured statement/branch margin;
+   it does not authorize a lower floor or a production lifecycle change.
 
 ## Exact-Snapshot Clear/Delete Contract Correction
 
@@ -80,6 +84,24 @@ store identity, and subsequent authority usability. Existing foreign,
 incomplete, future-version, initialized-process, and single-process first-use
 tests remain separate and unchanged. The correction does not retry the race or
 modify production bootstrap behavior.
+
+## Coverage Ratchet Recovery After the Initialization Correction
+
+The exact non-live report after Plan 08-18 records 11,299 covered repository
+statements and 3,212 covered repository branches, plus 4,697 covered critical
+statements and 1,274 covered critical branches. The frozen baseline is
+11,305/3,214 repository and 4,703/1,276 critical. Production source did not
+change; replacing the unsupported concurrent-first-creation test removed
+incidental execution of stable SQLite validation/error branches.
+
+Plan 08-19 therefore adds only deterministic semantic tests in
+`tests/test_phase8_lifecycle_coverage.py`. It targets exact invalid configuration,
+deadline, busy-budget, translated SQLite-error, malformed identity, and incomplete
+schema outcomes already present in `sqlite_lifecycle_authority.py`. The measured
+acceptance floor is 11,309/3,216 repository and 4,707/1,278 critical, giving at
+least ten statements and four branches over the post-08-18 report. The plan
+forbids sleeps, retries, concurrency, source edits, coverage instrumentation,
+baseline mutation, and lifecycle coordination changes.
 
 ## Executable Local-Readiness Record
 
@@ -136,7 +158,7 @@ nonqualified. Those rows cannot enter the blocking aggregate.
 | Per-task command | Each plan task’s literal `<automated>` command |
 | Full deterministic command | `uv run --isolated --all-extras --group dev --frozen python tools/verify_phase8_contracts.py --all` |
 | Feedback target | Focused deterministic self-tests under 30 seconds; live execution is a separately bounded external job |
-| Current status | Plans 08-01 through 08-10, 08-13 through 08-15, and 08-17 are complete; 08-11/08-12 are superseded; Plan 08-18 corrects the inherited initialization assertion before Plan 08-16 resumes local-readiness closure |
+| Current status | Plans 08-01 through 08-10, 08-13 through 08-15, and 08-17/08-18 are complete; 08-11/08-12 are superseded; Plan 08-19 restores the frozen coverage ratchet before Plan 08-16 resumes local-readiness closure |
 
 ## Phase Requirements to Automated Evidence
 
@@ -208,8 +230,10 @@ pre-gap research percentages are diagnostic and never qualify this dependency.
 | 08-17-01 | 9 | Exact-snapshot clear/delete success-or-typed-conflict contract with invariant final state | `uv run --isolated --all-extras --group dev --frozen pytest -q -o log_cli=false tests/test_blob_store_concurrency.py::test_clear_and_delete_converge_after_an_exact_snapshot tests/test_phase3_gap_acceptance.py::test_phase3_gap_acceptance_inventory -x` | Deterministic safety/recovery/progress | Must pass without production lifecycle changes and preserve the CR-01 node identity |
 | 08-17-02 | 9 | Bounded repeated exact-snapshot safety regression | `uv run --isolated --all-extras --group dev --frozen pytest -q -o log_cli=false tests/test_blob_store_concurrency.py::test_clear_and_delete_converge_after_an_exact_snapshot tests/test_blob_store_concurrency.py::test_clear_and_delete_exact_snapshot_stress_preserves_safety_across_valid_outcomes -x` | Deterministic safety/recovery/progress | Sixteen isolated collisions accept either documented progress outcome and fail every unsafe state or unexpected exception; Plan 16 binds both literal nodes |
 | 08-18-01 | 10 | Explicitly initialized SQLite root before independent shared-worker operations | `uv run --isolated --all-extras --group dev --frozen pytest -q -o log_cli=false tests/test_phase3_postreview_concurrency.py::test_initialized_root_shared_workers_converge_through_sqlite tests/test_sqlite_metadata_bootstrap_atomicity.py::test_threaded_initialized_authorities_converge_without_first_use_claims tests/test_sqlite_metadata_bootstrap_atomicity.py::test_spawned_initialized_authorities_converge_without_process_local_state tests/test_sqlite_metadata_bootstrap_atomicity.py::test_foreign_root_is_rejected_without_mutating_evidence tests/test_sqlite_metadata_bootstrap_atomicity.py::test_incomplete_authority_layout_is_rejected_without_implicit_upgrade tests/test_sqlite_lifecycle_authority.py::test_sqlite_authority_rejects_wrong_identity_without_mutating tests/test_blob_store_read_contract.py::test_composed_store_reopens_one_authenticated_canonical_generation -x` | Deterministic integrity/recovery/progress | Must pass without concurrent-first-creation retries or production lifecycle changes; Plan 16 binds the renamed node and five Plan 18 threats literally |
-| 08-16-01 | 11 | Fixed local-readiness status/manifest contract and D-24 bindings | `uv run --isolated --all-extras --group dev --frozen pytest -q -o log_cli=false tests/test_phase8_contract_verifier.py tests/qualification/test_phase8_release.py -x` | Local-readiness contract | Already implemented; strict future release commands remain preserved while the separate local boundary is added |
-| 08-16-02 | 11 | Exact local suite, base wheel, coverage/Ruff, structural, integrity/recovery, and nonclaims | `uv run --isolated --all-extras --group dev --frozen python tools/verify_phase8_contracts.py --local-ready --output .planning/phases/08-production-gates-and-performance-stabilization/08-LOCAL-READINESS.json` | Local readiness | Resumes after 08-18; exit 0 requires every local class and exact D-23/D-24 nonclaim record |
+| 08-19-01 | 11 | Exact SQLite configuration/deadline/busy-budget/driver-error validation | `uv run --isolated --all-extras --group dev --frozen pytest -q -o log_cli=false tests/test_phase8_lifecycle_coverage.py::test_sqlite_lifecycle_rejects_invalid_configuration_objects_without_materializing tests/test_phase8_lifecycle_coverage.py::test_sqlite_lifecycle_rejects_invalid_deadline_and_busy_budget_inputs tests/test_phase8_lifecycle_coverage.py::test_sqlite_lifecycle_timeout_and_sqlite_failures_preserve_typed_context -x` | Deterministic coverage | Exact exception/message/context/cause and no-materialization/unchanged-PRAGMA contracts only; no sleeps or concurrency |
+| 08-19-02 | 11 | Malformed identity/schema non-mutation plus coverage margin | `uv run --isolated --all-extras --group dev --frozen pytest -q -o log_cli=false tests/test_phase8_lifecycle_coverage.py -x && uv run --isolated --all-extras --group dev --frozen python tools/verify_phase8_coverage.py --report build/phase8/coverage.json --baseline tests/qualification/phase8_coverage_baseline.json` | Deterministic coverage/quality | Full non-live capture must first reach at least 11,309/3,216 repository and 4,707/1,278 critical; baseline remains read-only |
+| 08-16-01 | 12 | Fixed local-readiness status/manifest contract and D-24 bindings | `uv run --isolated --all-extras --group dev --frozen pytest -q -o log_cli=false tests/test_phase8_contract_verifier.py tests/qualification/test_phase8_release.py -x` | Local-readiness contract | Add Plan 19, its five threats, and four exact selectors without dropping any existing inventory; strict future release commands remain preserved |
+| 08-16-02 | 12 | Exact local suite, base wheel, coverage/Ruff, structural, integrity/recovery, and nonclaims | `uv run --isolated --all-extras --group dev --frozen python tools/verify_phase8_contracts.py --local-ready --output .planning/phases/08-production-gates-and-performance-stabilization/08-LOCAL-READINESS.json` | Local readiness | Resumes after 08-19; exit 0 requires every local class and exact D-23/D-24 nonclaim record |
 
 ## Exact-SHA Dispatch, Wait, and Artifact Collection Gate
 
@@ -350,14 +374,17 @@ checkpoint rather than inventing values.
   independent worker operations, bounded completion without errors, exact current
   application/store identity, subsequent authority usability, and unchanged
   invalid-evidence plus single-process-first-use companion contracts.
-- **After Wave 11 / phase gate:** require Plan 16's exact local-readiness command to
+- **After Wave 11:** require Plan 19's four deterministic SQLite validation/error
+  selectors, at least 11,309/3,216 repository and 4,707/1,278 critical covered
+  statements/branches, direct Ruff lint/format, and an unchanged baseline pass.
+- **After Wave 12 / phase gate:** require Plan 16's exact local-readiness command to
   pass deterministic integrity/recovery, base wheel/import, coverage/Ruff, and
   structural evidence for one source identity. Require exact D-23/D-24 deferral
   records and reject any live, publication, Linux, Windows, or performance promotion.
 
 ## Validation Sign-Off Criteria
 
-- [ ] Every canonical Plan 01-10 and 13-18 code-producing task has its exact automated command and evidence class; superseded Plans 11/12 remain historical future-seed inputs only.
+- [ ] Every canonical Plan 01-10 and 13-19 code-producing task has its exact automated command and evidence class; superseded Plans 11/12 remain historical future-seed inputs only.
 - [ ] Wave 0 creates every missing test/harness/workflow verifier before relying on it.
 - [ ] PostgreSQL DB-API classification, replay, pagination, and rollback selectors
       pass before coverage floors are captured.
@@ -375,5 +402,6 @@ checkpoint rather than inventing values.
       obstore participant boundary remain intact.
 
 **Approval state:** Nyquist-compliant D-24 local-readiness plan; tests-only Plans
-08-17 and 08-18 correct inherited ADR progress/initialization contracts before
-Plan 08-16 resumes. None has an external checkpoint.
+08-17 and 08-18 correct inherited ADR progress/initialization contracts, and
+Plan 08-19 restores the frozen coverage ratchet before Plan 08-16 resumes. None
+has an external checkpoint.
