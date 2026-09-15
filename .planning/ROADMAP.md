@@ -13,6 +13,7 @@ Cacheness will move from overlapping cache and storage paths to one storage engi
 - [x] **Phase 5: Payload Backends and Supported Topology Qualification** - Qualify explicitly supported filesystem, memory, and AWS S3 pairings at their declared capability tiers. (completed 2026-09-08)
 - [x] **Phase 6: UnifiedCache Policy Composition** - Route cache behavior through `BlobStore` while preserving public APIs, cache semantics, and the `SqlCache` boundary. (completed 2026-09-09)
 - [x] **Phase 7: Explicit Migration and Rebuild Cutover** - Give existing stores an inspectable, resumable same-backend migration or confirmed rebuild path. (completed 2026-09-11)
+- [x] **Phase 07.1: Obstore Payload Participant Unification** - Use one obstore-backed payload participant while retaining `BlobStore` as the sole lifecycle authority. (completed 2026-09-13)
 - [x] **Phase 8: Production Gates and Performance Stabilization** - Make packaging, service integration, fault testing, coverage, and measured scalability release requirements. (completed 2026-09-15)
 
 ## Phase Details
