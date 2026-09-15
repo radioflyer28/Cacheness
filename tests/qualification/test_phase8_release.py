@@ -507,6 +507,78 @@ def test_local_readiness_rejects_remote_or_publication_substitution() -> None:
         )
 
 
+def test_local_readiness_persisted_evidence_is_order_independent_but_exact(
+    tmp_path: Path,
+) -> None:
+    """Canonical JSON key ordering cannot invalidate an otherwise exact record."""
+    release = _load_release()
+    record = release.build_local_readiness(
+        revision="a" * 40,
+        source_digest="b" * 64,
+        observed_host={"machine": "arm64", "os": "Darwin", "python": "3.13.0"},
+        evidence={
+            evidence_class: {
+                "result": "passed",
+                "revision": "a" * 40,
+                "source_digest": "b" * 64,
+                "status": "PASS",
+            }
+            for evidence_class in ("deterministic", "coverage", "structural")
+        }
+        | {
+            "base_wheel": {
+                "probes": list(release.BASE_WHEEL_PROBES),
+                "revision": "a" * 40,
+                "source_digest": "b" * 64,
+                "status": "PASS",
+                "wheel_sha256": "c" * 64,
+            }
+        },
+    )
+    output = tmp_path / "local-readiness.json"
+
+    release.write_local_readiness(output, record)
+    persisted = json.loads(output.read_text(encoding="utf-8"))
+    release.validate_local_readiness(
+        persisted, revision="a" * 40, source_digest="b" * 64
+    )
+
+    reordered = dict(record)
+    reordered["evidence"] = dict(reversed(tuple(record["evidence"].items())))
+    release.validate_local_readiness(
+        reordered, revision="a" * 40, source_digest="b" * 64
+    )
+
+    missing = dict(record)
+    missing["evidence"] = dict(record["evidence"])
+    missing["evidence"].pop("base_wheel")
+    with pytest.raises(release.ReleaseEvidenceError, match="unexpected shape"):
+        release.validate_local_readiness(
+            missing, revision="a" * 40, source_digest="b" * 64
+        )
+
+    extra = dict(record)
+    extra["evidence"] = {**record["evidence"], "live_services": {}}
+    with pytest.raises(release.ReleaseEvidenceError, match="unexpected shape"):
+        release.validate_local_readiness(
+            extra, revision="a" * 40, source_digest="b" * 64
+        )
+
+    class DuplicateEvidenceKeys(dict[str, object]):
+        def __iter__(self):
+            return iter((*super().keys(), "base_wheel"))
+
+        def __len__(self) -> int:
+            return super().__len__() + 1
+
+    duplicate = dict(record)
+    duplicate["evidence"] = DuplicateEvidenceKeys(record["evidence"])
+    with pytest.raises(release.ReleaseEvidenceError, match="unexpected shape"):
+        release.validate_local_readiness(
+            duplicate, revision="a" * 40, source_digest="b" * 64
+        )
+
+
 def test_deferred_performance_artifacts_and_macos_diagnostics_are_rejected(
     tmp_path: Path,
 ) -> None:

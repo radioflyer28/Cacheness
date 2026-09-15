@@ -665,7 +665,8 @@ def validate_local_readiness(
     evidence = record.get("evidence")
     if (
         not isinstance(evidence, Mapping)
-        or tuple(evidence) != LOCAL_READINESS_EVIDENCE_CLASSES
+        or len(evidence) != len(LOCAL_READINESS_EVIDENCE_CLASSES)
+        or set(evidence) != set(LOCAL_READINESS_EVIDENCE_CLASSES)
     ):
         raise ReleaseEvidenceError("local readiness evidence has an unexpected shape")
     for evidence_class in ("deterministic", "coverage", "structural"):
