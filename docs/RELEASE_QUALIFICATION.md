@@ -34,6 +34,8 @@ or did not meet the class contract. `NOT_PUBLISHED` means no verified immutable
 GitHub release exists. `DEFERRED` is a closed nonclaim, not a pass: controlled
 performance points to [SEED-006](../.planning/seeds/SEED-006-qualify-controlled-linux-performance.md),
 while BACK-05 and publication point to SEED-007. None may be relabeled as success.
+The retained exact-SHA workflow artifacts use a 30 days retention window; the
+local-readiness record is not a release asset and does not extend that policy.
 
 ## Supported runtime and package scope
 
