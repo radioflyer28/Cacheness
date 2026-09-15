@@ -4,11 +4,11 @@
 
 | Source | ID | Feature / requirement | Plan | Status | Notes |
 |---|---|---|---|---|---|
-| GOAL | — | Reproducible local-readiness evidence without unproved remote, platform, performance, or publication claims | 01-10, 13-16 | COVERED | Plan 16 composes completed deterministic work into the exact local boundary and preserves every nonclaim. |
+| GOAL | — | Reproducible local-readiness evidence without unproved remote, platform, performance, or publication claims | 01-10, 13-17 | COVERED | Plan 17 corrects the inherited progress assertion before Plan 16 composes the exact local boundary and preserves every nonclaim. |
 | REQ | QUAL-01 | Clean base wheel imports and memory-backed generic/NumPy round trips | 02, 09, 16 | COVERED | Plan 16 reruns the real base-wheel path for local readiness. |
 | REQ | QUAL-02 | Advertised optional groups have isolated installation/probe contracts | 02, 09, 16 | COVERED | Existing fixed matrix remains executable; an unavailable optional row is reported, not promoted to local or release support. |
 | REQ | QUAL-03 | CI definitions and deterministic local package/quality/structural paths | 01-03, 05-10, 13-16 | COVERED | Workflow contracts remain checked; unrun remote jobs remain nonclaims. |
-| REQ | QUAL-04 | Finite integrity/recovery/commit-boundary regressions | 01, 04, 09, 10, 16 | COVERED | Fixed selectors distinguish success/conflict/typed retryable progress from corruption. |
+| REQ | QUAL-04 | Finite integrity/recovery/commit-boundary regressions | 01, 04, 09, 10, 16, 17 | COVERED | Plan 17 makes the inherited exact-snapshot regression distinguish ordinary success and typed conflict from corruption while preserving final safety/recovery checks. |
 | REQ | QUAL-05 | Measured lifecycle/cache-policy statement and branch ratchets plus Ruff | 04, 05, 09, 10, 16 | COVERED | Plan 16 reruns the read-only ratchet and direct quality gate. |
 | REQ | QUAL-07 | Bounded memory and backend-call behavior | 06, 09, 10, 16 | COVERED | Exact formulas and RSS evidence stay timing-independent. |
 | REQ | QUAL-06 | Controlled-Linux distributions and budgets | 07, 13 | DEFERRED | `DEFERRED`/`NOT_QUALIFIED` under SEED-006 by D-23; harness/workflow remain intact. |
@@ -28,9 +28,9 @@
 | RESEARCH | R-13 | Lifetime evidence and immutable publication | 08, 10, 14; SEED-007 | DEFERRED | Publication stays `NOT_PUBLISHED`; controller remains intact. |
 | RESEARCH | R-14 | No new benchmark dependency | 07 | COVERED | Existing stdlib approach remains. |
 | CONTEXT | D-01 | Qualify the Phase 07.1 obstore architecture; no legacy fallback | 01, 07, 08, 10, 16 | COVERED | Local closure audits the final production composition only. |
-| CONTEXT | D-02 | BlobStore/lifecycle authority sole owner; UnifiedCache policy only | 01, 04, 10, 16 | COVERED | No lifecycle production code changes in Plan 16. |
-| CONTEXT | D-03 | Separate integrity, recovery, progress, and performance | 01, 04, 06, 07, 09, 10, 13-16 | COVERED | Local PASS cannot satisfy a different evidence class. |
-| CONTEXT | D-04 | Preserve topology and bounded-orphan limits | 01, 03, 04, 09, 10, 16 | COVERED | Fixed tests/docs retain the nonclaims. |
+| CONTEXT | D-02 | BlobStore/lifecycle authority sole owner; UnifiedCache policy only | 01, 04, 10, 16, 17 | COVERED | Plans 16/17 make no lifecycle production-code change. |
+| CONTEXT | D-03 | Separate integrity, recovery, progress, and performance | 01, 04, 06, 07, 09, 10, 13-17 | COVERED | Plan 17 accepts the documented typed contention rejection only as progress and still requires every safety/recovery postcondition. |
+| CONTEXT | D-04 | Preserve topology and bounded-orphan limits | 01, 03, 04, 09, 10, 16, 17 | COVERED | The corrected test no longer silently strengthens the topology into an all-contenders-succeed guarantee. |
 | CONTEXT | D-05 | Supported stable Python minors; prerelease advisory | 03, 09, 16 | COVERED | Workflow contract is preserved; local evidence does not claim an unrun matrix. |
 | CONTEXT | D-06 | Linux full, macOS boundary, Windows nonclaim | 03, 09, 10, 16 | COVERED | Current-host scope remains explicit. |
 | CONTEXT | D-07 | NumPy core and base round trips | 02, 09, 16 | COVERED | Real base-wheel probe runs in closure. |

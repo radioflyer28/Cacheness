@@ -4,15 +4,15 @@ milestone: v1.0
 current_phase: 08
 current_phase_name: Production Gates and Performance Stabilization
 status: executing
-stopped_at: Phase 08 replanned for local readiness; 08-16 is ready to execute
-last_updated: "2026-09-15T17:04:09.367Z"
+stopped_at: Phase 08 gap plan 08-17 ready; 08-16 resumes after it
+last_updated: "2026-09-15T18:37:18.000Z"
 last_activity: 2026-09-15
-last_activity_desc: Deferred real-service qualification/publication to SEED-007 and planned local-readiness closure
+last_activity_desc: Planned the ADR-aligned clear/delete test-contract correction before resuming local-readiness closure
 state_head: 8577d499c9ae824d197a1215c906574919e6cdcd
 progress:
   total_phases: 9
   completed_phases: 7
-  total_plans: 132
+  total_plans: 133
   completed_plans: 128
 milestone_name: milestone
 ---
@@ -29,9 +29,9 @@ See: .planning/PROJECT.md (updated 2026-09-15)
 ## Current Position
 
 Phase: 08 — Production Gates and Performance Stabilization
-Plan: 16 of 16 (08-11 and 08-12 superseded)
-Status: Ready to execute 08-16 local-readiness closure
-Last activity: 2026-09-15 — deferred exact-SHA real-service qualification and immutable publication to SEED-007 without claiming either passed
+Plan: 17 of 17 (08-11 and 08-12 superseded; 08-17 precedes 08-16)
+Status: Ready to execute 08-17 test-contract correction, then resume 08-16 local-readiness closure
+Last activity: 2026-09-15 — confirmed the clear/delete failure is an ADR-valid typed contention outcome with safe final state and planned a tests-only correction
 
 Phase 07.1 closed with 11/11 plans summarized and an independent 46/46
 must-have verification pass. Built-in filesystem, memory, and S3 payload
@@ -86,8 +86,9 @@ delivers explicit offline migration/rebuild tooling for future released versions
 
 Phase 03 rows in this historical table include superseded attempts and do not
 define current completion. The roadmap records Phases 1 through 7 complete and
-Phase 8 at 13/14 canonical plans executed: 08-11 and 08-12 are superseded by
-D-24/SEED-007, and 08-16 is the only remaining executable local-readiness plan.
+Phase 8 at 13/15 canonical plans executed: 08-11 and 08-12 are superseded by
+D-24/SEED-007, 08-17 corrects one inherited progress assertion, and 08-16 then
+resumes the local-readiness evidence run.
 Raw file counts include superseded plans and therefore are not completion claims.
 
 | Plan | Duration | Tasks | Files |
@@ -514,10 +515,12 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - [Phase 08]: Phase 08 Plan 15: Protected-live preflight is configuration-only; every result is service_state NOT_RUN and cannot qualify BACK-05.
 - [Phase 08]: Phase 08 Plan 15: Fixed verifier inventory now binds Plan 08-15 and T-08-15-01 through T-08-15-05 to literal preflight selectors.
 - [Phase 08]: D-24 closes the milestone on exact-source local readiness; Plans 08-11/08-12 are superseded and preserved for SEED-007, BACK-05 remains DEFERRED/NOT_QUALIFIED, and publication remains DEFERRED/NOT_PUBLISHED.
+- [Phase 08]: The exact-snapshot clear/delete regression accepts ordinary completion or `CacheBlobLifecycleConflictError` as the two ADR-valid progress outcomes while requiring final absence, no authority entry, no cleanup debt, and bounded completion in both cases; no lifecycle fix is authorized.
 
 ### Pending Todos
 
 - Apply ADR 0001 and the Phase 7 maintenance boundaries during Phase 8 qualification; a failing contention probe does not authorize another coordination mechanism.
+- Execute tests-only Plan 08-17 before resuming 08-16; the plan corrects the inherited all-contenders-succeed assertion and preserves every safety/recovery gate.
 - Close Phase 8 with deterministic local, base-package, coverage/Ruff, structural, and integrity/recovery evidence. Preserve supported-Python and live-service tooling, but keep unrun remote/platform claims explicit and defer BACK-05/publication to SEED-007, controlled performance to SEED-006, and native Windows to Phase 999.1.
 
 ### Blockers/Concerns
@@ -533,6 +536,7 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - Phase 8 replanned: D-23 removes controlled-Linux performance from the current blocking aggregate, adds Plan 08-14, and preserves SEED-006 as the future qualification path.
 - Phase 8 gap plan 08-15 adds the missing configuration-only `tools/run_phase8_qualification.py --preflight` contract before Plan 08-11; it cannot contact services, mutate resources, write evidence, or qualify BACK-05.
 - Phase 8 local-readiness replan supersedes 08-11 and 08-12, preserves their tooling and evidence standard under SEED-007, and adds 08-16 as the only remaining canonical plan.
+- Phase 8 gap Plan 08-17 transfers the resolved executor checkpoint into a bounded test-contract correction and becomes the sole prerequisite before Plan 08-16 resumes.
 
 ## Deferred Items
 
@@ -547,6 +551,6 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 
 ## Session Continuity
 
-Last session: 2026-09-15T17:04:09.199Z
-Stopped at: Phase 08 replanned for local readiness; 08-16 is ready to execute
+Last session: 2026-09-15T18:37:18.000Z
+Stopped at: Phase 08 gap plan 08-17 ready; 08-16 resumes after it
 Resume file: None

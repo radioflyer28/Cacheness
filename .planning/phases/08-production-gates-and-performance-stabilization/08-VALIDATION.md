@@ -11,7 +11,7 @@ updated: 2026-09-15
 # Phase 08 — Validation Strategy
 
 > Nyquist contract for canonical Plans 08-01 through 08-10 and 08-13 through
-> 08-16. Plans 08-11/08-12 are superseded by D-24 and preserved for SEED-007;
+> 08-17. Plans 08-11/08-12 are superseded by D-24 and preserved for SEED-007;
 > they are not completion evidence. No live credential, exact live run, controlled-
 > Linux capture, or immutable release is claimed here. D-23 defers controlled-Linux
 > qualification to SEED-006, and D-24 defers BACK-05/publication to SEED-007.
@@ -34,6 +34,28 @@ updated: 2026-09-15
    `DEFERRED`/`NOT_QUALIFIED` under SEED-006; live services remain
    `DEFERRED`/`NOT_QUALIFIED` and publication remains `DEFERRED`/`NOT_PUBLISHED`
    under SEED-007. These are closed local-milestone nonclaims, not inferred passes.
+6. Exact-snapshot clear/delete contention separates progress from safety per
+   D-03/D-04. Ordinary delete completion and `CacheBlobLifecycleConflictError`
+   are both valid bounded outcomes; either must still end with public absence,
+   no authority entry, empty cleanup debt, and completed workers.
+
+## Exact-Snapshot Clear/Delete Contract Correction
+
+Plan 08-16's coverage run exposed a pre-existing assertion mismatch in
+`test_clear_and_delete_converge_after_an_exact_snapshot`, not an unsafe lifecycle
+state. Thirty focused runs produced 22 ordinary passes and 8 typed
+`CacheBlobLifecycleConflictError` outcomes. A 50-run minimized harness produced
+42 ordinary successes, 8 typed conflicts, and zero unsafe final states; every
+conflict case ended absent with no authority entry, no cleanup debt, and a
+completed clear worker.
+
+Plan 08-17 therefore corrects only the inherited test contract. It uses the
+existing exact snapshot and tombstone-promotion seams to exercise contention,
+admits only ordinary completion or the documented typed conflict, and runs the
+same final safety/recovery assertions for both. A bounded repeated form detects
+corruption, leaked debt, unfinished workers, and unexpected exceptions without
+requiring a particular winner or conflict frequency. No production lifecycle,
+selector, gate, package/runtime dependency, workflow, or benchmark artifact changes.
 
 ## Executable Local-Readiness Record
 
@@ -90,7 +112,7 @@ nonqualified. Those rows cannot enter the blocking aggregate.
 | Per-task command | Each plan task’s literal `<automated>` command |
 | Full deterministic command | `uv run --isolated --all-extras --group dev --frozen python tools/verify_phase8_contracts.py --all` |
 | Feedback target | Focused deterministic self-tests under 30 seconds; live execution is a separately bounded external job |
-| Current status | Plans 08-01 through 08-10 and 08-13 through 08-15 are complete; 08-11/08-12 are superseded; Plan 08-16 is the only remaining local-readiness closure |
+| Current status | Plans 08-01 through 08-10 and 08-13 through 08-15 are complete; 08-11/08-12 are superseded; Plan 08-17 corrects the inherited contention assertion before Plan 08-16 resumes local-readiness closure |
 
 ## Phase Requirements to Automated Evidence
 
@@ -159,8 +181,10 @@ pre-gap research percentages are diagnostic and never qualify this dependency.
 | 08-15-02 | 8 | Fixed plan/threat/selector binding | `uv run --isolated --all-extras --group dev --frozen pytest -q -o log_cli=false tests/test_phase8_contract_verifier.py::test_fixed_manifest_binds_live_configuration_preflight_gap tests/test_phase8_contract_verifier.py::test_fixed_manifest_rejects_source_mutation_that_drops_plan_or_threat tests/test_phase8_contract_verifier.py::test_selector_validation_rejects_removed_renamed_duplicate_and_unowned_nodes -x` | Contract self-test | Binds Plan 15 and T-08-15-01 through T-08-15-05 without changing decisions or evidence statuses |
 | 08-11 | — | Exact-SHA live collection | Not run | Deferred live service | Superseded by D-24; preserved intact for SEED-007 and never counted as PASS |
 | 08-12 | — | Immutable publication | Not run | Deferred publication | Superseded by D-24; preserved intact for SEED-007 and remains NOT_PUBLISHED |
-| 08-16-01 | 9 | Fixed local-readiness status/manifest contract and D-24 bindings | `uv run --isolated --all-extras --group dev --frozen pytest -q -o log_cli=false tests/test_phase8_contract_verifier.py tests/qualification/test_phase8_release.py -x` | Local-readiness contract | Must preserve strict future release commands while adding the separate local boundary |
-| 08-16-02 | 9 | Exact local suite, base wheel, coverage/Ruff, structural, integrity/recovery, and nonclaims | `uv run --isolated --all-extras --group dev --frozen python tools/verify_phase8_contracts.py --local-ready --output .planning/phases/08-production-gates-and-performance-stabilization/08-LOCAL-READINESS.json` | Local readiness | Exit 0 requires every local class and exact D-23/D-24 nonclaim record |
+| 08-17-01 | 9 | Exact-snapshot clear/delete success-or-typed-conflict contract with invariant final state | `uv run --isolated --all-extras --group dev --frozen pytest -q -o log_cli=false tests/test_blob_store_concurrency.py::test_clear_and_delete_converge_after_an_exact_snapshot tests/test_phase3_gap_acceptance.py::test_phase3_gap_acceptance_inventory -x` | Deterministic safety/recovery/progress | Must pass without production lifecycle changes and preserve the CR-01 node identity |
+| 08-17-02 | 9 | Bounded repeated exact-snapshot safety regression | `uv run --isolated --all-extras --group dev --frozen pytest -q -o log_cli=false tests/test_blob_store_concurrency.py -k 'clear_and_delete' -x` | Deterministic safety/recovery/progress | Sixteen isolated collisions accept either documented progress outcome and fail every unsafe state or unexpected exception |
+| 08-16-01 | 10 | Fixed local-readiness status/manifest contract and D-24 bindings | `uv run --isolated --all-extras --group dev --frozen pytest -q -o log_cli=false tests/test_phase8_contract_verifier.py tests/qualification/test_phase8_release.py -x` | Local-readiness contract | Already implemented; strict future release commands remain preserved while the separate local boundary is added |
+| 08-16-02 | 10 | Exact local suite, base wheel, coverage/Ruff, structural, integrity/recovery, and nonclaims | `uv run --isolated --all-extras --group dev --frozen python tools/verify_phase8_contracts.py --local-ready --output .planning/phases/08-production-gates-and-performance-stabilization/08-LOCAL-READINESS.json` | Local readiness | Resumes after 08-17; exit 0 requires every local class and exact D-23/D-24 nonclaim record |
 
 ## Exact-SHA Dispatch, Wait, and Artifact Collection Gate
 
@@ -293,14 +317,18 @@ checkpoint rather than inventing values.
   inventory, quality/live-only release collection, explicit SEED-006 deferral record,
   and rejection of macOS or controlled-performance artifact substitution.
 - **After Wave 8:** require Plan 08-15's configuration-only live preflight, explicit no-network/no-mutation/no-write tests, sanitized bounded output, and literal plan/threat/selector binding.
-- **After Wave 9 / phase gate:** require Plan 16's exact local-readiness command to
+- **After Wave 9:** require Plan 17's original CR-01 node plus bounded repeated
+  regression to accept only ordinary success or the documented typed conflict,
+  while always proving final absence, no authority entry, empty cleanup debt,
+  and bounded worker completion.
+- **After Wave 10 / phase gate:** require Plan 16's exact local-readiness command to
   pass deterministic integrity/recovery, base wheel/import, coverage/Ruff, and
   structural evidence for one source identity. Require exact D-23/D-24 deferral
   records and reject any live, publication, Linux, Windows, or performance promotion.
 
 ## Validation Sign-Off Criteria
 
-- [ ] Every canonical Plan 01-10 and 13-16 code-producing task has its exact automated command and evidence class; superseded Plans 11/12 remain historical future-seed inputs only.
+- [ ] Every canonical Plan 01-10 and 13-17 code-producing task has its exact automated command and evidence class; superseded Plans 11/12 remain historical future-seed inputs only.
 - [ ] Wave 0 creates every missing test/harness/workflow verifier before relying on it.
 - [ ] PostgreSQL DB-API classification, replay, pagination, and rollback selectors
       pass before coverage floors are captured.
@@ -317,5 +345,6 @@ checkpoint rather than inventing values.
 - [ ] ADR 0001 safety/recovery/progress/performance distinctions and the Phase 07.1
       obstore participant boundary remain intact.
 
-**Approval state:** Nyquist-compliant D-24 local-readiness plan; Plan 08-16
-execution evidence remains pending and has no current external checkpoint.
+**Approval state:** Nyquist-compliant D-24 local-readiness plan; tests-only Plan
+08-17 corrects the inherited ADR progress contract before Plan 08-16 resumes.
+Neither plan has an external checkpoint.
