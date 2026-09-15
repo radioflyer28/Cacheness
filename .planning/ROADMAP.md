@@ -587,7 +587,7 @@ Plans:
   5. Inventory, reconciliation, statistics, clear, and aggregate operations demonstrate bounded memory and backend-call behavior without accidental N+1 access patterns.
   6. A fixed local-readiness report is bound to one exact commit and distinguishes passing local evidence from closed nonclaims. `BACK-05` remains `DEFERRED`/`NOT_QUALIFIED` and immutable publication remains `DEFERRED`/`NOT_PUBLISHED` under SEED-007; QUAL-06 remains deferred under SEED-006; Windows remains `UNAVAILABLE`/`NOT_QUALIFIED` until Phase 999.1. No mock, local substitute, configuration preflight, or stale artifact can become remote/platform/release evidence. Optimization must preserve one authority and may not introduce a projection-repair prerequisite for canonical operations.
 
-**Plans**: 13/15 canonical plans executed; 08-11 and 08-12 superseded by D-24/SEED-007
+**Plans**: 14/16 canonical plans executed; 08-11 and 08-12 superseded by D-24/SEED-007
 
 Plans:
 
@@ -607,7 +607,8 @@ Plans:
 - [~] 08-11-PLAN.md — Superseded: exact-SHA real PostgreSQL/Amazon-S3 collection moved intact to SEED-007; `BACK-05` remains NOT_QUALIFIED.
 - [~] 08-12-PLAN.md — Superseded: immutable GitHub release publication moved intact to SEED-007; publication remains NOT_PUBLISHED.
 - [x] 08-17-PLAN.md — Correct the inherited exact-snapshot clear/delete test to accept the ADR-defined typed contention outcome while preserving every safety and recovery assertion.
-- [ ] 08-16-PLAN.md — Close deterministic local readiness and encode the remote/performance/platform/publication nonclaims after 08-17 passes.
+- [ ] 08-18-PLAN.md — Replace the stale concurrent-first-creation assertion with the approved explicit-initialization-before-shared-workers SQLite contract.
+- [ ] 08-16-PLAN.md — Close deterministic local readiness and encode the remote/performance/platform/publication nonclaims after 08-18 passes.
 
 ## Progress
 
@@ -621,7 +622,7 @@ Plans:
 | 6. UnifiedCache Policy Composition | 11/11 | Complete    | 2026-09-09 |
 | 7. Explicit Migration and Rebuild Cutover | 24/24 | Complete    | 2026-09-11 |
 | 07.1. Obstore Payload Participant Unification | 11/11 | Complete | 2026-09-13 |
-| 8. Production Gates and Performance Stabilization | 14/15 | In Progress|  |
+| 8. Production Gates and Performance Stabilization | 14/16 | In Progress|  |
 
 ## Backlog
 

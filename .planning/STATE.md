@@ -4,15 +4,15 @@ milestone: v1.0
 current_phase: 08
 current_phase_name: Production Gates and Performance Stabilization
 status: executing
-stopped_at: Completed 08-17-PLAN.md
-last_updated: "2026-09-15T19:00:44.966Z"
+stopped_at: Planned 08-18-PLAN.md
+last_updated: "2026-09-15T19:33:35.000Z"
 last_activity: 2026-09-15
-last_activity_desc: Planned the ADR-aligned clear/delete test-contract correction before resuming local-readiness closure
-state_head: 1eb02ff9c4a3c8888117592871fca2fd45209f38
+last_activity_desc: Planned the explicit-initialization SQLite test-contract correction before resuming local-readiness closure
+state_head: e146a60e67c3a63599427eabac7523b2333a5e3c
 progress:
   total_phases: 9
   completed_phases: 7
-  total_plans: 131
+  total_plans: 132
   completed_plans: 129
 milestone_name: milestone
 ---
@@ -29,9 +29,9 @@ See: .planning/PROJECT.md (updated 2026-09-15)
 ## Current Position
 
 Phase: 08 — Production Gates and Performance Stabilization
-Plan: 17 of 17 (08-11 and 08-12 superseded; 08-17 precedes 08-16)
-Status: Ready to execute 08-17 test-contract correction, then resume 08-16 local-readiness closure
-Last activity: 2026-09-15 — confirmed the clear/delete failure is an ADR-valid typed contention outcome with safe final state and planned a tests-only correction
+Plan: 18 of 18 (08-11 and 08-12 superseded; 08-18 precedes 08-16)
+Status: Ready to execute 08-18 test-contract correction, then resume 08-16 local-readiness closure
+Last activity: 2026-09-15 — confirmed concurrent first creation is outside the approved progress contract and planned a tests-only initialized-root correction
 
 Phase 07.1 closed with 11/11 plans summarized and an independent 46/46
 must-have verification pass. Built-in filesystem, memory, and S3 payload
@@ -86,9 +86,10 @@ delivers explicit offline migration/rebuild tooling for future released versions
 
 Phase 03 rows in this historical table include superseded attempts and do not
 define current completion. The roadmap records Phases 1 through 7 complete and
-Phase 8 at 13/15 canonical plans executed: 08-11 and 08-12 are superseded by
-D-24/SEED-007, 08-17 corrects one inherited progress assertion, and 08-16 then
-resumes the local-readiness evidence run.
+Phase 8 at 14/16 canonical plans executed: 08-11 and 08-12 are superseded by
+D-24/SEED-007, 08-17 corrected one inherited progress assertion, 08-18 corrects
+one inherited initialization assertion, and 08-16 then resumes the local-readiness
+evidence run.
 Raw file counts include superseded plans and therefore are not completion claims.
 
 | Plan | Duration | Tasks | Files |
@@ -518,11 +519,12 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - [Phase 08]: D-24 closes the milestone on exact-source local readiness; Plans 08-11/08-12 are superseded and preserved for SEED-007, BACK-05 remains DEFERRED/NOT_QUALIFIED, and publication remains DEFERRED/NOT_PUBLISHED.
 - [Phase 08]: The exact-snapshot clear/delete regression accepts ordinary completion or `CacheBlobLifecycleConflictError` as the two ADR-valid progress outcomes while requiring final absence, no authority entry, no cleanup debt, and bounded completion in both cases; no lifecycle fix is authorized.
 - [Phase 08]: Exact-snapshot clear/delete tests accept ordinary completion or CacheBlobLifecycleConflictError while requiring identical final safety and recovery assertions.
+- [Phase 08]: SQLite shared-worker qualification initializes the authority before releasing independent operations; concurrent first creation remains outside the availability guarantee, while exact application identity and bounded error-free worker completion remain required.
 
 ### Pending Todos
 
 - Apply ADR 0001 and the Phase 7 maintenance boundaries during Phase 8 qualification; a failing contention probe does not authorize another coordination mechanism.
-- Execute tests-only Plan 08-17 before resuming 08-16; the plan corrects the inherited all-contenders-succeed assertion and preserves every safety/recovery gate.
+- Execute tests-only Plan 08-18 before resuming 08-16; the plan corrects the inherited concurrent-first-creation assertion and preserves exact identity, invalid-evidence, and single-process convenience gates.
 - Close Phase 8 with deterministic local, base-package, coverage/Ruff, structural, and integrity/recovery evidence. Preserve supported-Python and live-service tooling, but keep unrun remote/platform claims explicit and defer BACK-05/publication to SEED-007, controlled performance to SEED-006, and native Windows to Phase 999.1.
 
 ### Blockers/Concerns
@@ -538,7 +540,8 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - Phase 8 replanned: D-23 removes controlled-Linux performance from the current blocking aggregate, adds Plan 08-14, and preserves SEED-006 as the future qualification path.
 - Phase 8 gap plan 08-15 adds the missing configuration-only `tools/run_phase8_qualification.py --preflight` contract before Plan 08-11; it cannot contact services, mutate resources, write evidence, or qualify BACK-05.
 - Phase 8 local-readiness replan supersedes 08-11 and 08-12, preserves their tooling and evidence standard under SEED-007, and adds 08-16 as the only remaining canonical plan.
-- Phase 8 gap Plan 08-17 transfers the resolved executor checkpoint into a bounded test-contract correction and becomes the sole prerequisite before Plan 08-16 resumes.
+- Phase 8 gap Plan 08-17 transfers the first resolved executor checkpoint into a bounded clear/delete test-contract correction; Plan 08-18 follows it before Plan 08-16 resumes.
+- Phase 8 gap Plan 08-18 transfers the second resolved executor checkpoint into an explicit-initialization test-contract correction and becomes the final prerequisite before Plan 08-16 resumes.
 
 ## Deferred Items
 
@@ -553,6 +556,6 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 
 ## Session Continuity
 
-Last session: 2026-09-15T19:00:44.789Z
-Stopped at: Completed 08-17-PLAN.md
+Last session: 2026-09-15T19:33:35.000Z
+Stopped at: Planned 08-18-PLAN.md
 Resume file: None

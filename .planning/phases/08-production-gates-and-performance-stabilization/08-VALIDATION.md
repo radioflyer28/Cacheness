@@ -11,7 +11,7 @@ updated: 2026-09-15
 # Phase 08 — Validation Strategy
 
 > Nyquist contract for canonical Plans 08-01 through 08-10 and 08-13 through
-> 08-17. Plans 08-11/08-12 are superseded by D-24 and preserved for SEED-007;
+> 08-18. Plans 08-11/08-12 are superseded by D-24 and preserved for SEED-007;
 > they are not completion evidence. No live credential, exact live run, controlled-
 > Linux capture, or immutable release is claimed here. D-23 defers controlled-Linux
 > qualification to SEED-006, and D-24 defers BACK-05/publication to SEED-007.
@@ -38,6 +38,10 @@ updated: 2026-09-15
    D-03/D-04. Ordinary delete completion and `CacheBlobLifecycleConflictError`
    are both valid bounded outcomes; either must still end with public absence,
    no authority entry, empty cleanup debt, and completed workers.
+7. SQLite shared-worker evidence begins only after explicit initialization has
+   completed. Concurrent first creation is not a qualification requirement;
+   exact current application identity, bounded worker completion, and subsequent
+   authority usability remain mandatory.
 
 ## Exact-Snapshot Clear/Delete Contract Correction
 
@@ -56,6 +60,26 @@ same final safety/recovery assertions for both. A bounded repeated form detects
 corruption, leaked debt, unfinished workers, and unexpected exceptions without
 requiring a particular winner or conflict frequency. No production lifecycle,
 selector, gate, package/runtime dependency, workflow, or benchmark artifact changes.
+
+## Initialized-Root Shared-Worker Contract Correction
+
+Plan 08-16's deterministic run also exposed the stale
+`test_fresh_root_bootstrap_converges_through_sqlite` premise. Across 30 focused
+runs it passed 10 times and failed 20 times when one concurrent first user
+observed the other's incomplete application identity and failed closed with
+`CacheBlobMigrationRequiredError`. That outcome does not violate the accepted
+contract: ADR 0001 rule 7, approved D-35/Plan 03-22, and
+`docs/STORAGE_INITIALIZATION.md` require initialization before shared workers and
+explicitly decline a concurrent-first-creation availability guarantee.
+
+Plan 08-18 therefore renames the node to
+`test_initialized_root_shared_workers_converge_through_sqlite`, completes one
+explicit initialization before releasing independent worker operations, and
+requires bounded completion, no errors, exact `SQLITE_APPLICATION_ID`, shared
+store identity, and subsequent authority usability. Existing foreign,
+incomplete, future-version, initialized-process, and single-process first-use
+tests remain separate and unchanged. The correction does not retry the race or
+modify production bootstrap behavior.
 
 ## Executable Local-Readiness Record
 
@@ -112,7 +136,7 @@ nonqualified. Those rows cannot enter the blocking aggregate.
 | Per-task command | Each plan task’s literal `<automated>` command |
 | Full deterministic command | `uv run --isolated --all-extras --group dev --frozen python tools/verify_phase8_contracts.py --all` |
 | Feedback target | Focused deterministic self-tests under 30 seconds; live execution is a separately bounded external job |
-| Current status | Plans 08-01 through 08-10 and 08-13 through 08-15 are complete; 08-11/08-12 are superseded; Plan 08-17 corrects the inherited contention assertion before Plan 08-16 resumes local-readiness closure |
+| Current status | Plans 08-01 through 08-10, 08-13 through 08-15, and 08-17 are complete; 08-11/08-12 are superseded; Plan 08-18 corrects the inherited initialization assertion before Plan 08-16 resumes local-readiness closure |
 
 ## Phase Requirements to Automated Evidence
 
@@ -183,8 +207,9 @@ pre-gap research percentages are diagnostic and never qualify this dependency.
 | 08-12 | — | Immutable publication | Not run | Deferred publication | Superseded by D-24; preserved intact for SEED-007 and remains NOT_PUBLISHED |
 | 08-17-01 | 9 | Exact-snapshot clear/delete success-or-typed-conflict contract with invariant final state | `uv run --isolated --all-extras --group dev --frozen pytest -q -o log_cli=false tests/test_blob_store_concurrency.py::test_clear_and_delete_converge_after_an_exact_snapshot tests/test_phase3_gap_acceptance.py::test_phase3_gap_acceptance_inventory -x` | Deterministic safety/recovery/progress | Must pass without production lifecycle changes and preserve the CR-01 node identity |
 | 08-17-02 | 9 | Bounded repeated exact-snapshot safety regression | `uv run --isolated --all-extras --group dev --frozen pytest -q -o log_cli=false tests/test_blob_store_concurrency.py::test_clear_and_delete_converge_after_an_exact_snapshot tests/test_blob_store_concurrency.py::test_clear_and_delete_exact_snapshot_stress_preserves_safety_across_valid_outcomes -x` | Deterministic safety/recovery/progress | Sixteen isolated collisions accept either documented progress outcome and fail every unsafe state or unexpected exception; Plan 16 binds both literal nodes |
-| 08-16-01 | 10 | Fixed local-readiness status/manifest contract and D-24 bindings | `uv run --isolated --all-extras --group dev --frozen pytest -q -o log_cli=false tests/test_phase8_contract_verifier.py tests/qualification/test_phase8_release.py -x` | Local-readiness contract | Already implemented; strict future release commands remain preserved while the separate local boundary is added |
-| 08-16-02 | 10 | Exact local suite, base wheel, coverage/Ruff, structural, integrity/recovery, and nonclaims | `uv run --isolated --all-extras --group dev --frozen python tools/verify_phase8_contracts.py --local-ready --output .planning/phases/08-production-gates-and-performance-stabilization/08-LOCAL-READINESS.json` | Local readiness | Resumes after 08-17; exit 0 requires every local class and exact D-23/D-24 nonclaim record |
+| 08-18-01 | 10 | Explicitly initialized SQLite root before independent shared-worker operations | `uv run --isolated --all-extras --group dev --frozen pytest -q -o log_cli=false tests/test_phase3_postreview_concurrency.py::test_initialized_root_shared_workers_converge_through_sqlite tests/test_sqlite_metadata_bootstrap_atomicity.py::test_threaded_initialized_authorities_converge_without_first_use_claims tests/test_sqlite_metadata_bootstrap_atomicity.py::test_spawned_initialized_authorities_converge_without_process_local_state tests/test_sqlite_metadata_bootstrap_atomicity.py::test_foreign_root_is_rejected_without_mutating_evidence tests/test_sqlite_metadata_bootstrap_atomicity.py::test_incomplete_authority_layout_is_rejected_without_implicit_upgrade tests/test_sqlite_lifecycle_authority.py::test_sqlite_authority_rejects_wrong_identity_without_mutating tests/test_blob_store_read_contract.py::test_composed_store_reopens_one_authenticated_canonical_generation -x` | Deterministic integrity/recovery/progress | Must pass without concurrent-first-creation retries or production lifecycle changes; Plan 16 binds the renamed node and five Plan 18 threats literally |
+| 08-16-01 | 11 | Fixed local-readiness status/manifest contract and D-24 bindings | `uv run --isolated --all-extras --group dev --frozen pytest -q -o log_cli=false tests/test_phase8_contract_verifier.py tests/qualification/test_phase8_release.py -x` | Local-readiness contract | Already implemented; strict future release commands remain preserved while the separate local boundary is added |
+| 08-16-02 | 11 | Exact local suite, base wheel, coverage/Ruff, structural, integrity/recovery, and nonclaims | `uv run --isolated --all-extras --group dev --frozen python tools/verify_phase8_contracts.py --local-ready --output .planning/phases/08-production-gates-and-performance-stabilization/08-LOCAL-READINESS.json` | Local readiness | Resumes after 08-18; exit 0 requires every local class and exact D-23/D-24 nonclaim record |
 
 ## Exact-SHA Dispatch, Wait, and Artifact Collection Gate
 
@@ -321,14 +346,18 @@ checkpoint rather than inventing values.
   regression to accept only ordinary success or the documented typed conflict,
   while always proving final absence, no authority entry, empty cleanup debt,
   and bounded worker completion.
-- **After Wave 10 / phase gate:** require Plan 16's exact local-readiness command to
+- **After Wave 10:** require Plan 18's explicitly initialized root before both
+  independent worker operations, bounded completion without errors, exact current
+  application/store identity, subsequent authority usability, and unchanged
+  invalid-evidence plus single-process-first-use companion contracts.
+- **After Wave 11 / phase gate:** require Plan 16's exact local-readiness command to
   pass deterministic integrity/recovery, base wheel/import, coverage/Ruff, and
   structural evidence for one source identity. Require exact D-23/D-24 deferral
   records and reject any live, publication, Linux, Windows, or performance promotion.
 
 ## Validation Sign-Off Criteria
 
-- [ ] Every canonical Plan 01-10 and 13-17 code-producing task has its exact automated command and evidence class; superseded Plans 11/12 remain historical future-seed inputs only.
+- [ ] Every canonical Plan 01-10 and 13-18 code-producing task has its exact automated command and evidence class; superseded Plans 11/12 remain historical future-seed inputs only.
 - [ ] Wave 0 creates every missing test/harness/workflow verifier before relying on it.
 - [ ] PostgreSQL DB-API classification, replay, pagination, and rollback selectors
       pass before coverage floors are captured.
@@ -345,6 +374,6 @@ checkpoint rather than inventing values.
 - [ ] ADR 0001 safety/recovery/progress/performance distinctions and the Phase 07.1
       obstore participant boundary remain intact.
 
-**Approval state:** Nyquist-compliant D-24 local-readiness plan; tests-only Plan
-08-17 corrects the inherited ADR progress contract before Plan 08-16 resumes.
-Neither plan has an external checkpoint.
+**Approval state:** Nyquist-compliant D-24 local-readiness plan; tests-only Plans
+08-17 and 08-18 correct inherited ADR progress/initialization contracts before
+Plan 08-16 resumes. None has an external checkpoint.
