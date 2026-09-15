@@ -17,6 +17,7 @@ from cacheness.error_handling import (
     CacheBlobBackendError,
     CacheBlobLifecycleConflictError,
     CacheBlobLifecycleTimeoutError,
+    CacheBlobMigrationRequiredError,
     CacheBlobPayloadTamperedError,
     CacheBlobRecoverableCleanupError,
 )
@@ -832,3 +833,63 @@ def test_sqlite_lifecycle_timeout_and_sqlite_failures_preserve_typed_context(
         assert isinstance(backend_error.value.__cause__, sqlite3.ProgrammingError)
     finally:
         authority.close()
+
+
+def test_sqlite_lifecycle_rejects_malformed_identity_and_schema_without_mutation(
+    tmp_path: Path,
+) -> None:
+    """Current-but-malformed authority evidence remains offline-migration-only."""
+
+    cases = (
+        (
+            "empty-store-identity-table",
+            "DELETE FROM store_identity",
+            "Lifecycle authority store identity is incompatible",
+            None,
+        ),
+        (
+            "empty-store-identity",
+            "UPDATE store_identity SET identity = ''",
+            "Lifecycle authority store identity is incompatible",
+            None,
+        ),
+        (
+            "missing-required-table",
+            "DROP TABLE reconciliation_actions",
+            "Lifecycle authority layout requires explicit offline migration or rebuild",
+            sqlite3.OperationalError,
+        ),
+    )
+    for root_name, mutation, message, cause_type in cases:
+        root = tmp_path / root_name
+        initializer = SqliteLifecycleAuthority.for_root(root)
+        try:
+            initializer.initialize()
+            database = initializer.path
+        finally:
+            initializer.close()
+
+        connection = sqlite3.connect(database)
+        try:
+            connection.execute(mutation)
+            connection.commit()
+        finally:
+            connection.close()
+        before = database.read_bytes()
+
+        reopened = SqliteLifecycleAuthority.for_root(root)
+        try:
+            with pytest.raises(CacheBlobMigrationRequiredError) as rejected:
+                reopened.initialize()
+        finally:
+            reopened.close()
+
+        assert str(rejected.value) == message
+        if cause_type is None:
+            assert rejected.value.__cause__ is None
+        else:
+            assert isinstance(rejected.value.__cause__, cause_type)
+        assert database.read_bytes() == before
+        assert not database.with_name(f"{database.name}-journal").exists()
+        assert not database.with_name(f"{database.name}-wal").exists()
+        assert not database.with_name(f"{database.name}-shm").exists()
