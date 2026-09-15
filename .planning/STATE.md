@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 08
 current_phase_name: Production Gates and Performance Stabilization
 status: executing
-stopped_at: Phase 08 replanned; execute 08-14 next
-last_updated: "2026-09-15T14:24:55Z"
+stopped_at: Completed 08-14-PLAN.md
+last_updated: "2026-09-15T15:08:29.060Z"
 last_activity: 2026-09-15
 last_activity_desc: Controlled-Linux performance qualification deferred to SEED-006; current release evidence replanned around D-23
-state_head: 1bf044601e42393e663c2e98a4c0b1b572f0b150
+state_head: e924d4c4f7132df17cac043dc7ba33108d84a089
 progress:
   total_phases: 9
   completed_phases: 7
   total_plans: 130
-  completed_plans: 126
+  completed_plans: 127
 milestone_name: milestone
 ---
 
@@ -206,6 +206,7 @@ the deliberately superseded Phase 03 plan; do not fabricate its completion.
 | Phase 08 P09 | 32min | 2 tasks | 8 files |
 | Phase 08 P10 | 3301s | 3 tasks | 4 files |
 | Phase 08 P13 | 12min | 1 tasks | 4 files |
+| Phase 08-production-gates-and-performance-stabilization P14 | 1200 | 3 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -504,6 +505,8 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - [Phase 08]: D-23 supersedes only the current release-blocking controlled-Linux portions of D-20/D-22; QUAL-06 is DEFERRED/NOT_QUALIFIED under SEED-006.
 - [Phase 08]: macOS performance evidence remains diagnostic and establishes neither Linux equivalence nor a cross-platform budget.
 - [Phase 08]: Plan 08-14 must revise release collection/aggregation/fixed verification before exact-SHA live evidence collection; all non-deferred evidence classes remain mandatory.
+- [Phase 08]: D-23 defers only QUAL-06 controlled Linux performance to SEED-006; macOS remains diagnostic-only.
+- [Phase 08]: Immutable publication requires an approval-bound prepublication digest and exact remote asset verification.
 
 ### Pending Todos
 
@@ -534,6 +537,6 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 
 ## Session Continuity
 
-Last session: 2026-09-15T14:24:55Z
-Stopped at: Phase 08 replanned; execute 08-14 next
+Last session: 2026-09-15T15:08:28.881Z
+Stopped at: Completed 08-14-PLAN.md
 Resume file: None
