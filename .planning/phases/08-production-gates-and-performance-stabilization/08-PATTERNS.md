@@ -9,6 +9,12 @@ BlobStore/AuthorityLifecycleEngine authority and ADR 0001's separation of integr
 recovery, bounded progress, and performance. These assignments authorize no new
 lifecycle lock, queue, lease, retry coordinator, or source of truth.
 
+**2026-09-15 amendment:** D-23 defers controlled-Linux qualification to SEED-006.
+The benchmark, workflow, and preflight patterns below remain valid future capability,
+but current release collection/aggregation requires only non-deferred classes and
+records controlled performance as `DEFERRED`/`NOT_QUALIFIED`. macOS diagnostics are
+never a Linux-equivalent substitute.
+
 ## File Classification
 
 | New/Modified File | Role | Data Flow | Closest Analog | Match Quality |
@@ -264,7 +270,8 @@ not instantiate a handler-by-topology Cartesian matrix.
 Analog: benchmarks/lifecycle_authority_baseline.json and validation at
 lifecycle_authority_benchmark.py:548-612.
 
-Retain command/harness/source commit/environment/cardinalities/repetitions/warmups,
+For future SEED-006 qualification, retain command/harness/source
+commit/environment/cardinalities/repetitions/warmups,
 metrics, and derived envelopes, but bind them to current obstore/authority composition
 and the controlled Linux runner. The old artifact records macOS arm64, user_version 1,
 and legacy cardinalities (lines 2-31); production now uses schema 9, so it is not a
@@ -329,10 +336,11 @@ Never run on untrusted pull requests or inherit prior artifacts.
 
 ### .github/workflows/performance.yml (config/workflow, event-driven + batch)
 
-No direct analog: use benchmark CLI modes/baseline validation. Restrict to the named
-controlled Linux runner; run canonical Phase 8 benchmarks and compare against the
-checked-in baseline. Keep pyperf stability and relative envelopes in Python. Remote
-live latency is diagnostic, not this blocking local timing gate.
+No direct analog: this is retained future SEED-006 capability. Use benchmark CLI
+modes/baseline validation and restrict execution to the named controlled Linux runner;
+run canonical Phase 8 benchmarks and compare against the checked-in baseline only when
+SEED-006 is promoted. Keep distribution stability and relative envelopes in Python.
+Remote live latency and macOS timing are diagnostic, not current qualifying evidence.
 
 ### tools/verify_phase8_release.py (utility, transform + file I/O)
 
@@ -341,9 +349,12 @@ tests/test_phase3_release_evidence.py release artifact checks (34-83).
 
 Read artifacts without repairing/upgrading, validate schema/status, recompute relevant
 source identity, and require exact release revision. Aggregate references or digests
-for deterministic, packaging, platform, coverage, performance, and live classes. Fail
+for deterministic, packaging, platform, coverage, structural, and live classes. Record
+controlled performance separately as the exact D-23/SEED-006 deferred nonclaim; do not
+dispatch or admit its diagnostic artifact into the current release asset set. Fail
 closed if live is not QUALIFIED, cleanup is not CLEAN, source identity is stale, or a
-required class is absent. Keep diagnostics separate from the lifetime release asset.
+non-deferred required class is absent. Keep diagnostics separate from lifetime release
+assets.
 
     if evidence_revision != release_revision:
         raise ReleaseQualificationError("evidence revision does not match release revision")

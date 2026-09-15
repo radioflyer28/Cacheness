@@ -4,15 +4,15 @@ milestone: v1.0
 current_phase: 08
 current_phase_name: Production Gates and Performance Stabilization
 status: executing
-stopped_at: Completed 08-13-PLAN.md
-last_updated: "2026-09-14T04:39:54.710Z"
-last_activity: 2026-09-14
-last_activity_desc: Phase 08 Plan 08 completed; protected real PostgreSQL/Amazon-S3 qualification machinery recorded
+stopped_at: Phase 08 replanned; execute 08-14 next
+last_updated: "2026-09-15T14:24:55Z"
+last_activity: 2026-09-15
+last_activity_desc: Controlled-Linux performance qualification deferred to SEED-006; current release evidence replanned around D-23
 state_head: 1bf044601e42393e663c2e98a4c0b1b572f0b150
 progress:
   total_phases: 9
   completed_phases: 7
-  total_plans: 129
+  total_plans: 130
   completed_plans: 126
 milestone_name: milestone
 ---
@@ -21,7 +21,7 @@ milestone_name: milestone
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-09-13)
+See: .planning/PROJECT.md (updated 2026-09-15)
 
 **Core value:** Applications can store and retrieve data reliably through one backend-neutral lifecycle, with caching policy layered above storage without compromising integrity or cleanup correctness.
 **Current focus:** Phase 08 — Production Gates and Performance Stabilization
@@ -29,9 +29,9 @@ See: .planning/PROJECT.md (updated 2026-09-13)
 ## Current Position
 
 Phase: 08 — Production Gates and Performance Stabilization
-Plan: 12 of 12
-Status: Ready to execute
-Last activity: 2026-09-14 — Phase 08 Plan 08 completed; protected real PostgreSQL/Amazon-S3 qualification machinery recorded
+Plan: 14 of 14
+Status: Ready to execute 08-14, then 08-11 and 08-12
+Last activity: 2026-09-15 — D-23 deferred controlled-Linux performance qualification to SEED-006 without a macOS substitution claim
 
 Phase 07.1 closed with 11/11 plans summarized and an independent 46/46
 must-have verification pass. Built-in filesystem, memory, and S3 payload
@@ -41,8 +41,9 @@ single `AuthorityLifecycleEngine`, and `UnifiedCache` remains policy-only.
 The security audit closes 47/47 plan threats after a bounded canonical-evidence
 parser repair. ETag/version remain opaque signed transport corroboration;
 canonical SHA-256 plus size remains the integrity decision. Live AWS,
-PostgreSQL, platform/package matrices, performance/RSS, and hash benchmarking
-remain explicit Phase 8 nonclaims.
+PostgreSQL, and platform/package evidence remain unqualified until their Phase 8
+gates run. Structural RSS contracts and hash-benchmark capability are retained;
+controlled-Linux performance qualification is deferred to SEED-006 by D-23.
 
 Roadmap progress: [█████████░] 8 of 9 phases complete. The generated disk plan
 counter still includes the deliberately superseded Phase 03 plan; do not reopen
@@ -498,17 +499,20 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - [Phase 08]: Phase 08 Plan 09 qualifies retained TensorFlow support only on Python 3.11 and 3.12, matching the package probe's declared compatible range.
 - [Phase 08]: Phase 08 Plan 10: exact-SHA release collection records fresh run IDs and fixed artifact names; latest-run selection is prohibited.
 - [Phase 08]: Phase 08 Plan 10: bounded UNAVAILABLE packaging/platform envelopes stay explicit release-blocking nonclaims rather than generic failures or passes.
-- [Phase 08]: Phase 08 Plan 13: Controlled-runner preflight emits bounded eligibility only; performance stability remains Plan 08-11 work.
+- [Phase 08]: Phase 08 Plan 13: Controlled-runner preflight emits bounded eligibility only; its original Plan 08-11 performance handoff is superseded by D-23 and retained for SEED-006.
 - [Phase 08]: Phase 08 Plan 13: Only cacheness-perf-linux-x64 plus clean detached exact SHA and canonical allow-listed digest can qualify capture.
+- [Phase 08]: D-23 supersedes only the current release-blocking controlled-Linux portions of D-20/D-22; QUAL-06 is DEFERRED/NOT_QUALIFIED under SEED-006.
+- [Phase 08]: macOS performance evidence remains diagnostic and establishes neither Linux equivalence nor a cross-platform budget.
+- [Phase 08]: Plan 08-14 must revise release collection/aggregation/fixed verification before exact-SHA live evidence collection; all non-deferred evidence classes remain mandatory.
 
 ### Pending Todos
 
 - Apply ADR 0001 and the Phase 7 maintenance boundaries during Phase 8 qualification; a failing contention probe does not authorize another coordination mechanism.
-- Keep live PostgreSQL/AWS S3, native Windows, supported-Python, packaging, coverage, and performance evidence in Phase 8.
+- Keep live PostgreSQL/AWS S3, supported-Python, packaging, coverage, and structural evidence in Phase 8; retain controlled-performance capability but defer its qualification to SEED-006 and native Windows to Phase 999.1.
 
 ### Blockers/Concerns
 
-- Phase 8 performance and coverage thresholds must be finalized from measured baselines rather than estimates.
+- QUAL-06 controlled-Linux thresholds remain unqualified until SEED-006; no macOS or diagnostic measurement may substitute.
 - PostgreSQL/AWS S3 BACK-05, native Windows, supported-Python, and packaging evidence remain unqualified until Phase 8 runs their non-substitutable gates.
 
 ### Roadmap Evolution
@@ -516,6 +520,7 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - Phase 5 edited: Moved BACK-05 non-substitutable PostgreSQL/Amazon-S3 real-service qualification gate intact to Phase 8; Phase 5 retains the candidate implementation, deterministic contracts, frozen live suites, fail-closed runner, and truthful UNAVAILABLE evidence without a release support claim.
 - Phase 07.1 inserted after Phase 7: Obstore Payload Participant Unification (URGENT)
 - Phase 8 edited: edited fields: depends_on
+- Phase 8 replanned: D-23 removes controlled-Linux performance from the current blocking aggregate, adds Plan 08-14, and preserves SEED-006 as the future qualification path.
 
 ## Deferred Items
 
@@ -529,6 +534,6 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 
 ## Session Continuity
 
-Last session: 2026-09-14T04:39:54.462Z
-Stopped at: Completed 08-13-PLAN.md
+Last session: 2026-09-15T14:24:55Z
+Stopped at: Phase 08 replanned; execute 08-14 next
 Resume file: None

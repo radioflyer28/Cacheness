@@ -577,17 +577,17 @@ Plans:
 
 **Goal**: Users can rely on reproducible release evidence across supported installations, Python versions, backends, failures, and operational scale.
 **Depends on**: Phase 07.1
-**Requirements**: BACK-05, QUAL-01, QUAL-02, QUAL-03, QUAL-04, QUAL-05, QUAL-06, QUAL-07
+**Requirements**: BACK-05, QUAL-01, QUAL-02, QUAL-03, QUAL-04, QUAL-05, QUAL-07
 **Success Criteria** (what must be TRUE):
 
   1. A clean minimal wheel imports every guaranteed public symbol and completes a memory-backed round trip, while each advertised extra installs and imports independently.
   2. Required CI passes across supported Python versions, backend contracts, lint and coverage policy, packaging, real PostgreSQL, and authoritative real AWS S3 integration. The frozen Phase 5 runner must produce sanitized QUALIFIED evidence with exact cleanup before PostgreSQL/Amazon-S3 becomes a supported release topology (BACK-05).
   3. Carry forward Phase 3's finite integrity/recovery regressions and add named cases for new supported topologies and commit boundaries; lifecycle/cache-policy modules meet the project's statement and branch coverage gates. Shared-worker fixtures initialize first and distinguish valid typed contention outcomes from corruption. This is not a proof of every interleaving or an automatic repeated race-repair loop.
-  4. Checked-in benchmarks establish reviewed latency and throughput budgets for named workloads/environments after lifecycle behavior stabilizes, recording distributions separately from correctness gates. A regression cannot silently strengthen runtime deadlines or public failure semantics.
+  4. The checked-in benchmark harness, representative workloads, SHA-256/XXH3 comparison, and runner preflight remain reproducible future qualification capability. Controlled-Linux budgets and QUAL-06 are explicitly `DEFERRED`/`NOT_QUALIFIED` under `SEED-006` and do not block this milestone; macOS measurements remain diagnostic and make no Linux-equivalence or cross-platform budget claim.
   5. Inventory, reconciliation, statistics, clear, and aggregate operations demonstrate bounded memory and backend-call behavior without accidental N+1 access patterns.
   6. Qualify exact commits in isolated environments and retain failed-run evidence plus migration fixtures for deliberately supported source versions. Phase 5's PostgreSQL/Amazon-S3 candidate remains unqualified until its non-substitutable real-service gate passes here; unavailable services never count as passes. Historical compatibility tests may remain as evidence but are not release blockers for removed pre-production APIs/layouts. Windows remains UNAVAILABLE/NOT_QUALIFIED until Phase 999.1 supplies native evidence. Optimization must preserve one authority and may not introduce a projection-repair prerequisite for canonical operations.
 
-**Plans**: 11/13 plans executed
+**Plans**: 11/14 plans executed
 
 Plans:
 
@@ -602,7 +602,8 @@ Plans:
 - [x] 08-09-PLAN.md — Compose deterministic quality gates into the supported CI matrix.
 - [x] 08-10-PLAN.md — Build the fixed verifier, exact-SHA workflow collector, release aggregator, and publication verifier.
 - [x] 08-13-PLAN.md — Add the read-only exact-commit controlled-runner preflight required before baseline capture.
-- [ ] 08-11-PLAN.md — Capture the controlled baseline, collect exact-run evidence, and aggregate the qualified commit.
+- [ ] 08-14-PLAN.md — Make controlled performance an explicit deferred nonclaim in release collection, aggregation, verification, and documentation.
+- [ ] 08-11-PLAN.md — Collect exact-run non-deferred evidence and aggregate the qualified commit.
 - [ ] 08-12-PLAN.md — Create, authorize, publish, and verify the exact immutable release record.
 
 ## Progress
@@ -617,7 +618,7 @@ Plans:
 | 6. UnifiedCache Policy Composition | 11/11 | Complete    | 2026-09-09 |
 | 7. Explicit Migration and Rebuild Cutover | 24/24 | Complete    | 2026-09-11 |
 | 07.1. Obstore Payload Participant Unification | 11/11 | Complete | 2026-09-13 |
-| 8. Production Gates and Performance Stabilization | 11/13 | In Progress|  |
+| 8. Production Gates and Performance Stabilization | 11/14 | In Progress|  |
 
 ## Backlog
 

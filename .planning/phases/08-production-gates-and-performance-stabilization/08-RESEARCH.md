@@ -4,6 +4,18 @@
 **Domain:** Python package release qualification, live-service evidence, coverage ratchets, and controlled performance gates
 **Confidence:** HIGH
 
+## 2026-09-15 execution amendment
+
+The user deferred controlled-Linux performance qualification from the current
+milestone after the harness, workload inventory, hash comparison, workflow, and
+read-only runner preflight were implemented. D-23 supersedes only the
+release-blocking controlled-Linux portions of D-20/D-22: QUAL-06 remains
+`DEFERRED`/`NOT_QUALIFIED` under `SEED-006`, and the current release aggregate
+must name that nonclaim without accepting macOS diagnostics as Linux-equivalent
+evidence. All other research findings remain applicable, especially exact-SHA
+real PostgreSQL/Amazon-S3 qualification and ADR 0001's separation of correctness,
+progress, and performance.
+
 <user_constraints>
 ## User Constraints (from CONTEXT.md)
 
@@ -40,6 +52,7 @@
 - **D-20:** On a named controlled Linux runner, compare median and tail distributions with a checked-in baseline. Release blocking applies only to reviewed regressions outside a statistically defensible relative envelope. Baseline changes require explicit justification and must not become runtime deadlines or stronger public progress semantics.
 - **D-21:** Declare expected page/work complexity and maximum backend-call formulas for inventory, reconciliation, statistics, clear, and aggregate operations. Exercise fixed scale tiers to detect accidental N+1 behavior and unbounded memory independently of machine speed.
 - **D-22:** Controlled local performance gates may block release. Live PostgreSQL/Amazon-S3 qualification blocks on integrity and recovery behavior; remote latency distributions are diagnostic only.
+- **D-23:** Controlled-Linux qualification and QUAL-06 are deferred to SEED-006 and do not block the current milestone. Retain the implemented harness/workflows as future capability; record `DEFERRED`/`NOT_QUALIFIED` in release evidence; never substitute macOS diagnostics or claim Linux equivalence. All non-deferred classes, including exact-SHA real PostgreSQL/Amazon-S3 evidence, remain mandatory.
 
 ### the agent's Discretion
 - Select the exact clean-environment tooling, CI job decomposition, artifact retention duration, representative fixture sizes, sample counts, warmups, statistical envelope calculation, and controlled Linux runner identity, provided the choices are explicit and reproducible.
@@ -50,6 +63,7 @@
 - Investigate Narwhals as a future dataframe-handler compatibility layer across pandas, PyArrow, and Polars while retaining Parquet as the handler-owned format. This is a future handler/extensibility milestone, not Phase 8 qualification work.
 - SEED-003 may revisit a versioned XXH3 canonical payload digest after Phase 8 supplies comparative throughput and end-to-end cost evidence.
 - Native Windows lifecycle qualification remains Phase 999.1 because no eligible Windows environment is available.
+- Controlled-Linux performance qualification is deferred to SEED-006. Existing macOS observations remain diagnostic only.
 </user_constraints>
 
 <phase_requirements>
@@ -60,20 +74,24 @@
 | BACK-05 | PostgreSQL and AWS S3 behavior is verified with real-service integration coverage; compatible S3 services are supported only where explicitly verified. | Preserve and rebind the Phase 5 fail-closed runner to the Phase 07.1 obstore participant; run it on protected release candidates and schedule, with exact-revision and clean-cleanup evidence. [VERIFIED: `.planning/REQUIREMENTS.md:27`; `tools/run_phase5_qualification.py:27-55,291-368,395-491`] |
 | QUAL-01 | A clean minimal wheel installation imports every guaranteed public symbol and completes a memory-backed round trip. | Extend the existing base-wheel probe to import the complete public barrels and exercise generic plus NumPy formats in a genuinely isolated environment. [VERIFIED: `.planning/REQUIREMENTS.md:64`; `tests/test_full_suite_environment.py:122-174`] |
 | QUAL-02 | Each advertised optional dependency group installs and imports independently. | Generate one wheel, create one fresh environment per literal optional group, and require an independent representative probe; do not use one all-extras environment as proof. [VERIFIED: `.planning/REQUIREMENTS.md:65`; `pyproject.toml:18-45`] |
-| QUAL-03 | CI covers supported Python versions, backend contracts, lint policy, coverage, packaging, PostgreSQL, and AWS S3 integration. | Add deterministic PR, Linux Python matrix, macOS boundary smoke, protected/scheduled live, and controlled-performance workflows; the repository currently has no workflow files. [VERIFIED: `.planning/REQUIREMENTS.md:66`; repository file inventory, 2026-09-13] |
+| QUAL-03 | CI covers supported Python versions, backend contracts, lint policy, coverage, packaging, PostgreSQL, and AWS S3 integration. | Add deterministic PR, Linux Python matrix, macOS boundary smoke, and protected/scheduled live workflows. Retain the implemented controlled-performance workflow for SEED-006, outside the current release collection. [VERIFIED: `.planning/REQUIREMENTS.md:66`; completed Plan 08-07/08-09 summaries; `08-CONTEXT.md` D-23] |
 | QUAL-04 | Carry forward the finite Phase 3 integrity/recovery regressions and cover named commit boundaries for each new supported topology with deterministic fault/crash tests. Shared-worker fixtures initialize first; success/conflict/typed retryable outcomes are distinguished from corruption. No universal scheduling guarantee or automatic repeated race-fix loop is required. | Keep the completed Phase 07.1 fixed verifier and focused fault tests in the deterministic gate; do not translate typed contention into a new scheduler. [VERIFIED: `.planning/REQUIREMENTS.md:67`; `.planning/phases/07.1-obstore-payload-participant-unification/07.1-VERIFICATION.md:160-180`] |
 | QUAL-05 | Lifecycle and cache-policy code meets targeted statement and branch coverage thresholds established by the project. | Check in the measured branch-aware baseline, close named gaps, then gate both repository total and an explicit critical-module aggregate against non-regression. [VERIFIED: `.planning/REQUIREMENTS.md:68`; local branch-coverage measurement, 2026-09-13] |
-| QUAL-06 | Checked-in benchmarks establish final performance budgets and distributions for named workloads/environments after lifecycle behavior stabilizes. Benchmark thresholds do not become runtime deadlines or strengthen public progress/atomicity promises. | Replace the stale canonical entry point with controlled Linux pyperf distributions, layer-separated workloads, hashes, memory evidence, and reviewed relative envelopes. [VERIFIED: `.planning/REQUIREMENTS.md:69`; `benchmarks/lifecycle_authority_benchmark.py:1-9,43-70,562-571`] |
 | QUAL-07 | Supported inventory and aggregate operations avoid unbounded memory use and accidental N+1 backend calls. | Carry forward the completed contracts and add explicit formula/scale assertions for inventory, reconciliation, statistics, clear, and aggregate/policy-maintenance operations. [VERIFIED: `.planning/REQUIREMENTS.md:70`; `src/cacheness/storage/reconciliation.py:176-205`; `src/cacheness/storage/lifecycle.py:933-1047`] |
 </phase_requirements>
+
+**Deferred requirement:** QUAL-06 retains its original performance-budget and
+distribution definition, but D-23 moves its controlled-Linux qualification to
+SEED-006. Phase 8 keeps its implemented harness and self-tests without closing
+the requirement or treating macOS diagnostics as a replacement.
 
 ## Summary
 
 Phase 8 should be planned as an evidence pipeline around the architecture that already exists. `BlobStore` and `AuthorityLifecycleEngine` remain the only lifecycle authority; `ObstoreGenerationIO` remains a mechanics-only payload participant; `UnifiedCache` observes that storage lifecycle and adds policy. The ADR explicitly distinguishes integrity, deterministic recovery, bounded/typed progress, measured performance, and the ACID boundary of a single transactional resource. Nothing in a benchmark, coverage report, or live-service run authorizes a new lock, queue, lease, retry loop, metadata mirror, or coordinator. [VERIFIED: `docs/adr/0001-topology-specific-storage-guarantees.md:30-68`; `.planning/phases/07.1-obstore-payload-participant-unification/07.1-VERIFICATION.md:64-79,127-152`]
 
-The major planning work is therefore release orchestration: a branch-aware coverage ratchet, direct Ruff scope gates, clean-wheel feature probes, a supported-version/platform matrix, exact-commit live evidence, and a replacement performance suite on a controlled Linux runner. The current deterministic suite is green when the three live modules are excluded, but the measured baseline is only 75.29% statement and 58.82% branch coverage, there are no checked-in CI workflow files, all six TensorFlow behavior tests are unconditionally skipped, and the checked-in lifecycle benchmark rejects its own baseline because production SQLite schema version `9` does not match baseline version `1`. [VERIFIED: local test/coverage/benchmark probes, 2026-09-13; `tests/test_tensorflow_handler.py:7-24,36-39,56-59,94-97,122-125,170-173,188-191`; `src/cacheness/storage/sqlite_lifecycle_authority.py:90-97`; `benchmarks/lifecycle_authority_baseline.json:1-31`; `benchmarks/lifecycle_authority_benchmark.py:562-567`]
+The original planning work included release orchestration plus a replacement performance suite on a controlled Linux runner. The harness, workload, workflow, hash-comparison, and preflight portions were implemented; D-23 now moves actual controlled capture and budget qualification to SEED-006. Current Phase 8 work is exact-commit release orchestration across every non-deferred class. [VERIFIED: completed Plan 08-07/08-13 summaries; `08-CONTEXT.md` D-23]
 
-**Primary recommendation:** Build one fail-closed Phase 8 release manifest that references independent deterministic, packaging, coverage, controlled-performance, platform, and live-service evidence for the exact commit; keep the evidence classes and their blocking rules separate. [VERIFIED: `08-CONTEXT.md` D-03, D-09 through D-13, D-20 through D-22]
+**Amended primary recommendation:** Build one fail-closed Phase 8 release manifest that requires independent deterministic, packaging, coverage, platform, structural, and live-service evidence for the exact commit, and also records controlled performance as `DEFERRED`/`NOT_QUALIFIED` with a SEED-006 reference. Keep the evidence classes separate; never infer Linux performance from macOS diagnostics. [VERIFIED: `08-CONTEXT.md` D-03, D-09 through D-13, D-23]
 
 ## Architectural Responsibility Map
 
@@ -259,7 +277,7 @@ These are proposed paths, not claims about existing files. [ASSUMED] If the plan
 
 ### Pattern 1: Evidence-Class Separation
 
-**What:** Give each evidence class its own command, schema, blocking rule, and artifact. Deterministic tests and packaging block PRs; controlled local performance blocks release; live remote integrity/recovery blocks release; remote latency and prerelease Python remain advisory. [VERIFIED: `08-CONTEXT.md` D-05, D-09 through D-13, D-20 through D-22]
+**Amended use:** Give each evidence class its own command, schema, status rule, and artifact boundary. Deterministic tests and packaging block PRs; live remote integrity/recovery blocks release; controlled performance remains `DEFERRED`/`NOT_QUALIFIED` for SEED-006; remote latency, macOS timing, and prerelease Python remain advisory. [VERIFIED: `08-CONTEXT.md` D-05, D-09 through D-13, D-23]
 
 **When to use:** Every workflow and release aggregation task.
 
@@ -291,7 +309,7 @@ Create one aggregate release manifest that contains digests/references to determ
 
 **What:** Use pyperf worker processes, calibration, warmups, raw JSON, machine metadata, stability checks, and statistical comparison. Compare medians and tails on one named runner; separately record maximum memory and backend-call formulas. [CITED: https://pyperf.readthedocs.io/en/latest/]
 
-**When to use:** Phase 8 baseline capture and later release comparisons on the same controlled Linux identity.
+**When to use:** Future SEED-006 baseline capture and later performance-qualified release comparisons on the same controlled Linux identity; not as current Phase 8 qualifying evidence.
 
 **Implementation guidance:** Use 20 measured worker processes after pyperf calibration for release workloads, reject unstable runs before comparison, and block only when the comparison is statistically significant and exceeds a reviewed 20% relative slowdown envelope. Treat these exact defaults as initial research recommendations to validate on the controlled runner, not as correctness or runtime deadline constants. [ASSUMED]
 
@@ -541,11 +559,11 @@ The discrete values `"QUALIFIED"` and `"CLEAN"` are quoted verbatim from `_STATU
 ### Environmental/human prerequisites
 
 1. Approve `pyperf==2.10.0` after reviewing the official PSF repository/PyPI attestation; the automated legitimacy seam returned `SUS`. [VERIFIED: package-legitimacy seam, 2026-09-13; CITED: https://pypi.org/project/pyperf/]
-2. Provision the physical machine behind the settled workflow label `cacheness-perf-linux-x64`, then record stable CPU, governor, filesystem, Python, uv, SQLite, workload-isolation, and runner-image facts in the baseline fingerprint. The current machine is macOS ARM64 and is not eligible for D-20; no controlled-runner evidence currently exists. [VERIFIED: `08-11-PLAN.md` Task 1 precondition; local environment probe, 2026-09-13; `08-CONTEXT.md` D-20]
+2. **Deferred to SEED-006:** provision the physical machine behind the settled workflow label `cacheness-perf-linux-x64`, then record stable CPU, governor, filesystem, Python, uv, SQLite, workload-isolation, and runner-image facts in the baseline fingerprint. The current machine is macOS ARM64 and supplies no controlled-Linux evidence. [VERIFIED: `08-CONTEXT.md` D-23]
 3. Configure the protected GitHub release environment with real PostgreSQL and Amazon S3 secrets, IAM/bucket policy, explicit bucket/region, and no endpoint override. The owning cloud/repository administrator must run the Phase 8 runner preflight before dispatch; all four required qualification variables are currently unset locally, so the present state is `UNAVAILABLE`, not evidence. [VERIFIED: `tools/run_phase5_qualification.py:34-39,95-99`; local environment probe, 2026-09-13]
 4. Enable immutable GitHub releases and give a named release operator permission to create a draft, upload assets, verify digests, and publish it. The checkpoint must inspect actual repository/organization settings and `gh auth status`; repository settings, reviewer identity, credentials, and approval are external facts and are not claimed here. [CITED: https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases]
 5. Dispatch the protected workflow for the explicit candidate SHA, record its exact run ID, wait for that run, download the named artifact by run ID, then validate the envelope before aggregation. Run the live suite against both services only after all relevant code/test/tool/workflow changes; no local substitute can close BACK-05. [VERIFIED: `08-CONTEXT.md` D-10 through D-12; CITED: https://cli.github.com/manual/gh_run_download]
-6. Capture and review the first controlled Linux performance baseline; statistical thresholds cannot be finalized from this macOS research run. [VERIFIED: `08-CONTEXT.md` D-14 and D-20]
+6. **Deferred to SEED-006:** capture and review the first controlled Linux performance baseline; statistical thresholds cannot be finalized from macOS diagnostic evidence. [VERIFIED: `08-CONTEXT.md` D-23]
 7. Provide/confirm GitHub-hosted macOS capacity for Python 3.11 and 3.14 boundary smoke. Native Windows remains explicitly deferred. [VERIFIED: `08-CONTEXT.md` D-06]
 
 ## Assumptions Log
@@ -570,7 +588,7 @@ No design question remains open. The five prior questions are resolved into dete
 1. **RESOLVED — controlled Linux runner identity**
    - **Settled design:** `.github/workflows/performance.yml` targets the exact logical label `cacheness-perf-linux-x64`; every baseline/evidence envelope carries the full physical fingerprint and rejects label, OS/architecture, CPU/governor, filesystem, Python/uv/SQLite, or source-SHA drift. [VERIFIED: `08-07-PLAN.md` Task 3; `08-11-PLAN.md` Task 1]
    - **External prerequisite/owner:** a repository/infrastructure maintainer must provision and register the physical runner. No machine identity is asserted by this research.
-   - **Preflight/checkpoint:** before baseline capture, Plan 11 Task 1 verifies the exact label, Linux x86-64 identity, stable fingerprint/noise, clean worktree, and candidate SHA. If unavailable or unstable, QUAL-06 stays unqualified and there is no local/macOS fallback. [VERIFIED: `08-CONTEXT.md` D-20]
+   - **Preflight/checkpoint:** the implemented read-only Plan 13 preflight remains available for SEED-006. No current Phase 8 task captures the baseline; QUAL-06 stays `DEFERRED`/`NOT_QUALIFIED` and there is no local/macOS fallback. [VERIFIED: `08-CONTEXT.md` D-23]
 
 2. **RESOLVED — TensorFlow support messaging**
    - **Settled design:** advertise and gate base/core plus installable non-TensorFlow groups on stable Python 3.11-3.14; qualify the TensorFlow extra on Python 3.11-3.13; explicitly record TensorFlow-on-3.14 as dependency-incompatible and never silently skip it. [VERIFIED: `08-02-PLAN.md` and `08-03-PLAN.md`; CITED: https://devguide.python.org/versions/; CITED: https://pypi.org/project/tensorflow/]
@@ -597,7 +615,7 @@ No design question remains open. The five prior questions are resolved into dete
 | Gate | Checkpoint type | Owner | Resume signal | On failure/absence |
 |---|---|---|---|---|
 | `pyperf` package legitimacy | `checkpoint:human-verify` | Maintainer | Explicit package approval or explicit rejection selecting the documented in-repo fallback | Do not install or silently continue |
-| Physical controlled runner | `checkpoint:human-action` | Repository/infrastructure maintainer | Runner registered under `cacheness-perf-linux-x64` and preflight fingerprint attached | QUAL-06 remains unavailable |
+| Physical controlled runner | Deferred; no Phase 8 checkpoint | Future SEED-006 owner | Existing `cacheness-perf-linux-x64` preflight remains available | QUAL-06 remains `DEFERRED`/`NOT_QUALIFIED`; current release continues without a performance substitution |
 | Protected live resources/secrets | `checkpoint:human-action` | Cloud/repository administrator | Configuration-only preflight succeeds without disclosing values | BACK-05 remains `UNAVAILABLE` |
 | Exact candidate dispatch | `checkpoint:human-verify` | Release operator | Exact candidate SHA approved; resulting run ID recorded | Do not select another/latest run |
 | Immutable release enablement/permissions | `checkpoint:human-action` | Repository administrator | Actual policy and authenticated permission preflights pass | Final release publication is blocked |
@@ -619,12 +637,12 @@ After the resume signal, deterministic automation continues and revalidates the 
 | PostgreSQL client/service | Live qualification | ✗ locally | — | No qualifying fallback; protected real service required. [VERIFIED: local environment probe, 2026-09-13; `08-CONTEXT.md` D-11] |
 | AWS CLI | Operations support | ✓ binary | Not probed | Runner uses standard AWS credential chain; CLI itself is not proof. [VERIFIED: local environment probe, 2026-09-13] |
 | Live qualification configuration | BACK-05 | ✗ locally | All four required variable names unset | No qualifying fallback. [VERIFIED: local environment probe, 2026-09-13; `tools/run_phase5_qualification.py:34-39`] |
-| Controlled Linux performance runner | QUAL-06 | ✗ not identified | — | No release-gate fallback; local macOS numbers are diagnostic only. [VERIFIED: `08-CONTEXT.md` D-20] |
+| Controlled Linux performance runner | QUAL-06 / SEED-006 | ✗ not identified | — | Deferred from the current milestone; local macOS numbers remain diagnostic only and establish no Linux equivalence. [VERIFIED: `08-CONTEXT.md` D-23] |
 | GitHub Actions workflows | QUAL-03 | ✗ no files found | — | Wave 0 must create workflows. [VERIFIED: repository file inventory, 2026-09-13] |
 | Network package registry access | Clean installs/current probe | ✗ in this sandbox | DNS unavailable | CI or approved networked environment. [VERIFIED: failed uv/pip registry probes, 2026-09-13] |
 | `pyperf` | Controlled benchmarks | ✗ locally | Official latest 2.10.0 | Human checkpoint, then add locked dev dependency; otherwise retain reviewed custom runner. [VERIFIED: local package probe and legitimacy seam, 2026-09-13; CITED: https://pypi.org/project/pyperf/] |
 
-**Missing dependencies with no fallback:** real PostgreSQL/Amazon S3 configuration for BACK-05, the controlled Linux performance runner for QUAL-06, and repository CI/protected-release configuration for QUAL-03. [VERIFIED: environment audit and `08-CONTEXT.md` D-09 through D-13, D-20]
+**Missing current-milestone dependencies with no fallback:** real PostgreSQL/Amazon S3 configuration for BACK-05 and repository CI/protected-release configuration for QUAL-03. The controlled Linux runner is a SEED-006 dependency, not a current release blocker. [VERIFIED: environment audit and `08-CONTEXT.md` D-09 through D-13, D-23]
 
 **Missing dependencies with fallback:** local Python 3.14 and network installs can run in CI; local macOS is not the controlled performance source. [ASSUMED]
 
@@ -648,17 +666,17 @@ The full-suite command includes marked live modules and therefore must be used w
 | BACK-05 | Exact-commit PostgreSQL + Amazon S3 behavior, no skips/emulator, exact cleanup | live integration + runner contract | `uv run ... python tools/run_phase8_qualification.py --output build/live.json` [ASSUMED] | ❌ Wave 0 adapter; existing Phase 5 runner/live modules are reusable. [VERIFIED: `tools/run_phase5_qualification.py`; `tests/integration/test_postgresql_authority.py`; `tests/integration/test_s3_generation.py`; `tests/integration/test_remote_topology.py`] |
 | QUAL-01 | Base wheel public imports + generic and NumPy format round trips | packaging integration | `uv run ... pytest -q tests/packaging/test_wheel_matrix.py -k base` [ASSUMED] | ❌ Wave 0 extension; partial existing probe at `tests/test_full_suite_environment.py:122-174`. [VERIFIED] |
 | QUAL-02 | Each literal optional group installs independently and performs representative round trip | packaging integration | `uv run ... pytest -q tests/packaging/test_wheel_matrix.py -k extras` [ASSUMED] | ❌ Wave 0; current test covers only base/S3/cloud import and base round trip. [VERIFIED: `tests/test_full_suite_environment.py:122-174`] |
-| QUAL-03 | Linux stable matrix, macOS boundary, deterministic backend, lint/format, coverage, package, live and performance gates | CI contract/self-test | `uv run ... pytest -q tests/test_phase8_quality_gates.py` [ASSUMED] | ❌ Wave 0; no workflow files exist. [VERIFIED: repository file inventory, 2026-09-13] |
+| QUAL-03 | Linux stable matrix, macOS boundary, deterministic backend, lint/format, coverage, package, and live gates | CI contract/self-test | `uv run ... pytest -q tests/test_phase8_quality_gates.py` [ASSUMED] | Original planning gap; current release aggregation is revised by Plan 08-14. |
 | QUAL-04 | Existing finite integrity/recovery/commit-boundary selectors stay present and green | deterministic fault/crash | `uv run ... python tools/verify_phase071_contracts.py --all` | ✅ Existing fixed verifier. [VERIFIED: `.planning/phases/07.1-obstore-payload-participant-unification/07.1-VERIFICATION.md:160-180`] |
 | QUAL-05 | Named gaps + repository and critical statement/branch non-regression | deterministic coverage | `uv run ... pytest --cov=cacheness --cov-branch ... && uv run ... python tools/verify_phase8_coverage.py ...` [ASSUMED] | ❌ Wave 0 verifier/baseline; raw measurement completed in research. [VERIFIED: local coverage JSON, 2026-09-13] |
-| QUAL-06 | Layered formats/hashes, distributions, memory, exact environment/revision, reviewed relative envelope | benchmark + harness contracts | `uv run ... python benchmarks/phase8_benchmarks.py -o build/phase8.json` [ASSUMED] | ❌ Wave 0 replacement; existing benchmark is stale. [VERIFIED: `benchmarks/lifecycle_authority_benchmark.py:257-290,562-567`] |
+| QUAL-06 | Layered formats/hashes, distributions, memory, exact environment/revision, reviewed relative envelope | benchmark + harness contracts | Existing Phase 8 benchmark self-tests and preflight preserve future capability | `DEFERRED`/`NOT_QUALIFIED` to SEED-006; no current controlled capture and no macOS substitution. |
 | QUAL-07 | Inventory/reconciliation/statistics/clear/aggregate call and memory formulas at scale | deterministic structural | `uv run ... pytest -q tests/performance/test_complexity_contracts.py` [ASSUMED] | ❌ Wave 0 formula consolidation; existing bounded behavior tests are reusable. [VERIFIED: `tests/test_catalog_query_contract.py`; `tests/test_blob_store_reconciliation.py`; `tests/test_phase6_statistics.py`; `tests/test_phase6_removal_contract.py`] |
 
 ### Sampling Rate
 
 - **Per task commit:** Run the focused files changed plus `tests/test_phase8_quality_gates.py`; for lifecycle/cache-policy changes also run the exact Phase 07.1 selector subset and coverage quick scope. [ASSUMED]
 - **Per wave merge:** Run the deterministic full suite on the wave's Python, package-matrix self-tests, direct Ruff scopes, and coverage verifier. [ASSUMED]
-- **Phase gate:** Linux 3.11-3.14 compatible matrix green, TensorFlow 3.11-3.13 probe green, macOS 3.11/3.14 smoke green, exact-commit live evidence `QUALIFIED`/`CLEAN`, controlled performance within reviewed envelope, and immutable release evidence attached. [ASSUMED]
+- **Amended phase gate:** Linux 3.11-3.14 compatible matrix green, TensorFlow 3.11-3.13 probe green, macOS 3.11/3.14 smoke green, exact-commit live evidence `QUALIFIED`/`CLEAN`, every other non-deferred class green, an explicit QUAL-06 `DEFERRED`/`NOT_QUALIFIED` record pointing to SEED-006, and immutable release evidence attached. [VERIFIED: D-23]
 
 ### Wave 0 Gaps
 
@@ -742,7 +760,7 @@ Security enforcement is enabled at ASVS level 1 in `.planning/config.json`. [VER
 - Standard stack: HIGH — existing versions/config were read locally and current official documentation was checked; pyperf remains behind the required human legitimacy checkpoint. [VERIFIED: local source/environment probes and official sources listed above]
 - Architecture: HIGH — locked CONTEXT, ADR 0001, Phase 07.1 verification, and live source agree on the evidence-only boundary. [VERIFIED: primary sources listed above]
 - Coverage baseline: HIGH for this macOS run, MEDIUM as a release floor — final floors must be captured after gap closure in CI. [VERIFIED: local coverage JSON, 2026-09-13; `08-CONTEXT.md` D-14]
-- Performance thresholds: MEDIUM — methodology is official and prescriptive, but sample/envelope values require the controlled Linux runner. [CITED: https://pyperf.readthedocs.io/en/latest/; ASSUMED]
+- Performance thresholds: DEFERRED — methodology and harness remain available, but sample/envelope values require the future controlled Linux run tracked by SEED-006. [CITED: https://pyperf.readthedocs.io/en/latest/; VERIFIED: D-23]
 - Environment/live readiness: HIGH — local tools/config were probed; external services and repository settings remain genuine prerequisites. [VERIFIED: local environment probe, 2026-09-13]
 - Pitfalls: HIGH — most are directly visible in current source, baseline, or official service behavior. [VERIFIED: primary sources listed above]
 

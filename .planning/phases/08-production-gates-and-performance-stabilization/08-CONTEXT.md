@@ -1,7 +1,7 @@
 # Phase 8: Production Gates and Performance Stabilization - Context
 
 **Gathered:** 2026-09-13
-**Status:** Ready for planning
+**Status:** Replanned during execution (2026-09-15)
 
 <domain>
 ## Phase Boundary
@@ -10,9 +10,10 @@ Qualify the post-Phase-07.1 Cacheness architecture for release. Phase 8 turns
 the already-implemented `BlobStore` lifecycle, `UnifiedCache` policy layer,
 obstore payload participant, supported handlers, packaging groups, and live
 PostgreSQL/Amazon-S3 topology into reproducible release evidence across the
-declared Python and platform matrix. It establishes measured coverage,
-performance, memory, and backend-call gates without changing lifecycle
-semantics or adding another coordination mechanism.
+declared Python and platform matrix. It establishes measured coverage, memory,
+and backend-call gates while retaining the implemented performance harness for
+future controlled-Linux qualification under SEED-006, without changing
+lifecycle semantics or adding another coordination mechanism.
 
 This is qualification and stabilization, not a storage redesign. Phase 07.1
 already replaced the built-in filesystem, memory, and S3 payload mechanics with
@@ -55,9 +56,10 @@ test that final architecture as shipped.
 - **D-20:** On a named controlled Linux runner, compare median and tail distributions with a checked-in baseline. Release blocking applies only to reviewed regressions outside a statistically defensible relative envelope. Baseline changes require explicit justification and must not become runtime deadlines or stronger public progress semantics.
 - **D-21:** Declare expected page/work complexity and maximum backend-call formulas for inventory, reconciliation, statistics, clear, and aggregate operations. Exercise fixed scale tiers to detect accidental N+1 behavior and unbounded memory independently of machine speed.
 - **D-22:** Controlled local performance gates may block release. Live PostgreSQL/Amazon-S3 qualification blocks on integrity and recovery behavior; remote latency distributions are diagnostic only.
+- **D-23:** Supersede only the current-milestone release-blocking portions of D-20 and D-22. Controlled-Linux performance qualification and QUAL-06 are `DEFERRED`/`NOT_QUALIFIED` under `.planning/seeds/SEED-006-qualify-controlled-linux-performance.md`; they do not block this milestone's release aggregate or publication. Preserve the implemented benchmark harness, representative workloads, SHA-256/XXH3 comparison, controlled-runner preflight, and performance workflow as future qualification capability. macOS measurements may remain diagnostic only and must not be presented as controlled-Linux evidence, Linux equivalence, a cross-platform budget, or a substitute pass. Every non-deferred release evidence class and the real PostgreSQL/Amazon-S3 gate remain mandatory.
 
 ### the agent's Discretion
-- Select the exact clean-environment tooling, CI job decomposition, artifact retention duration, representative fixture sizes, sample counts, warmups, statistical envelope calculation, and controlled Linux runner identity, provided the choices are explicit and reproducible.
+- Select the exact clean-environment tooling, CI job decomposition, artifact retention duration, representative fixture sizes, sample counts, warmups, statistical envelope calculation, and controlled Linux runner identity for the retained future capability, provided the choices are explicit and reproducible. D-23 prevents those future performance choices from blocking the current milestone.
 - Select named coverage gaps after measuring the current baseline and inspecting risk; prioritize lifecycle, integrity-before-deserialization, cache invalidation/policy, qualification, packaging, and error-boundary branches.
 - Consolidate or replace stale benchmark scripts when necessary, while retaining relevant historical evidence and making the new release benchmark entry points unambiguous.
 
@@ -83,6 +85,7 @@ test that final architecture as shipped.
 
 ### Deferred measurement inputs
 - `.planning/seeds/SEED-003-revisit-xxh3-for-canonical-blob-payload-hashing-after-measur.md` — future digest decision that Phase 8's SHA-256/XXH3 evidence must inform without implementing it.
+- `.planning/seeds/SEED-006-qualify-controlled-linux-performance.md` — future controlled-Linux capture and QUAL-06 closure; current release evidence must preserve its explicit deferred nonclaim.
 
 </canonical_refs>
 
@@ -126,6 +129,7 @@ test that final architecture as shipped.
 - Investigate Narwhals as a future dataframe-handler compatibility layer across pandas, PyArrow, and Polars while retaining Parquet as the handler-owned format. This is a future handler/extensibility milestone, not Phase 8 qualification work.
 - SEED-003 may revisit a versioned XXH3 canonical payload digest after Phase 8 supplies comparative throughput and end-to-end cost evidence.
 - Native Windows lifecycle qualification remains Phase 999.1 because no eligible Windows environment is available.
+- Controlled-Linux performance qualification and the final QUAL-06 budget/distribution claim are deferred to SEED-006. The Phase 8 release record must retain an explicit `DEFERRED`/`NOT_QUALIFIED` nonclaim rather than omit the class or substitute macOS measurements.
 
 </deferred>
 
