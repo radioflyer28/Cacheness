@@ -281,45 +281,98 @@ def test_distinct_key_put_completes_while_another_key_is_pre_cas(tmp_path):
     assert errors == []
 
 
-def test_clear_and_delete_converge_after_an_exact_snapshot(tmp_path: Path) -> None:
-    """A delete racing a paused clear consumes only the snapshot generation."""
-    store = _store(tmp_path / "clear-delete")
+def _run_exact_snapshot_clear_delete_collision(root: Path) -> tuple[
+    int, bool | CacheBlobLifecycleConflictError
+]:
+    """Exercise one bounded clear/delete collision and assert its safe terminal state."""
+    store = _store(root)
     gate = ReleaseGate()
-    clear_result: list[int] = []
-    errors: list[BaseException] = []
+    tombstone_promotion = threading.Barrier(2)
+    clear_results: list[int] = []
+    clear_errors: list[BaseException] = []
+    delete_results: list[bool] = []
+    delete_errors: list[BaseException] = []
+    clearer: threading.Thread | None = None
+    deleter: threading.Thread | None = None
 
     def pause_after_snapshot(boundary: str) -> None:
         if boundary == "clear.snapshot_committed":
             gate.wait_at_boundary()
 
+    def pause_before_tombstone_promotion(seam: str, _record: object) -> None:
+        if seam in {"delete.before_tombstone_promotion", "tombstone_publish"}:
+            tombstone_promotion.wait(timeout=5)
+
     def clear() -> None:
         try:
-            clear_result.append(store.clear())
+            clear_results.append(store.clear())
         except BaseException as error:  # pragma: no cover - re-raised below.
-            errors.append(error)
+            clear_errors.append(error)
+
+    def delete() -> None:
+        try:
+            delete_results.append(store.delete("snapshot-key"))
+        except BaseException as error:  # pragma: no cover - re-raised below.
+            delete_errors.append(error)
 
     try:
         store.put("present", key="snapshot-key")
         store.lifecycle.test_hook = pause_after_snapshot
-        clearer = threading.Thread(target=clear)
+        store.lifecycle.fault_hook = pause_before_tombstone_promotion
+        clearer = threading.Thread(target=clear, name="exact-snapshot-clear")
         clearer.start()
         assert gate.arrived.wait(timeout=5)
 
-        # A clear now closes ordinary admission only until this exact snapshot
-        # commits. Release that short gate before racing the delete; the clear
-        # and delete may then each prove the other's exact target absent.
+        # Clear's short admission closes only until this exact snapshot commits.
+        # Release it before starting the public delete, then make both tombstone
+        # promotions meet at the lifecycle seam without timing assumptions.
         gate.release()
-        store.delete("snapshot-key")
+        deleter = threading.Thread(target=delete, name="exact-snapshot-delete")
+        deleter.start()
         _join(clearer)
+        _join(deleter)
 
-        assert errors == []
-        assert clear_result in ([0], [1])
+        assert clear_errors == []
+        assert len(clear_results) == 1
+        assert clear_results[0] in {0, 1}
+
+        assert len(delete_results) + len(delete_errors) == 1
+        if delete_errors:
+            assert len(delete_errors) == 1
+            assert isinstance(delete_errors[0], CacheBlobLifecycleConflictError)
+            delete_outcome: bool | CacheBlobLifecycleConflictError = delete_errors[0]
+        else:
+            assert len(delete_results) == 1
+            assert isinstance(delete_results[0], bool)
+            delete_outcome = delete_results[0]
+
         assert store.get("snapshot-key") is None
         assert store.lifecycle_authority.read_entry("snapshot-key") is None
         assert store.lifecycle_authority.pending_cleanup_debts() == ()
+        return clear_results[0], delete_outcome
     finally:
         gate.release()
-        store.close()
+        tombstone_promotion.abort()
+        try:
+            if clearer is not None:
+                _join(clearer)
+            if deleter is not None:
+                _join(deleter)
+        finally:
+            store.close()
+
+
+def test_clear_and_delete_converge_after_an_exact_snapshot(tmp_path: Path) -> None:
+    """A paused clear and public delete accept only safe bounded outcomes."""
+    _run_exact_snapshot_clear_delete_collision(tmp_path / "clear-delete")
+
+
+def test_clear_and_delete_exact_snapshot_stress_preserves_safety_across_valid_outcomes(
+    tmp_path: Path,
+) -> None:
+    """Sixteen isolated exact-snapshot collisions preserve the same safety oracle."""
+    for case in range(16):
+        _run_exact_snapshot_clear_delete_collision(tmp_path / f"clear-delete-{case}")
 
 
 def test_reconciliation_and_mutation_converge_on_distinct_indexed_work(
