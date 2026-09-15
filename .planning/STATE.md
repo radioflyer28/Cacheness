@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 08
 current_phase_name: Production Gates and Performance Stabilization
 status: executing
-stopped_at: Phase 08 gap plan 08-17 ready; 08-16 resumes after it
-last_updated: "2026-09-15T18:37:18.000Z"
+stopped_at: Completed 08-17-PLAN.md
+last_updated: "2026-09-15T19:00:44.966Z"
 last_activity: 2026-09-15
 last_activity_desc: Planned the ADR-aligned clear/delete test-contract correction before resuming local-readiness closure
-state_head: 8577d499c9ae824d197a1215c906574919e6cdcd
+state_head: 1eb02ff9c4a3c8888117592871fca2fd45209f38
 progress:
   total_phases: 9
   completed_phases: 7
-  total_plans: 133
-  completed_plans: 128
+  total_plans: 131
+  completed_plans: 129
 milestone_name: milestone
 ---
 
@@ -212,6 +212,7 @@ Raw file counts include superseded plans and therefore are not completion claims
 | Phase 08 P13 | 12min | 1 tasks | 4 files |
 | Phase 08-production-gates-and-performance-stabilization P14 | 1200 | 3 tasks | 5 files |
 | Phase 08 P15 | 10m | 2 tasks | 4 files |
+| Phase 08 P17 | 7m | 2 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -516,6 +517,7 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - [Phase 08]: Phase 08 Plan 15: Fixed verifier inventory now binds Plan 08-15 and T-08-15-01 through T-08-15-05 to literal preflight selectors.
 - [Phase 08]: D-24 closes the milestone on exact-source local readiness; Plans 08-11/08-12 are superseded and preserved for SEED-007, BACK-05 remains DEFERRED/NOT_QUALIFIED, and publication remains DEFERRED/NOT_PUBLISHED.
 - [Phase 08]: The exact-snapshot clear/delete regression accepts ordinary completion or `CacheBlobLifecycleConflictError` as the two ADR-valid progress outcomes while requiring final absence, no authority entry, no cleanup debt, and bounded completion in both cases; no lifecycle fix is authorized.
+- [Phase 08]: Exact-snapshot clear/delete tests accept ordinary completion or CacheBlobLifecycleConflictError while requiring identical final safety and recovery assertions.
 
 ### Pending Todos
 
@@ -551,6 +553,6 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 
 ## Session Continuity
 
-Last session: 2026-09-15T18:37:18.000Z
-Stopped at: Phase 08 gap plan 08-17 ready; 08-16 resumes after it
+Last session: 2026-09-15T19:00:44.789Z
+Stopped at: Completed 08-17-PLAN.md
 Resume file: None
