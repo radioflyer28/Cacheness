@@ -48,6 +48,7 @@ _REVIEWED_PLAN_PATHS = (
     f"{PHASE_DIRECTORY}/08-15-PLAN.md",
     f"{PHASE_DIRECTORY}/08-16-PLAN.md",
     f"{PHASE_DIRECTORY}/08-17-PLAN.md",
+    f"{PHASE_DIRECTORY}/08-18-PLAN.md",
 )
 PHASE8_PLAN_PATHS = tuple(_REVIEWED_PLAN_PATHS)
 _REVIEWED_SUPERSEDED_PLAN_PATHS = {
@@ -310,6 +311,32 @@ _PLAN17_THREAT_NODES = {
     "T-08-17-05": (PLAN17_CLEAR_DELETE_SELECTORS[1],),
 }
 _REVIEWED_THREAT_NODES.update(_PLAN17_THREAT_NODES)
+PLAN18_INITIALIZED_SHARED_WORKER_SELECTOR = (
+    "tests/test_phase3_postreview_concurrency.py::"
+    "test_initialized_root_shared_workers_converge_through_sqlite"
+)
+PLAN18_PRESERVED_BOUNDARY_SELECTORS = (
+    "tests/test_sqlite_metadata_bootstrap_atomicity.py::"
+    "test_threaded_initialized_authorities_converge_without_first_use_claims",
+    "tests/test_sqlite_metadata_bootstrap_atomicity.py::"
+    "test_spawned_initialized_authorities_converge_without_process_local_state",
+    "tests/test_sqlite_metadata_bootstrap_atomicity.py::"
+    "test_foreign_root_is_rejected_without_mutating_evidence",
+    "tests/test_sqlite_metadata_bootstrap_atomicity.py::"
+    "test_incomplete_authority_layout_is_rejected_without_implicit_upgrade",
+    "tests/test_sqlite_lifecycle_authority.py::"
+    "test_sqlite_authority_rejects_wrong_identity_without_mutating",
+    "tests/test_blob_store_read_contract.py::"
+    "test_composed_store_reopens_one_authenticated_canonical_generation",
+)
+_PLAN18_THREAT_NODES = {
+    "T-08-18-01": (PLAN18_INITIALIZED_SHARED_WORKER_SELECTOR,),
+    "T-08-18-02": (PLAN18_INITIALIZED_SHARED_WORKER_SELECTOR,),
+    "T-08-18-03": (PLAN18_INITIALIZED_SHARED_WORKER_SELECTOR,),
+    "T-08-18-04": (PLAN18_INITIALIZED_SHARED_WORKER_SELECTOR,),
+    "T-08-18-05": (PLAN18_INITIALIZED_SHARED_WORKER_SELECTOR,),
+}
+_REVIEWED_THREAT_NODES.update(_PLAN18_THREAT_NODES)
 _REVIEWED_THREATS = (
     *_REVIEWED_THREATS,
     "T-08-14-01",
@@ -331,6 +358,11 @@ _REVIEWED_THREATS = (
     "T-08-17-03",
     "T-08-17-04",
     "T-08-17-05",
+    "T-08-18-01",
+    "T-08-18-02",
+    "T-08-18-03",
+    "T-08-18-04",
+    "T-08-18-05",
 )
 PHASE8_THREATS = tuple(_REVIEWED_THREATS)
 THREAT_NODES = dict(_REVIEWED_THREAT_NODES)
@@ -553,6 +585,22 @@ def _validate_static_exports() -> list[str]:
         for selector in selectors
     } != set(PLAN17_CLEAR_DELETE_SELECTORS):
         errors.append("Plan 08-17 clear/delete selector inventory was mutated")
+    plan18_path = f"{PHASE_DIRECTORY}/08-18-PLAN.md"
+    if _REVIEWED_PLAN_PATHS.count(plan18_path) != 1:
+        errors.append("Plan 08-18 is missing or duplicated in the canonical inventory")
+    plan18_threats = tuple(
+        threat for threat in _REVIEWED_THREATS if threat.startswith("T-08-18-")
+    )
+    if set(plan18_threats) != set(_PLAN18_THREAT_NODES):
+        errors.append("Plan 08-18 threat inventory is missing, renamed, or duplicated")
+    if {
+        threat: THREAT_NODES.get(threat) for threat in _PLAN18_THREAT_NODES
+    } != _PLAN18_THREAT_NODES:
+        errors.append("Plan 08-18 threat ownership was lost or reclassified")
+    if len(set(PLAN18_PRESERVED_BOUNDARY_SELECTORS)) != len(
+        PLAN18_PRESERVED_BOUNDARY_SELECTORS
+    ):
+        errors.append("Plan 08-18 preserved boundary selector inventory was duplicated")
     return errors
 
 
@@ -608,7 +656,11 @@ def validate_fixed_manifest(root: Path = REPOSITORY_ROOT) -> tuple[str, ...]:
                 f"{path}: {item}"
                 for item in audit_source(candidate.read_text(encoding="utf-8"), path)
             )
-    for selectors in (*DECISION_NODES.values(), *THREAT_NODES.values()):
+    for selectors in (
+        *DECISION_NODES.values(),
+        *THREAT_NODES.values(),
+        PLAN18_PRESERVED_BOUNDARY_SELECTORS,
+    ):
         for selector in selectors:
             errors.extend(validate_selector(selector, root))
     return tuple(errors)

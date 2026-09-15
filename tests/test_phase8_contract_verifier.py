@@ -17,7 +17,7 @@ VERIFIER_PATH = REPOSITORY_ROOT / "tools" / "verify_phase8_contracts.py"
 EXPECTED_CANONICAL_PLAN_PATHS = tuple(
     ".planning/phases/08-production-gates-and-performance-stabilization/"
     f"08-{number:02d}-PLAN.md"
-    for number in (*range(1, 11), 13, 14, 15, 16, 17)
+    for number in (*range(1, 11), 13, 14, 15, 16, 17, 18)
 )
 EXPECTED_SUPERSEDED_PLAN_PATHS = {
     ".planning/phases/08-production-gates-and-performance-stabilization/08-11-PLAN.md": {
@@ -53,6 +53,28 @@ EXPECTED_PLAN17_THREAT_NODES = {
     "T-08-17-03": (EXACT_CLEAR_DELETE_SELECTOR,),
     "T-08-17-04": (EXACT_CLEAR_DELETE_STRESS_SELECTOR,),
     "T-08-17-05": (EXACT_CLEAR_DELETE_STRESS_SELECTOR,),
+}
+EXACT_INITIALIZED_SHARED_WORKER_SELECTOR = (
+    "tests/test_phase3_postreview_concurrency.py::"
+    "test_initialized_root_shared_workers_converge_through_sqlite"
+)
+EXACT_PLAN18_PRESERVED_BOUNDARY_SELECTORS = {
+    "tests/test_sqlite_metadata_bootstrap_atomicity.py::"
+    "test_threaded_initialized_authorities_converge_without_first_use_claims",
+    "tests/test_sqlite_metadata_bootstrap_atomicity.py::"
+    "test_spawned_initialized_authorities_converge_without_process_local_state",
+    "tests/test_sqlite_metadata_bootstrap_atomicity.py::"
+    "test_foreign_root_is_rejected_without_mutating_evidence",
+    "tests/test_sqlite_metadata_bootstrap_atomicity.py::"
+    "test_incomplete_authority_layout_is_rejected_without_implicit_upgrade",
+    "tests/test_sqlite_lifecycle_authority.py::"
+    "test_sqlite_authority_rejects_wrong_identity_without_mutating",
+    "tests/test_blob_store_read_contract.py::"
+    "test_composed_store_reopens_one_authenticated_canonical_generation",
+}
+EXPECTED_PLAN18_THREAT_NODES = {
+    f"T-08-18-{number:02d}": (EXACT_INITIALIZED_SHARED_WORKER_SELECTOR,)
+    for number in range(1, 6)
 }
 
 DEFERRED_PERFORMANCE_REQUIREMENT = "QUAL-06"
@@ -154,6 +176,23 @@ def test_fixed_manifest_binds_plan17_threats_and_exact_clear_delete_nodes() -> N
     assert verifier.validate_fixed_manifest(REPOSITORY_ROOT) == ()
 
 
+def test_fixed_manifest_binds_plan18_threats_and_initialization_boundaries() -> None:
+    """Plan 18's supported shared-worker workflow cannot vanish or broaden."""
+    verifier = _load_verifier()
+
+    assert verifier.PHASE8_PLAN_PATHS == EXPECTED_CANONICAL_PLAN_PATHS
+    assert {
+        threat: verifier.THREAT_NODES[threat] for threat in EXPECTED_PLAN18_THREAT_NODES
+    } == EXPECTED_PLAN18_THREAT_NODES
+    assert verifier.PLAN18_INITIALIZED_SHARED_WORKER_SELECTOR == (
+        EXACT_INITIALIZED_SHARED_WORKER_SELECTOR
+    )
+    assert set(verifier.PLAN18_PRESERVED_BOUNDARY_SELECTORS) == (
+        EXACT_PLAN18_PRESERVED_BOUNDARY_SELECTORS
+    )
+    assert verifier.validate_fixed_manifest(REPOSITORY_ROOT) == ()
+
+
 @pytest.mark.parametrize(
     "source",
     [
@@ -195,6 +234,60 @@ def test_fixed_manifest_rejects_plan17_removal_rename_duplication_and_unownershi
     source: str,
 ) -> None:
     """The Plan 17 binding remains a closed, named local-readiness contract."""
+    verifier = _load_source_mutation(source)
+
+    assert verifier.validate_fixed_manifest(REPOSITORY_ROOT)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        pytest.param(
+            VERIFIER_PATH.read_text(encoding="utf-8").replace(
+                '    f"{PHASE_DIRECTORY}/08-18-PLAN.md",\n', "", 1
+            ),
+            id="removed-plan18",
+        ),
+        pytest.param(
+            VERIFIER_PATH.read_text(encoding="utf-8").replace(
+                "test_initialized_root_shared_workers_converge_through_sqlite",
+                "test_initialized_root_shared_workers_converge_through_sqlite_renamed",
+                1,
+            ),
+            id="renamed-initialized-worker-selector",
+        ),
+        pytest.param(
+            VERIFIER_PATH.read_text(encoding="utf-8").replace(
+                "test_foreign_root_is_rejected_without_mutating_evidence",
+                "test_foreign_root_is_rejected_without_mutating_evidence_renamed",
+                1,
+            ),
+            id="renamed-fail-closed-selector",
+        ),
+        pytest.param(
+            VERIFIER_PATH.read_text(encoding="utf-8").replace(
+                '    "T-08-18-05",\n', '    "T-08-18-04",\n', 1
+            ),
+            id="duplicate-plan18-threat",
+        ),
+        pytest.param(
+            VERIFIER_PATH.read_text(encoding="utf-8").replace(
+                "THREAT_NODES = dict(_REVIEWED_THREAT_NODES)",
+                "THREAT_NODES = {\n"
+                "    threat: selectors\n"
+                "    for threat, selectors in _REVIEWED_THREAT_NODES.items()\n"
+                "    if threat != 'T-08-18-05'\n"
+                "}",
+                1,
+            ),
+            id="unowned-plan18-threat",
+        ),
+    ],
+)
+def test_fixed_manifest_rejects_plan18_removal_rename_duplication_and_unownership(
+    source: str,
+) -> None:
+    """The Plan 18 binding remains a closed initialized-worker contract."""
     verifier = _load_source_mutation(source)
 
     assert verifier.validate_fixed_manifest(REPOSITORY_ROOT)
