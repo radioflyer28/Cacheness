@@ -49,6 +49,7 @@ _REVIEWED_PLAN_PATHS = (
     f"{PHASE_DIRECTORY}/08-16-PLAN.md",
     f"{PHASE_DIRECTORY}/08-17-PLAN.md",
     f"{PHASE_DIRECTORY}/08-18-PLAN.md",
+    f"{PHASE_DIRECTORY}/08-19-PLAN.md",
 )
 PHASE8_PLAN_PATHS = tuple(_REVIEWED_PLAN_PATHS)
 _REVIEWED_SUPERSEDED_PLAN_PATHS = {
@@ -337,6 +338,25 @@ _PLAN18_THREAT_NODES = {
     "T-08-18-05": (PLAN18_INITIALIZED_SHARED_WORKER_SELECTOR,),
 }
 _REVIEWED_THREAT_NODES.update(_PLAN18_THREAT_NODES)
+PLAN19_SQLITE_COVERAGE_SELECTORS = (
+    "tests/test_phase8_lifecycle_coverage.py::"
+    "test_sqlite_lifecycle_rejects_invalid_configuration_objects_without_materializing",
+    "tests/test_phase8_lifecycle_coverage.py::"
+    "test_sqlite_lifecycle_rejects_invalid_deadline_and_busy_budget_inputs",
+    "tests/test_phase8_lifecycle_coverage.py::"
+    "test_sqlite_lifecycle_timeout_and_sqlite_failures_preserve_typed_context",
+    "tests/test_phase8_lifecycle_coverage.py::"
+    "test_sqlite_lifecycle_rejects_malformed_identity_and_schema_without_mutation",
+)
+_PLAN19_EXPECTED_THREAT_NODES = {
+    "T-08-19-01": (PLAN19_SQLITE_COVERAGE_SELECTORS[0],),
+    "T-08-19-02": (PLAN19_SQLITE_COVERAGE_SELECTORS[1],),
+    "T-08-19-03": (PLAN19_SQLITE_COVERAGE_SELECTORS[2],),
+    "T-08-19-04": (PLAN19_SQLITE_COVERAGE_SELECTORS[3],),
+    "T-08-19-05": PLAN19_SQLITE_COVERAGE_SELECTORS,
+}
+_PLAN19_THREAT_NODES = dict(_PLAN19_EXPECTED_THREAT_NODES)
+_REVIEWED_THREAT_NODES.update(_PLAN19_THREAT_NODES)
 _REVIEWED_THREATS = (
     *_REVIEWED_THREATS,
     "T-08-14-01",
@@ -363,6 +383,11 @@ _REVIEWED_THREATS = (
     "T-08-18-03",
     "T-08-18-04",
     "T-08-18-05",
+    "T-08-19-01",
+    "T-08-19-02",
+    "T-08-19-03",
+    "T-08-19-04",
+    "T-08-19-05",
 )
 PHASE8_THREATS = tuple(_REVIEWED_THREATS)
 THREAT_NODES = dict(_REVIEWED_THREAT_NODES)
@@ -601,6 +626,26 @@ def _validate_static_exports() -> list[str]:
         PLAN18_PRESERVED_BOUNDARY_SELECTORS
     ):
         errors.append("Plan 08-18 preserved boundary selector inventory was duplicated")
+    plan19_path = f"{PHASE_DIRECTORY}/08-19-PLAN.md"
+    if _REVIEWED_PLAN_PATHS.count(plan19_path) != 1:
+        errors.append("Plan 08-19 is missing or duplicated in the canonical inventory")
+    plan19_threats = tuple(
+        threat for threat in _REVIEWED_THREATS if threat.startswith("T-08-19-")
+    )
+    if set(plan19_threats) != set(_PLAN19_THREAT_NODES):
+        errors.append("Plan 08-19 threat inventory is missing, renamed, or duplicated")
+    if {
+        threat: THREAT_NODES.get(threat) for threat in _PLAN19_THREAT_NODES
+    } != _PLAN19_THREAT_NODES:
+        errors.append("Plan 08-19 threat ownership was lost or reclassified")
+    if _PLAN19_THREAT_NODES != _PLAN19_EXPECTED_THREAT_NODES:
+        errors.append("Plan 08-19 threat map was reclassified")
+    if {
+        selector
+        for selectors in _PLAN19_THREAT_NODES.values()
+        for selector in selectors
+    } != set(PLAN19_SQLITE_COVERAGE_SELECTORS):
+        errors.append("Plan 08-19 SQLite selector inventory was mutated")
     return errors
 
 

@@ -17,7 +17,7 @@ VERIFIER_PATH = REPOSITORY_ROOT / "tools" / "verify_phase8_contracts.py"
 EXPECTED_CANONICAL_PLAN_PATHS = tuple(
     ".planning/phases/08-production-gates-and-performance-stabilization/"
     f"08-{number:02d}-PLAN.md"
-    for number in (*range(1, 11), 13, 14, 15, 16, 17, 18)
+    for number in (*range(1, 11), 13, 14, 15, 16, 17, 18, 19)
 )
 EXPECTED_SUPERSEDED_PLAN_PATHS = {
     ".planning/phases/08-production-gates-and-performance-stabilization/08-11-PLAN.md": {
@@ -75,6 +75,23 @@ EXACT_PLAN18_PRESERVED_BOUNDARY_SELECTORS = {
 EXPECTED_PLAN18_THREAT_NODES = {
     f"T-08-18-{number:02d}": (EXACT_INITIALIZED_SHARED_WORKER_SELECTOR,)
     for number in range(1, 6)
+}
+EXACT_PLAN19_SELECTORS = (
+    "tests/test_phase8_lifecycle_coverage.py::"
+    "test_sqlite_lifecycle_rejects_invalid_configuration_objects_without_materializing",
+    "tests/test_phase8_lifecycle_coverage.py::"
+    "test_sqlite_lifecycle_rejects_invalid_deadline_and_busy_budget_inputs",
+    "tests/test_phase8_lifecycle_coverage.py::"
+    "test_sqlite_lifecycle_timeout_and_sqlite_failures_preserve_typed_context",
+    "tests/test_phase8_lifecycle_coverage.py::"
+    "test_sqlite_lifecycle_rejects_malformed_identity_and_schema_without_mutation",
+)
+EXPECTED_PLAN19_THREAT_NODES = {
+    "T-08-19-01": (EXACT_PLAN19_SELECTORS[0],),
+    "T-08-19-02": (EXACT_PLAN19_SELECTORS[1],),
+    "T-08-19-03": (EXACT_PLAN19_SELECTORS[2],),
+    "T-08-19-04": (EXACT_PLAN19_SELECTORS[3],),
+    "T-08-19-05": EXACT_PLAN19_SELECTORS,
 }
 
 DEFERRED_PERFORMANCE_REQUIREMENT = "QUAL-06"
@@ -193,6 +210,18 @@ def test_fixed_manifest_binds_plan18_threats_and_initialization_boundaries() -> 
     assert verifier.validate_fixed_manifest(REPOSITORY_ROOT) == ()
 
 
+def test_fixed_manifest_binds_plan19_threats_and_sqlite_coverage_selectors() -> None:
+    """Plan 19's coverage recovery remains a fixed semantic safety contract."""
+    verifier = _load_verifier()
+
+    assert verifier.PHASE8_PLAN_PATHS == EXPECTED_CANONICAL_PLAN_PATHS
+    assert {
+        threat: verifier.THREAT_NODES[threat] for threat in EXPECTED_PLAN19_THREAT_NODES
+    } == EXPECTED_PLAN19_THREAT_NODES
+    assert verifier.PLAN19_SQLITE_COVERAGE_SELECTORS == EXACT_PLAN19_SELECTORS
+    assert verifier.validate_fixed_manifest(REPOSITORY_ROOT) == ()
+
+
 @pytest.mark.parametrize(
     "source",
     [
@@ -288,6 +317,63 @@ def test_fixed_manifest_rejects_plan18_removal_rename_duplication_and_unownershi
     source: str,
 ) -> None:
     """The Plan 18 binding remains a closed initialized-worker contract."""
+    verifier = _load_source_mutation(source)
+
+    assert verifier.validate_fixed_manifest(REPOSITORY_ROOT)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        pytest.param(
+            VERIFIER_PATH.read_text(encoding="utf-8").replace(
+                '    f"{PHASE_DIRECTORY}/08-19-PLAN.md",\n', "", 1
+            ),
+            id="removed-plan19",
+        ),
+        pytest.param(
+            VERIFIER_PATH.read_text(encoding="utf-8").replace(
+                "test_sqlite_lifecycle_rejects_invalid_configuration_objects_without_materializing",
+                "test_sqlite_lifecycle_rejects_invalid_configuration_objects_renamed",
+                1,
+            ),
+            id="renamed-configuration-selector",
+        ),
+        pytest.param(
+            VERIFIER_PATH.read_text(encoding="utf-8").replace(
+                "_PLAN19_THREAT_NODES = dict(_PLAN19_EXPECTED_THREAT_NODES)",
+                "_PLAN19_THREAT_NODES = {\n"
+                "    **_PLAN19_EXPECTED_THREAT_NODES,\n"
+                "    'T-08-19-01': (PLAN19_SQLITE_COVERAGE_SELECTORS[1],),\n"
+                "}",
+                1,
+            ),
+            id="reclassified-plan19-threat",
+        ),
+        pytest.param(
+            VERIFIER_PATH.read_text(encoding="utf-8").replace(
+                '    "T-08-19-05",\n', '    "T-08-19-04",\n', 1
+            ),
+            id="duplicated-plan19-threat",
+        ),
+        pytest.param(
+            VERIFIER_PATH.read_text(encoding="utf-8").replace(
+                "THREAT_NODES = dict(_REVIEWED_THREAT_NODES)",
+                "THREAT_NODES = {\n"
+                "    threat: selectors\n"
+                "    for threat, selectors in _REVIEWED_THREAT_NODES.items()\n"
+                "    if threat != 'T-08-19-05'\n"
+                "}",
+                1,
+            ),
+            id="unowned-plan19-threat",
+        ),
+    ],
+)
+def test_fixed_manifest_rejects_plan19_removal_rename_reclassification_and_unownership(
+    source: str,
+) -> None:
+    """The Plan 19 recovery inventory must fail closed under hostile edits."""
     verifier = _load_source_mutation(source)
 
     assert verifier.validate_fixed_manifest(REPOSITORY_ROOT)
