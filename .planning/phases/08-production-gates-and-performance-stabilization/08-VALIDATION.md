@@ -10,10 +10,11 @@ updated: 2026-09-15
 
 # Phase 08 — Validation Strategy
 
-> Nyquist contract for Plans 08-01 through 08-15. Completed summaries record
-> implementation already delivered; no live credential, exact live run, controlled-
+> Nyquist contract for canonical Plans 08-01 through 08-10 and 08-13 through
+> 08-16. Plans 08-11/08-12 are superseded by D-24 and preserved for SEED-007;
+> they are not completion evidence. No live credential, exact live run, controlled-
 > Linux capture, or immutable release is claimed here. D-23 defers controlled-Linux
-> qualification to SEED-006 without treating macOS diagnostics as substitute evidence.
+> qualification to SEED-006, and D-24 defers BACK-05/publication to SEED-007.
 
 ## Validation Invariants
 
@@ -29,9 +30,10 @@ updated: 2026-09-15
    latency results never fill a qualifying slot.
 4. Deterministic PostgreSQL authority gaps are test-first work in Wave 2 and must
    pass before Wave 3 captures coverage floors.
-5. Current external execution prerequisites are blocking checkpoints, not manual
-   substitutes for automated evidence. The controlled Linux runner is deferred to
-   SEED-006 rather than represented as a current checkpoint or inferred pass.
+5. Current Phase 8 closure has no external checkpoint. Controlled Linux remains
+   `DEFERRED`/`NOT_QUALIFIED` under SEED-006; live services remain
+   `DEFERRED`/`NOT_QUALIFIED` and publication remains `DEFERRED`/`NOT_PUBLISHED`
+   under SEED-007. These are closed local-milestone nonclaims, not inferred passes.
 
 ## Evidence Classes and Non-Substitution Rules
 
@@ -43,8 +45,8 @@ updated: 2026-09-15
 | Coverage/quality | `tools/verify_phase8_coverage.py`, Coverage.py JSON/XML, direct Ruff commands | PR and release | Named behavior selectors plus post-gap repository/critical statement and branch floors; read-only baseline verification | Behavior omitted merely because percentages are green |
 | Structural | `tools/run_phase8_scale_gates.py` | PR and release | Exact authority/participant call formulas and peak-memory bounds at fixed tiers | Wall-clock latency or stronger progress guarantees |
 | Controlled performance | `benchmarks/phase8_benchmarks.py`, `performance.yml` | Deferred to SEED-006; not current-release blocking | Current release records exact `DEFERRED`/`NOT_QUALIFIED`; harness/workflow/preflight remain available for later stable distributions and baseline comparison | macOS diagnostics, runtime deadlines, remote latency, safety/recovery/progress |
-| Live service | `tools/run_phase8_qualification.py`, `live_qualification.yml` | BACK-05 and release | Real PostgreSQL + authoritative Amazon S3, exact fixed suite, exact SHA/source, `QUALIFIED` and `CLEAN` | Mocks, collection-only, scheduled diagnostics, local proof |
-| Publication | `tools/verify_phase8_release.py` plus final immutable-release verifier | Final release | Every non-deferred required class shares exact SHA/source; the manifest records QUAL-06 as deferred; exact tag, published immutable state, exact asset set/states/SHA-256 digests | A local manifest that was never attached/published or a performance diagnostic uploaded as qualifying evidence |
+| Live service | `tools/run_phase8_qualification.py`, `live_qualification.yml` | Deferred to SEED-007 | Current local report requires `DEFERRED` plus `NOT_QUALIFIED`; future proof still requires real PostgreSQL + authoritative Amazon S3, exact fixed suite/SHA/source, `QUALIFIED` and `CLEAN` | Mocks, collection-only, scheduled diagnostics, configuration preflight, local proof |
+| Publication | `tools/verify_phase8_release.py` plus final immutable-release verifier | Deferred to SEED-007 | Current local report requires `DEFERRED` plus `NOT_PUBLISHED`; future proof still requires exact tag, published immutable state, exact asset set/states/digests | A local readiness manifest or unexecuted publication controller |
 
 Remote-service latency, prerelease Python, and macOS performance observations are
 diagnostic only. Windows and controlled-Linux performance remain explicitly
@@ -59,16 +61,16 @@ nonqualified. Those rows cannot enter the blocking aggregate.
 | Per-task command | Each plan task’s literal `<automated>` command |
 | Full deterministic command | `uv run --isolated --all-extras --group dev --frozen python tools/verify_phase8_contracts.py --all` |
 | Feedback target | Focused deterministic self-tests under 30 seconds; live execution is a separately bounded external job |
-| Current status | Plans 08-01 through 08-10, 08-13, and 08-14 are complete; Plan 08-15 closes the local live-preflight tooling gap before external evidence collection |
+| Current status | Plans 08-01 through 08-10 and 08-13 through 08-15 are complete; 08-11/08-12 are superseded; Plan 08-16 is the only remaining local-readiness closure |
 
 ## Phase Requirements to Automated Evidence
 
 | Requirement | Required truth | Automated evidence | Evidence class | Current planning status |
 |---|---|---|---|---|
-| BACK-05 | Real PostgreSQL and authoritative Amazon S3 behavior passes the frozen suite at one exact candidate SHA with exact bounded cleanup; compatible S3 services remain unclaimed | `tools/run_phase8_qualification.py`; `tests/qualification/test_phase8_evidence.py`; `tests/qualification/test_phase8_live_workflow.py`; exact run-ID collection; Plan 12 immutable publication validation | Live service + publication | Runner/workflow exist; Plan 08-15 supplies the missing configuration-only `--preflight`; credentials/resources/actual run remain external blockers |
+| BACK-05 | Real PostgreSQL and authoritative Amazon S3 behavior passes the frozen suite at one exact candidate SHA with exact bounded cleanup; compatible S3 services remain unclaimed | Existing runner/workflow/preflight/controller plus future SEED-007 exact execution | Live service + publication | `DEFERRED`/`NOT_QUALIFIED`; tooling exists, but no current live or publication evidence is claimed |
 | QUAL-01 | Clean minimal wheel imports every guaranteed public symbol and performs generic-object plus NumPy public round trips | `tests/packaging/test_wheel_matrix.py -k base`; `tools/run_phase8_packaging.py` | Packaging | Wave 0 extension missing; existing `tests/test_full_suite_environment.py` is only an analog |
 | QUAL-02 | Every literal optional group installs independently and exercises its public feature; TensorFlow incompatibility on 3.14 is explicit, never skipped | `tests/packaging/test_wheel_matrix.py`; exact packaging manifest emitted by `tools/run_phase8_packaging.py` | Packaging + platform | Wave 0 missing |
-| QUAL-03 | CI executes stable Python/platform roles, deterministic backends, packaging, branch coverage, scoped Ruff, structural gates, and protected live qualification without class substitution | Static workflow contract tests plus `tools/verify_phase8_contracts.py --all`; exact external run artifacts for live evidence | All non-deferred classes | Deterministic machinery exists; exact live execution remains external |
+| QUAL-03 | CI definitions cover stable Python/platform roles, deterministic backends, packaging, branch coverage, scoped Ruff, structural gates, and protected live qualification without class substitution | Static workflow contracts plus the Plan 16 exact local-readiness command; external execution remains separate evidence | Current local classes + workflow contract | Local path closes; live/platform claims remain explicit nonclaims until eligible execution |
 | QUAL-04 | Finite integrity/recovery/commit-boundary regressions remain green; shared-worker fixtures initialize before contention; terminal outcomes remain success, exact conflict, or typed retryable outcome | Inherited `tools/verify_phase071_contracts.py --all` plus `tests/test_phase8_lifecycle_coverage.py` | Deterministic/local | Inherited verifier exists; Phase 8 named-gap file missing |
 | QUAL-05 | Named lifecycle/cache-policy gaps plus repository and critical statement/branch counts do not regress | `tests/test_phase8_lifecycle_coverage.py`; `tests/test_phase8_cache_policy_coverage.py`; `tests/test_phase8_coverage_gate.py`; read-only `tools/verify_phase8_coverage.py` | Deterministic + coverage | Wave 0 tests/verifier/baseline missing; capture forbidden until Wave 2 passes |
 | QUAL-06 | Checked baseline contains stable distributions, tails, RSS, environment/source identity, layer-separated workloads, and hash comparisons for named tiers; thresholds remain performance-only | Existing harness/workflow/preflight self-tests preserve future execution capability; SEED-006 owns actual controlled capture | Controlled performance | `DEFERRED`/`NOT_QUALIFIED`; not a current-milestone requirement and macOS diagnostics do not qualify it |
@@ -126,11 +128,10 @@ pre-gap research percentages are diagnostic and never qualify this dependency.
 | 08-14-03 | 7 | Complete publication controller before exact candidate selection | `uv run --isolated --group dev --frozen pytest -q -o log_cli=false tests/qualification/test_phase8_release.py::test_publication_preflight_fails_before_mutation tests/qualification/test_phase8_release.py::test_prepare_draft_uploads_exact_non_deferred_asset_set tests/qualification/test_phase8_release.py::test_prepare_draft_verifies_uploaded_states_digests_and_content tests/qualification/test_phase8_release.py::test_publish_requires_exact_approved_prepublication_digest tests/qualification/test_phase8_release.py::test_publish_and_verify_requires_immutable_exact_remote_state tests/qualification/test_phase8_release.py::test_postpublication_mismatch_records_unqualified_incident -x` | Publication-controller self-test | Must commit before Plan 08-11 so D-10 evidence is not invalidated by later tracked tooling changes |
 | 08-15-01 | 8 | Configuration-only protected-live preflight and purity contract | `uv run --isolated --all-extras --group dev --frozen pytest -q -o log_cli=false tests/qualification/test_phase8_evidence.py::test_preflight_accepts_sanitized_configuration_without_external_effects tests/qualification/test_phase8_evidence.py::test_preflight_rejects_missing_invalid_and_disallowed_configuration_without_external_effects tests/qualification/test_phase8_evidence.py::test_preflight_requires_clean_source_and_reviewed_cleanup_contract tests/qualification/test_phase8_evidence.py::test_preflight_cli_never_runs_or_writes_qualification_evidence -x` | Live-harness self-test | Must pass without PostgreSQL/AWS access or evidence writes before the exact candidate is selected |
 | 08-15-02 | 8 | Fixed plan/threat/selector binding | `uv run --isolated --all-extras --group dev --frozen pytest -q -o log_cli=false tests/test_phase8_contract_verifier.py::test_fixed_manifest_binds_live_configuration_preflight_gap tests/test_phase8_contract_verifier.py::test_fixed_manifest_rejects_source_mutation_that_drops_plan_or_threat tests/test_phase8_contract_verifier.py::test_selector_validation_rejects_removed_renamed_duplicate_and_unowned_nodes -x` | Contract self-test | Binds Plan 15 and T-08-15-01 through T-08-15-05 without changing decisions or evidence statuses |
-| 08-11-01 | 9 | Exact-SHA quality/live dispatch, wait, and artifact collection | `uv run --isolated --all-extras --group dev --frozen python tools/verify_phase8_release.py collect --candidate-sha "$(git rev-parse HEAD)" --output-dir build/phase8/evidence --live-output build/phase8/live_qualification.json` | Deterministic/platform/packaging/coverage/structural/live collection | Protected live service and exact dispatch checkpoints; no performance dispatch |
-| 08-11-02 | 9 | Validate and aggregate exact-run non-deferred artifacts | `uv run --isolated --group dev --frozen python tools/verify_phase8_release.py aggregate --candidate-sha "$(git rev-parse HEAD)" --evidence-dir build/phase8/evidence --live-evidence build/phase8/live_qualification.json --output build/phase8/release_qualification.json` | Publication input | Requires all non-deferred classes and explicit QUAL-06 deferral |
-| 08-12-01 | 10 | Exact draft target/assets/states/digests prepublication report | `uv run --isolated --group dev --frozen python tools/verify_phase8_release.py prepare-draft --tag "$CACHENESS_RELEASE_TAG" --aggregate build/phase8/release_qualification.json --asset-dir build/phase8/evidence --live-evidence build/phase8/live_qualification.json --output build/phase8/release_prepublication.json` | Publication | Immutable-policy/permission precondition checkpoint |
-| 08-12-02 | 10 | Operator/reviewer approval bound to exact report digest | Blocking-human resume signal `publish <tag> <sha> <report-sha256>` | Human authorization | Draft remains unpublished until approved |
-| 08-12-03 | 10 | Publish and final exact immutable state/assets/digests verification | `uv run --isolated --group dev --frozen python tools/verify_phase8_release.py publish-and-verify --tag "$CACHENESS_RELEASE_TAG" --prepublication build/phase8/release_prepublication.json --output build/phase8/release_publication.json` | Publication | One-way authorized transition then read-only proof |
+| 08-11 | — | Exact-SHA live collection | Not run | Deferred live service | Superseded by D-24; preserved intact for SEED-007 and never counted as PASS |
+| 08-12 | — | Immutable publication | Not run | Deferred publication | Superseded by D-24; preserved intact for SEED-007 and remains NOT_PUBLISHED |
+| 08-16-01 | 9 | Fixed local-readiness status/manifest contract and D-24 bindings | `uv run --isolated --all-extras --group dev --frozen pytest -q -o log_cli=false tests/test_phase8_contract_verifier.py tests/qualification/test_phase8_release.py -x` | Local-readiness contract | Must preserve strict future release commands while adding the separate local boundary |
+| 08-16-02 | 9 | Exact local suite, base wheel, coverage/Ruff, structural, integrity/recovery, and nonclaims | `uv run --isolated --all-extras --group dev --frozen python tools/verify_phase8_contracts.py --local-ready --output .planning/phases/08-production-gates-and-performance-stabilization/08-LOCAL-READINESS.json` | Local readiness | Exit 0 requires every local class and exact D-23/D-24 nonclaim record |
 
 ## Exact-SHA Dispatch, Wait, and Artifact Collection Gate
 
@@ -230,16 +231,16 @@ current release-blocking controlled-performance boundary.
 - [ ] `docs/RELEASE_QUALIFICATION.md` — marker-bounded evidence/nonclaim/operator
       contract asserted by tests.
 
-## External Prerequisite Checkpoints
+## Deferred External Prerequisites (Not Current Checkpoints)
 
 | Checkpoint | Type | Owner | Preflight | Resume evidence | Failure disposition |
 |---|---|---|---|---|---|
 | `pyperf` legitimacy | `checkpoint:human-verify` | Maintainer | Review official project provenance and seam `SUS` reason before locking | Explicit approval or documented rejection/fallback | Do not install on silence |
 | Controlled Linux runner | Deferred; no current checkpoint | Future SEED-006 owner | Existing read-only preflight remains the eligibility gate when the seed is promoted | No current resume evidence; QUAL-06 remains `DEFERRED`/`NOT_QUALIFIED` and macOS numbers remain diagnostic only |
-| Protected live environment | `checkpoint:human-action` | Cloud/repository admin | `tools/run_phase8_qualification.py --preflight` proves the four named values are locally valid, the DSN is structurally usable, standard AWS/no-override policy is selected, reviewed owner-marker cleanup caps are intact, and the exact source is clean without service access or writes | Sanitized `CONFIGURED`/`NOT_RUN` preflight for the protected environment | BACK-05 unavailable; no mock/local fallback and no claim that preflight proves live IAM/service availability |
-| Exact live RC execution | `checkpoint:human-verify` | Release operator | Deterministic/package/platform/coverage/structural gates green for committed SHA | Approved candidate SHA, exact run ID, successful conclusion, downloaded named artifact, validated `QUALIFIED`/`CLEAN` envelope | Stop; retain sanitized bounded diagnostics only |
-| Immutable release enablement/authority | `checkpoint:human-action` | Repository admin/release operator | Actual org/repo immutable setting, `gh auth status`, tag-to-SHA, asset permissions, complete same-SHA aggregate | Authorized draft release ready for asset upload | Publication blocked; do not claim immutable release |
-| Final publish transition | `checkpoint:human-verify` | Release operator with reviewer approval | Exact asset allow-list/states/digests pass while draft | Explicit approval of exact prepublication report; published immutable release then passes final read-only verification | Leave draft unpublished; if postpublish verification fails, release remains unqualified and requires operator incident handling |
+| Protected live environment | SEED-007 prerequisite | Cloud/repository admin | Existing configuration-only preflight, then real identity/IAM/service proof | Sanitized exact-SHA `QUALIFIED`/`CLEAN` evidence | Keep BACK-05 deferred and unqualified |
+| Exact live RC execution | SEED-007 prerequisite | Release operator | Existing exact-SHA dispatch/run-ID collector | Validated fixed artifacts from the exact run | Keep remote support unqualified |
+| Immutable release enablement/authority | SEED-007 prerequisite | Repository admin/release operator | Existing policy/auth/tag/asset preflight | Exact verified draft | Keep publication deferred and not published |
+| Final publish transition | SEED-007 prerequisite | Release operator/reviewer | Existing report-digest-bound approval | Published immutable release passes read-only verification | Leave publication not published |
 
 Credentials, endpoints, account IDs, reviewer identities, and physical runner details
 are deliberately absent here. The plan must request/verify them at the owning
@@ -263,33 +264,29 @@ checkpoint rather than inventing values.
   inventory, quality/live-only release collection, explicit SEED-006 deferral record,
   and rejection of macOS or controlled-performance artifact substitution.
 - **After Wave 8:** require Plan 08-15's configuration-only live preflight, explicit no-network/no-mutation/no-write tests, sanitized bounded output, and literal plan/threat/selector binding.
-- **After Wave 9:** require exact-SHA quality/live dispatch, recorded run-ID waits,
-  fixed-name downloads, envelope validation, and same-SHA aggregation of every
-  non-deferred class.
-- **Phase gate (Wave 10):** satisfy the immutable policy/authority preflight, create
-  and verify the exact draft, obtain report-digest-bound operator approval, publish,
-  and verify immutable state without mutating the release.
+- **After Wave 9 / phase gate:** require Plan 16's exact local-readiness command to
+  pass deterministic integrity/recovery, base wheel/import, coverage/Ruff, and
+  structural evidence for one source identity. Require exact D-23/D-24 deferral
+  records and reject any live, publication, Linux, Windows, or performance promotion.
 
 ## Validation Sign-Off Criteria
 
-- [ ] Every Plan 01-15 code-producing task has its exact automated command and evidence class; the publication checkpoint has an exact digest-bound resume signal.
+- [ ] Every canonical Plan 01-10 and 13-16 code-producing task has its exact automated command and evidence class; superseded Plans 11/12 remain historical future-seed inputs only.
 - [ ] Wave 0 creates every missing test/harness/workflow verifier before relying on it.
 - [ ] PostgreSQL DB-API classification, replay, pagination, and rollback selectors
       pass before coverage floors are captured.
 - [ ] Coverage capture is explicit; ordinary verification is non-mutating.
-- [ ] Exact-SHA dispatch records a run ID, waits for that run, downloads by run ID and
-      artifact name, and validates the envelope for every non-deferred workflow; it
-      does not dispatch performance or admit macOS diagnostics as a substitute.
-- [ ] Final verifier checks exact tag SHA, published immutable state, exact asset set,
-      uploaded states, and matching SHA-256 digests.
+- [ ] Existing exact-SHA live dispatch and immutable-publication commands remain
+      unchanged and tested for SEED-007; Phase 8 does not invoke them.
 - [ ] `tools/verify_phase8_contracts.py` and release tests demonstrably reuse the
       Phase 5 fixed-verifier and Phase 3 release-evidence analogs.
 - [ ] No absent external prerequisite, mock, collection-only run, diagnostic artifact,
       or manual assertion is counted as automated qualification.
-- [ ] QUAL-06 remains visibly `DEFERRED`/`NOT_QUALIFIED` with a SEED-006 reference in
-      aggregation and publication while every non-deferred class remains mandatory.
+- [ ] QUAL-06 remains visibly `DEFERRED`/`NOT_QUALIFIED` with SEED-006; BACK-05
+      remains `DEFERRED`/`NOT_QUALIFIED` and publication remains
+      `DEFERRED`/`NOT_PUBLISHED` with SEED-007. None is a PASS.
 - [ ] ADR 0001 safety/recovery/progress/performance distinctions and the Phase 07.1
       obstore participant boundary remain intact.
 
-**Approval state:** Nyquist-compliant plan with explicit Wave 0 and external
-checkpoints; execution evidence remains pending.
+**Approval state:** Nyquist-compliant D-24 local-readiness plan; Plan 08-16
+execution evidence remains pending and has no current external checkpoint.

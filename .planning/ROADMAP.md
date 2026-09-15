@@ -575,19 +575,19 @@ Plans:
 
 ### Phase 8: Production Gates and Performance Stabilization
 
-**Goal**: Users can rely on reproducible release evidence across supported installations, Python versions, backends, failures, and operational scale.
+**Goal**: Users can rely on reproducible local-readiness evidence for Cacheness installations, lifecycle failures, cache policy, and operational scale without inheriting unproved remote-service, platform, performance, or publication claims.
 **Depends on**: Phase 07.1
-**Requirements**: BACK-05, QUAL-01, QUAL-02, QUAL-03, QUAL-04, QUAL-05, QUAL-07
+**Requirements**: QUAL-01, QUAL-02, QUAL-03, QUAL-04, QUAL-05, QUAL-07
 **Success Criteria** (what must be TRUE):
 
   1. A clean minimal wheel imports every guaranteed public symbol and completes a memory-backed round trip, while each advertised extra installs and imports independently.
-  2. Required CI passes across supported Python versions, backend contracts, lint and coverage policy, packaging, real PostgreSQL, and authoritative real AWS S3 integration. The frozen Phase 5 runner must produce sanitized QUALIFIED evidence with exact cleanup before PostgreSQL/Amazon-S3 becomes a supported release topology (BACK-05).
+  2. Local deterministic, package, coverage, Ruff, and structural gates pass through fixed commands. The checked workflow definitions retain the supported-Python and protected-live machinery, but only evidence actually produced on an eligible host/service can qualify that platform or topology.
   3. Carry forward Phase 3's finite integrity/recovery regressions and add named cases for new supported topologies and commit boundaries; lifecycle/cache-policy modules meet the project's statement and branch coverage gates. Shared-worker fixtures initialize first and distinguish valid typed contention outcomes from corruption. This is not a proof of every interleaving or an automatic repeated race-repair loop.
   4. The checked-in benchmark harness, representative workloads, SHA-256/XXH3 comparison, and runner preflight remain reproducible future qualification capability. Controlled-Linux budgets and QUAL-06 are explicitly `DEFERRED`/`NOT_QUALIFIED` under `SEED-006` and do not block this milestone; macOS measurements remain diagnostic and make no Linux-equivalence or cross-platform budget claim.
   5. Inventory, reconciliation, statistics, clear, and aggregate operations demonstrate bounded memory and backend-call behavior without accidental N+1 access patterns.
-  6. Qualify exact commits in isolated environments and retain failed-run evidence plus migration fixtures for deliberately supported source versions. Phase 5's PostgreSQL/Amazon-S3 candidate remains unqualified until its non-substitutable real-service gate passes here; unavailable services never count as passes. Historical compatibility tests may remain as evidence but are not release blockers for removed pre-production APIs/layouts. Windows remains UNAVAILABLE/NOT_QUALIFIED until Phase 999.1 supplies native evidence. Optimization must preserve one authority and may not introduce a projection-repair prerequisite for canonical operations.
+  6. A fixed local-readiness report is bound to one exact commit and distinguishes passing local evidence from closed nonclaims. `BACK-05` remains `DEFERRED`/`NOT_QUALIFIED` and immutable publication remains `DEFERRED`/`NOT_PUBLISHED` under SEED-007; QUAL-06 remains deferred under SEED-006; Windows remains `UNAVAILABLE`/`NOT_QUALIFIED` until Phase 999.1. No mock, local substitute, configuration preflight, or stale artifact can become remote/platform/release evidence. Optimization must preserve one authority and may not introduce a projection-repair prerequisite for canonical operations.
 
-**Plans**: 13/15 plans executed
+**Plans**: 13/14 canonical plans executed; 08-11 and 08-12 superseded by D-24/SEED-007
 
 Plans:
 
@@ -604,8 +604,9 @@ Plans:
 - [x] 08-13-PLAN.md — Add the read-only exact-commit controlled-runner preflight required before baseline capture.
 - [x] 08-14-PLAN.md — Make controlled performance an explicit deferred nonclaim in release collection, aggregation, verification, and documentation.
 - [x] 08-15-PLAN.md — Add a configuration-only protected-live preflight and bind it into the fixed verifier.
-- [ ] 08-11-PLAN.md — Collect exact-run non-deferred evidence and aggregate the qualified commit.
-- [ ] 08-12-PLAN.md — Create, authorize, publish, and verify the exact immutable release record.
+- [~] 08-11-PLAN.md — Superseded: exact-SHA real PostgreSQL/Amazon-S3 collection moved intact to SEED-007; `BACK-05` remains NOT_QUALIFIED.
+- [~] 08-12-PLAN.md — Superseded: immutable GitHub release publication moved intact to SEED-007; publication remains NOT_PUBLISHED.
+- [ ] 08-16-PLAN.md — Close deterministic local readiness and encode the remote/performance/platform/publication nonclaims.
 
 ## Progress
 
@@ -619,7 +620,7 @@ Plans:
 | 6. UnifiedCache Policy Composition | 11/11 | Complete    | 2026-09-09 |
 | 7. Explicit Migration and Rebuild Cutover | 24/24 | Complete    | 2026-09-11 |
 | 07.1. Obstore Payload Participant Unification | 11/11 | Complete | 2026-09-13 |
-| 8. Production Gates and Performance Stabilization | 13/15 | In Progress|  |
+| 8. Production Gates and Performance Stabilization | 13/14 canonical | In Progress|  |
 
 ## Backlog
 

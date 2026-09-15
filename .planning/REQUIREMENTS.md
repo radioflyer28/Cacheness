@@ -24,7 +24,7 @@ Phase 3 completion below is scoped to the qualified initialized local SQLite/fil
 - [x] **BACK-02**: JSON, memory, SQLite, and PostgreSQL metadata implementations have explicit authority/projection roles through one composition contract. Narrow transactional catalog adapters before expansion; a derived JSON view does not become an independent lifecycle authority.
 - [x] **BACK-03**: Caller-injected and registered backend implementations remain selected rather than being silently replaced by configuration defaults.
 - [x] **BACK-04**: Every explicitly supported pairing of advertised payload and metadata backends passes the lifecycle contract at its declared capability tier; unsupported Cartesian combinations are documented and rejected rather than silently downgraded.
-- [ ] **BACK-05**: PostgreSQL and AWS S3 behavior is verified with real-service integration coverage; compatible S3 services are supported only where explicitly verified.
+- [ ] **BACK-05**: PostgreSQL and AWS S3 behavior is verified with real-service integration coverage; compatible S3 services are supported only where explicitly verified. **Deferred / NOT_QUALIFIED:** real-service execution and the immutable release record are deferred to `SEED-007`; deterministic contracts, mocks, local emulators, and configuration-only preflight do not satisfy this requirement.
 - [x] **BACK-06**: Backends expose durability, process/host sharing, compare-and-swap, streaming, and listing capabilities, and configurations cannot claim guarantees their topology cannot provide.
 - [x] **BACK-07**: Direct `BlobStore` users can store, validate, query, and update application-defined catalog metadata without implementing a lifecycle backend; supported fields/operators and transactional limits are explicit. Extend the existing mapping/entry interface rather than replacing the engine. Authoritative metadata commits with the blob descriptor; external indexes or ORM links are explicitly derived unless they join that same transaction, with consistency and partial-failure behavior stated.
 
@@ -63,7 +63,7 @@ Phase 3 completion below is scoped to the qualified initialized local SQLite/fil
 
 - [x] **QUAL-01**: A clean minimal wheel installation imports every guaranteed public symbol and completes a memory-backed round trip.
 - [x] **QUAL-02**: Each advertised optional dependency group installs and imports independently.
-- [x] **QUAL-03**: CI covers supported Python versions, backend contracts, lint policy, coverage, packaging, PostgreSQL, and AWS S3 integration.
+- [x] **QUAL-03**: CI definitions cover supported Python versions, backend contracts, lint policy, coverage, packaging, and protected PostgreSQL/AWS S3 qualification. Phase 8 locally verifies the deterministic/package/quality/structural paths and the fail-closed remote workflow contract; actual real-service support remains separately gated by BACK-05 and `SEED-007`.
 - [x] **QUAL-04**: Carry forward the finite Phase 3 integrity/recovery regressions and cover named commit boundaries for each new supported topology with deterministic fault/crash tests. Shared-worker fixtures initialize first; success/conflict/typed retryable outcomes are distinguished from corruption. No universal scheduling guarantee or automatic repeated race-fix loop is required.
 - [x] **QUAL-05**: Lifecycle and cache-policy code meets targeted statement and branch coverage thresholds established by the project.
 - [ ] **QUAL-06**: Checked-in benchmarks establish final performance budgets and distributions for named workloads/environments after lifecycle behavior stabilizes. Benchmark thresholds do not become runtime deadlines or strengthen public progress/atomicity promises. **Deferred / NOT_QUALIFIED:** controlled-Linux capture is deferred to `SEED-006`; macOS diagnostics do not satisfy this requirement and QUAL-06 does not block the current milestone.
@@ -96,12 +96,13 @@ Deferred to future releases and not included in the current roadmap.
 Phase 3 delivered an early local composition proof for CACH-01/02/03/06 and existing mapping metadata for BACK-07 at qualified commit `5282dca`; see [the direct implementation ledger](../docs/phase3-direct-implementation-2026-09-06.md). It does not mark those full requirements complete: Phase 4 owns catalog customization and Phase 6 owns the coherent cache-policy API. Cache instances must use BlobStore as their engine; sharing a live namespace with non-cache stores is not required. On 2026-09-07 the user approved a pre-production compatibility reset: historical characterization remains evidence, but current development-only APIs/layouts need not retain runtime adapters. Explicit schema/format identification and future migration/rebuild tooling remain required. Phase 3 completion is direct primary-agent qualification under the user's process override, not a fresh independent GSD verifier verdict.
 
 On 2026-09-08 the user approved moving `BACK-05`'s non-substitutable real
-PostgreSQL/Amazon-S3 qualification gate from Phase 5 to Phase 8. Phase 5 retains
-the candidate implementation, deterministic contracts, frozen real-service
-suites, fail-closed runner, and truthful `UNAVAILABLE` evidence, but does not
-claim release qualification. Phase 8 must run the gate unchanged before marking
-`BACK-05` complete or advertising PostgreSQL/Amazon-S3 as a supported release
-topology.
+PostgreSQL/Amazon-S3 qualification gate from Phase 5 to Phase 8. On 2026-09-15,
+the user approved closing Phase 8 for local use and moved that still-unrun gate
+plus immutable release publication intact to `SEED-007`. Phase 8 retains the
+candidate implementation, deterministic contracts, frozen real-service suites,
+fail-closed runner, and truthful `UNAVAILABLE` evidence, but does not claim
+remote-service or release qualification. `BACK-05` cannot be marked complete or
+advertised until SEED-007 produces the original real-service evidence.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
@@ -117,7 +118,7 @@ topology.
 | BACK-02 | Phase 4 | Complete |
 | BACK-03 | Phase 4 | Complete |
 | BACK-04 | Phase 5 | Complete |
-| BACK-05 | Phase 8 | Pending — real-service gate moved intact |
+| BACK-05 | SEED-007 | Deferred / NOT_QUALIFIED — real-service gate and immutable publication moved intact |
 | BACK-06 | Phase 4 | Complete |
 | BACK-07 | Phase 4 | Complete |
 | CACH-01 | Phase 6 | Complete |
@@ -154,9 +155,9 @@ topology.
 
 - v1 requirements recorded: 44 total
 - Current milestone requirements mapped to phases: 43
-- Explicitly deferred: 1 (`QUAL-06` → `SEED-006`)
+- Explicitly deferred: 2 (`QUAL-06` → `SEED-006`; `BACK-05` → `SEED-007`)
 - Unmapped: 0 ✓
 
 ---
 *Requirements defined: 2026-08-29*
-*Last updated: 2026-09-08 after moving BACK-05 real-service release qualification to Phase 8*
+*Last updated: 2026-09-15 after approving local-readiness closure and deferring BACK-05/publication to SEED-007*

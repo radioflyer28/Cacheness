@@ -4,7 +4,7 @@
 **Domain:** Python package release qualification, live-service evidence, coverage ratchets, and controlled performance gates
 **Confidence:** HIGH
 
-## 2026-09-15 execution amendment
+## 2026-09-15 execution amendments
 
 The user deferred controlled-Linux performance qualification from the current
 milestone after the harness, workload inventory, hash comparison, workflow, and
@@ -12,9 +12,17 @@ read-only runner preflight were implemented. D-23 supersedes only the
 release-blocking controlled-Linux portions of D-20/D-22: QUAL-06 remains
 `DEFERRED`/`NOT_QUALIFIED` under `SEED-006`, and the current release aggregate
 must name that nonclaim without accepting macOS diagnostics as Linux-equivalent
-evidence. All other research findings remain applicable, especially exact-SHA
-real PostgreSQL/Amazon-S3 qualification and ADR 0001's separation of correctness,
-progress, and performance.
+evidence.
+
+The later user-approved D-24 cutover closes this milestone on local readiness and
+moves exact-SHA real PostgreSQL/Amazon-S3 qualification plus immutable GitHub
+release publication intact to SEED-007. The original service, exact-cleanup,
+same-commit, approval, asset, and immutable-state findings remain applicable to
+that seed, but they are no longer current Phase 8 prerequisites. Current local
+closure must record `BACK-05` as `DEFERRED`/`NOT_QUALIFIED` and publication as
+`DEFERRED`/`NOT_PUBLISHED`; no mock, emulator, configuration preflight, local
+contract, or stale evidence can substitute. ADR 0001's separation of correctness,
+progress, and performance remains controlling.
 
 <user_constraints>
 ## User Constraints (from CONTEXT.md)
@@ -53,6 +61,7 @@ progress, and performance.
 - **D-21:** Declare expected page/work complexity and maximum backend-call formulas for inventory, reconciliation, statistics, clear, and aggregate operations. Exercise fixed scale tiers to detect accidental N+1 behavior and unbounded memory independently of machine speed.
 - **D-22:** Controlled local performance gates may block release. Live PostgreSQL/Amazon-S3 qualification blocks on integrity and recovery behavior; remote latency distributions are diagnostic only.
 - **D-23:** Controlled-Linux qualification and QUAL-06 are deferred to SEED-006 and do not block the current milestone. Retain the implemented harness/workflows as future capability; record `DEFERRED`/`NOT_QUALIFIED` in release evidence; never substitute macOS diagnostics or claim Linux equivalence. All non-deferred classes, including exact-SHA real PostgreSQL/Amazon-S3 evidence, remain mandatory.
+- **D-24:** Close Phase 8 on deterministic local readiness. Supersede current execution of Plans 08-11/08-12 and defer their real PostgreSQL/Amazon-S3 qualification plus immutable publication to SEED-007. Preserve the tooling and original evidence standard. Keep BACK-05 `DEFERRED`/`NOT_QUALIFIED` and publication `DEFERRED`/`NOT_PUBLISHED`; do not substitute mocks, emulators, preflight, local evidence, or stale evidence.
 
 ### the agent's Discretion
 - Select the exact clean-environment tooling, CI job decomposition, artifact retention duration, representative fixture sizes, sample counts, warmups, statistical envelope calculation, and controlled Linux runner identity, provided the choices are explicit and reproducible.
@@ -64,6 +73,7 @@ progress, and performance.
 - SEED-003 may revisit a versioned XXH3 canonical payload digest after Phase 8 supplies comparative throughput and end-to-end cost evidence.
 - Native Windows lifecycle qualification remains Phase 999.1 because no eligible Windows environment is available.
 - Controlled-Linux performance qualification is deferred to SEED-006. Existing macOS observations remain diagnostic only.
+- Real PostgreSQL/Amazon-S3 qualification and immutable GitHub release publication are deferred to SEED-007. Existing tooling remains future capability, not current proof.
 </user_constraints>
 
 <phase_requirements>
@@ -71,7 +81,7 @@ progress, and performance.
 
 | ID | Description | Research Support |
 |----|-------------|------------------|
-| BACK-05 | PostgreSQL and AWS S3 behavior is verified with real-service integration coverage; compatible S3 services are supported only where explicitly verified. | Preserve and rebind the Phase 5 fail-closed runner to the Phase 07.1 obstore participant; run it on protected release candidates and schedule, with exact-revision and clean-cleanup evidence. [VERIFIED: `.planning/REQUIREMENTS.md:27`; `tools/run_phase5_qualification.py:27-55,291-368,395-491`] |
+| BACK-05 | PostgreSQL and AWS S3 behavior is verified with real-service integration coverage; compatible S3 services are supported only where explicitly verified. | `DEFERRED`/`NOT_QUALIFIED` to SEED-007 by D-24. Preserve the Phase 5/8 fail-closed runner, exact-revision, and clean-cleanup evidence standard; do not run or substitute it during local closure. |
 | QUAL-01 | A clean minimal wheel installation imports every guaranteed public symbol and completes a memory-backed round trip. | Extend the existing base-wheel probe to import the complete public barrels and exercise generic plus NumPy formats in a genuinely isolated environment. [VERIFIED: `.planning/REQUIREMENTS.md:64`; `tests/test_full_suite_environment.py:122-174`] |
 | QUAL-02 | Each advertised optional dependency group installs and imports independently. | Generate one wheel, create one fresh environment per literal optional group, and require an independent representative probe; do not use one all-extras environment as proof. [VERIFIED: `.planning/REQUIREMENTS.md:65`; `pyproject.toml:18-45`] |
 | QUAL-03 | CI covers supported Python versions, backend contracts, lint policy, coverage, packaging, PostgreSQL, and AWS S3 integration. | Add deterministic PR, Linux Python matrix, macOS boundary smoke, and protected/scheduled live workflows. Retain the implemented controlled-performance workflow for SEED-006, outside the current release collection. [VERIFIED: `.planning/REQUIREMENTS.md:66`; completed Plan 08-07/08-09 summaries; `08-CONTEXT.md` D-23] |
@@ -80,10 +90,12 @@ progress, and performance.
 | QUAL-07 | Supported inventory and aggregate operations avoid unbounded memory use and accidental N+1 backend calls. | Carry forward the completed contracts and add explicit formula/scale assertions for inventory, reconciliation, statistics, clear, and aggregate/policy-maintenance operations. [VERIFIED: `.planning/REQUIREMENTS.md:70`; `src/cacheness/storage/reconciliation.py:176-205`; `src/cacheness/storage/lifecycle.py:933-1047`] |
 </phase_requirements>
 
-**Deferred requirement:** QUAL-06 retains its original performance-budget and
+**Deferred requirements:** QUAL-06 retains its original performance-budget and
 distribution definition, but D-23 moves its controlled-Linux qualification to
 SEED-006. Phase 8 keeps its implemented harness and self-tests without closing
-the requirement or treating macOS diagnostics as a replacement.
+the requirement or treating macOS diagnostics as a replacement. BACK-05 retains
+its real-service definition, but D-24 moves execution and immutable publication
+to SEED-007 without converting either nonclaim into a pass.
 
 ## Summary
 
@@ -642,7 +654,7 @@ After the resume signal, deterministic automation continues and revalidates the 
 | Network package registry access | Clean installs/current probe | ✗ in this sandbox | DNS unavailable | CI or approved networked environment. [VERIFIED: failed uv/pip registry probes, 2026-09-13] |
 | `pyperf` | Controlled benchmarks | ✗ locally | Official latest 2.10.0 | Human checkpoint, then add locked dev dependency; otherwise retain reviewed custom runner. [VERIFIED: local package probe and legitimacy seam, 2026-09-13; CITED: https://pypi.org/project/pyperf/] |
 
-**Missing current-milestone dependencies with no fallback:** real PostgreSQL/Amazon S3 configuration for BACK-05 and repository CI/protected-release configuration for QUAL-03. The controlled Linux runner is a SEED-006 dependency, not a current release blocker. [VERIFIED: environment audit and `08-CONTEXT.md` D-09 through D-13, D-23]
+**Deferred external dependencies with no qualifying fallback:** real PostgreSQL/Amazon S3 configuration, protected exact-SHA workflow publication, and immutable release authority now belong to SEED-007; the controlled Linux runner belongs to SEED-006. Their absence does not block the D-24 local-readiness milestone, but all corresponding claims remain nonqualified. [VERIFIED: environment audit and `08-CONTEXT.md` D-23/D-24]
 
 **Missing dependencies with fallback:** local Python 3.14 and network installs can run in CI; local macOS is not the controlled performance source. [ASSUMED]
 
@@ -676,7 +688,7 @@ The full-suite command includes marked live modules and therefore must be used w
 
 - **Per task commit:** Run the focused files changed plus `tests/test_phase8_quality_gates.py`; for lifecycle/cache-policy changes also run the exact Phase 07.1 selector subset and coverage quick scope. [ASSUMED]
 - **Per wave merge:** Run the deterministic full suite on the wave's Python, package-matrix self-tests, direct Ruff scopes, and coverage verifier. [ASSUMED]
-- **Amended phase gate:** Linux 3.11-3.14 compatible matrix green, TensorFlow 3.11-3.13 probe green, macOS 3.11/3.14 smoke green, exact-commit live evidence `QUALIFIED`/`CLEAN`, every other non-deferred class green, an explicit QUAL-06 `DEFERRED`/`NOT_QUALIFIED` record pointing to SEED-006, and immutable release evidence attached. [VERIFIED: D-23]
+- **Amended phase gate:** deterministic local lifecycle/cache contracts, base wheel imports/round trips, coverage/Ruff ratchets, and structural bounds pass for one exact local source identity. The report retains explicit QUAL-06/SEED-006 and BACK-05/SEED-007 `DEFERRED`/`NOT_QUALIFIED` records plus publication `DEFERRED`/`NOT_PUBLISHED`; current-host smoke never claims Linux, Windows, live services, or immutable publication. [VERIFIED: D-24]
 
 ### Wave 0 Gaps
 

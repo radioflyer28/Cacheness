@@ -200,3 +200,22 @@
 - Investigate Narwhals as a future dataframe-handler compatibility layer across pandas, PyArrow, and Polars while retaining Parquet formats.
 - Revisit a versioned XXH3 canonical payload digest through SEED-003 after Phase 8 benchmarking.
 - Native Windows lifecycle qualification remains Phase 999.1.
+
+---
+
+## 2026-09-15 local-readiness scope cutover
+
+The user asked whether Plans 08-11 and 08-12 were necessary before beginning to
+use Cacheness locally. The agreed answer was no: those plans prove real
+PostgreSQL/Amazon-S3 and immutable GitHub release publication, not the already
+implemented deterministic local storage/cache boundary.
+
+**User's choice:** Finish Phase 8 on verified local readiness now. Preserve the
+existing live qualification and publication tooling, but supersede Plans 08-11
+and 08-12 for this milestone and move their exact evidence standard to SEED-007.
+
+**Locked nonclaims:** BACK-05 remains `DEFERRED`/`NOT_QUALIFIED`; immutable
+publication remains `DEFERRED`/`NOT_PUBLISHED`; QUAL-06 remains deferred under
+SEED-006; Windows remains unqualified. No mock, emulator, local run,
+configuration-only preflight, or stale artifact may substitute for those future
+evidence classes. This choice is recorded as D-24 in `08-CONTEXT.md`.

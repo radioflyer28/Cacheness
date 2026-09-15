@@ -15,6 +15,13 @@ but current release collection/aggregation requires only non-deferred classes an
 records controlled performance as `DEFERRED`/`NOT_QUALIFIED`. macOS diagnostics are
 never a Linux-equivalent substitute.
 
+**2026-09-15 local-readiness cutover:** D-24 additionally defers exact-SHA real
+PostgreSQL/Amazon-S3 qualification and immutable GitHub release publication to
+SEED-007. Keep the live runner, workflow, collection, cleanup, approval, asset, and
+publication patterns below intact for that seed. Plan 08-16 must add a separate
+local-readiness result; it must not weaken the existing release aggregator or turn
+`BACK-05`/publication nonclaims into passing evidence.
+
 ## File Classification
 
 | New/Modified File | Role | Data Flow | Closest Analog | Match Quality |

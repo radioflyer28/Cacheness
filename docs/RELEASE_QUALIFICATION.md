@@ -1,9 +1,12 @@
 # Release qualification
 
-Phase 8 records separate, exact-commit evidence classes. A green check in one
-class is never a substitute for another. In particular, local mocks, skipped
-tests, old artifacts, scheduled service diagnostics, and an earlier commit
-cannot qualify a release candidate.
+Phase 8 closes a deterministic local-readiness boundary. It does not publish a
+release or qualify real PostgreSQL/Amazon-S3, controlled-Linux performance,
+Windows, or an unexecuted platform matrix. Those boundaries remain separate:
+`BACK-05` and immutable publication are deferred to
+[SEED-007](../.planning/seeds/SEED-007-qualify-real-postgresql-s3-and-publish-release.md),
+and `QUAL-06` remains deferred to SEED-006. A local pass, mock, skipped test,
+configuration preflight, old artifact, or scheduled diagnostic cannot substitute.
 
 Every qualifying artifact binds a candidate SHA and a reviewed source digest.
 The release collector accepts only the requested 40-character lowercase Git
@@ -21,15 +24,16 @@ or wrong-class input.
 | Coverage/quality | `tools/verify_phase8_coverage.py` through `tools/run_phase8_local_gates.py coverage` | The named selectors and repository/critical statement and branch floors must pass. Direct scoped Ruff lint and formatting must pass; global legacy lint debt is not a release scope. | Coverage report/XML and canonical envelope bind the reviewed candidate SHA/source digest. Qualifying artifact is retained for the release lifetime. |
 | Structural | `tools/run_phase8_scale_gates.py` through `tools/run_phase8_local_gates.py structural` | Fixed authority/participant call formulas and isolated RSS observations must pass. A missing child result or invalid units is `NOT_QUALIFIED`; elapsed time is not a structural result. | Envelope contains fixed-scale counters, normalized RSS facts, revision, and source digest. Qualifying artifact is retained for the release lifetime. |
 | Controlled performance | Retained `benchmarks/phase8_benchmarks.py` and `.github/workflows/performance.yml` machinery | `DEFERRED` and `NOT_QUALIFIED` for this milestone under `QUAL-06`; it is not a current release prerequisite and cannot become a `PASS` through an unavailable runner or diagnostic result. | No controlled-performance artifact is collected or published for the current release. The retained harness, preflight, workload inventory, and baseline contract are reserved for [SEED-006](../.planning/seeds/SEED-006-qualify-controlled-linux-performance.md). |
-| Live service | `tools/run_phase8_qualification.py` and `.github/workflows/live_qualification.yml` | Protected release-candidate execution requires real PostgreSQL and Amazon S3 to emit sanitized `QUALIFIED` and `CLEAN` evidence. `UNAVAILABLE`, failed cleanup, a mock, a compatible substitute service, or a scheduled diagnostic is never a pass. | Exact SHA/source digest, bounded cleanup evidence, and run ID are recorded. Sanitized `QUALIFIED` evidence is retained for the release lifetime; failed, unavailable, and scheduled diagnostics are retained for 30 days. |
-| Publication | `tools/verify_phase8_release.py` | A final report requires one complete same-revision input for every required class, then verifies the exact tag, published immutable release, allow-listed assets, and SHA-256 digests. Missing evidence blocks publication. | The immutable report preserves source identity, artifact digests, and workflow/run references for the release lifetime. |
+| Live service | Preserved `tools/run_phase8_qualification.py` and `.github/workflows/live_qualification.yml` | `DEFERRED` and `NOT_QUALIFIED` under BACK-05/SEED-007. Future protected execution still requires real PostgreSQL and Amazon S3 to emit sanitized `QUALIFIED` and `CLEAN` evidence; no substitute passes. | No live evidence is attached or claimed by the local-readiness milestone. Existing exact SHA/source, cleanup, and run-ID rules remain mandatory for SEED-007. |
+| Publication | Preserved `tools/verify_phase8_release.py` controller | `DEFERRED` and `NOT_PUBLISHED` under SEED-007. A local readiness report is not a draft, tag, GitHub release, or immutable-publication proof. | Existing exact tag/state/asset/digest verification remains mandatory when SEED-007 runs. |
 
 `PASS` means the declared current class completed for its stated identity.
 `UNAVAILABLE` means an external prerequisite or unsupported environment was absent.
-`NOT_QUALIFIED` means evidence was incomplete, invalid, dirty, failed, or did not
-meet the class contract. `DEFERRED` is a closed nonclaim, not a pass: only
-controlled performance is deferred to [SEED-006](../.planning/seeds/SEED-006-qualify-controlled-linux-performance.md)
-with `NOT_QUALIFIED` status. Neither non-passing state may be relabeled as success.
+`NOT_QUALIFIED` means evidence was incomplete, invalid, dirty, failed, deferred,
+or did not meet the class contract. `NOT_PUBLISHED` means no verified immutable
+GitHub release exists. `DEFERRED` is a closed nonclaim, not a pass: controlled
+performance points to [SEED-006](../.planning/seeds/SEED-006-qualify-controlled-linux-performance.md),
+while BACK-05 and publication point to SEED-007. None may be relabeled as success.
 
 ## Supported runtime and package scope
 
@@ -49,6 +53,16 @@ NumPy behavior. Dataframe extras continue to qualify their retained Parquet
 handlers. This is compatibility evidence for existing formats, not a handler
 redesign.
 
+## Local-readiness boundary
+
+The Phase 8 local-readiness command must prove the fixed deterministic
+integrity/recovery suite, a clean base-wheel import and public round trip,
+coverage and scoped Ruff ratchets, and structural memory/backend-call bounds for
+one exact source identity. It records the observed current-host scope and the
+SEED-006/SEED-007 nonclaims. It does not contact PostgreSQL/AWS, dispatch a
+workflow, create a GitHub draft, publish a release, or convert an unavailable
+optional/platform row into support evidence.
+
 ## Protected service and performance boundaries
 
 Only `workflow_dispatch` release-candidate jobs may receive the protected
@@ -57,6 +71,11 @@ detached checkout equality, frozen `uv.lock` resolution, the real frozen suite,
 standard AWS credentials/IAM and bucket policy, an explicit bucket and region,
 and exact bounded cleanup. Production endpoint overrides and an
 `ExpectedBucketOwner` claim remain unsupported.
+
+That protected path is preserved for SEED-007 and is not executed by Phase 8's
+local closure. Until it runs successfully, PostgreSQL/Amazon-S3 is a candidate
+topology, not a release-qualified support claim, and publication is
+`NOT_PUBLISHED`.
 
 Scheduled service runs are diagnostic only: they detect drift but cannot be
 attached as release qualification. Remote PostgreSQL/S3 latency is also

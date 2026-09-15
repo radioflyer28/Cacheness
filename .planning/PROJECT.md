@@ -2,7 +2,7 @@
 
 ## What This Is
 
-Cacheness is a Python storage and caching library for arbitrary objects, arrays, dataframes, and function results. Its object-storage path uses a reliable `BlobStore` foundation that `UnifiedCache` consumes as its policy layer. Built-in filesystem, memory, and S3 payload mechanics now share one guarded obstore participant beneath the single lifecycle authority. Catalog customization, cache-policy coverage, and explicit offline migration/rebuild tooling are implemented; final production qualification remains in Phase 8. `SqlCache` remains separate.
+Cacheness is a Python storage and caching library for arbitrary objects, arrays, dataframes, and function results. Its object-storage path uses a reliable `BlobStore` foundation that `UnifiedCache` consumes as its policy layer. Built-in filesystem, memory, and S3 payload mechanics now share one guarded obstore participant beneath the single lifecycle authority. Catalog customization, cache-policy coverage, and explicit offline migration/rebuild tooling are implemented; Phase 8 closes deterministic local readiness while remote-service qualification and immutable release publication remain explicit future work. `SqlCache` remains separate.
 
 The intended audience is Python applications that need local or remote persistence with predictable cache semantics across filesystem, memory, S3, JSON, SQLite, and PostgreSQL backends.
 
@@ -36,7 +36,7 @@ Applications can store and retrieve data reliably through one backend-neutral li
 
 ### Active
 
-- [ ] Release-qualify `BlobStore` lifecycle behavior across every advertised built-in backend and supported environment
+- [ ] Release-qualify real PostgreSQL/Amazon-S3 lifecycle behavior and publish the immutable release — deferred to `SEED-007`; local readiness does not imply this claim
 - [ ] Publish complete generations through one catalog transaction; coordinate external payload effects with attributable intent/debt and deterministic reconciliation when resources are available, not cross-resource ACID or instantaneous orphan-free cleanup
 - [ ] Guarantee same-key integrity and defined success/conflict/retryable-failure outcomes within each explicitly supported backend topology
 - [ ] Correct package dependency and optional-feature detection so a minimal supported installation imports reliably
@@ -61,7 +61,7 @@ The codebase began as a disk cache and expanded into direct blob storage, backen
 
 At project initialization, payload writes and metadata writes were separate, without rollback; cleanup and composition were incomplete. Phase 3 now has a SQLite lifecycle authority, immutable native generations, exact publication, and intent/debt recovery. The direct implementation removed the cache's projection-repair/deferred-cleanup orchestration and added supported same-generation entry snapshots and receipts. See [the implementation ledger](../docs/phase3-direct-implementation-2026-09-06.md) and [initialization/failure guide](../docs/STORAGE_INITIALIZATION.md), not the earlier audit alone, for the delivered baseline.
 
-Phases 4 through 7 delivered injected catalog composition, cache-policy reuse of `BlobStore`, and explicit stopped-worker migration/rebuild tooling. Phase 07.1 replaced the separate filesystem/memory/S3 payload mechanics with one guarded obstore participant while preserving the single lifecycle authority and path-based custom-handler seam. Phase 8 owns the remaining release qualification: minimal packaging, supported Python/platform matrices, real PostgreSQL and AWS S3 evidence, coverage policy, and structural scale gates. It retains the performance harness and macOS diagnostic measurements, while controlled-Linux performance qualification is deferred to `SEED-006` and is not a current release claim. Deterministic adapters or standalone backend implementations are not substitutes for live release claims.
+Phases 4 through 7 delivered injected catalog composition, cache-policy reuse of `BlobStore`, and explicit stopped-worker migration/rebuild tooling. Phase 07.1 replaced the separate filesystem/memory/S3 payload mechanics with one guarded obstore participant while preserving the single lifecycle authority and path-based custom-handler seam. Phase 8 closes the deterministic local-use boundary: minimal packaging/import, local lifecycle and cache-policy contracts, coverage/Ruff policy, and structural scale gates. It retains supported-Python, protected PostgreSQL/Amazon-S3, immutable-publication, performance-harness, and macOS diagnostic machinery without treating unrun external evidence as a pass. Controlled-Linux performance qualification is deferred to `SEED-006`; real PostgreSQL/Amazon-S3 qualification and immutable publication are deferred to `SEED-007`. Deterministic adapters or standalone backend implementations are not substitutes for live release claims.
 
 The security model assumes trusted application payloads and a trusted owner for each local store, so pickle/dill remain available and Cacheness lifecycle-control objects must not be deleted or rebound by that owner while the store is live. Persisted metadata and paths are still untrusted inputs: the implementation must eliminate `eval`, contain filesystem paths, bind structured query paths safely, and fail closed when signing, integrity verification, or control-object identity checks fail. Initial Windows local-store coordination supports processes running as one OS user in one interactive or service session; cross-user, cross-service, and cross-session sharing requires a future explicit authority and ACL contract.
 
@@ -72,7 +72,7 @@ Historical baseline (2026-08-29): 777 collected tests, 749 passing, 26 skipped a
 - **Pre-production cutover**: Cacheness is not yet in production, so the milestone may replace current public APIs and development-only stored layouts instead of carrying runtime compatibility adapters. Preserve only deliberately reaffirmed contracts; incompatible stores fail explicitly.
 - **Migration**: Keep versioned schema/format identification plus explicit offline migration and rebuild tooling for future releases; dropping current backward compatibility does not authorize implicit upgrade, silent deletion, or removal of migration infrastructure.
 - **Architecture**: `BlobStore` owns storage lifecycle; `UnifiedCache` depends on it and owns cache policy; `SqlCache` remains separate
-- **Backends**: Cover all advertised backend families through explicit supported combinations and capability tiers; a backend-neutral interface does not imply identical durability/progress or all Cartesian pairings
+- **Backends**: Cover all advertised backend families through explicit supported combinations and capability tiers; real PostgreSQL/Amazon-S3 release support remains unqualified until SEED-007, and a backend-neutral interface does not imply identical durability/progress or all Cartesian pairings
 - **Security**: Treat application payloads as trusted while enforcing safe parsing, path containment, and fail-closed integrity boundaries
 - **Local-store trust**: Treat the OS principal that owns a local store and its lifecycle-control namespace as trusted not to delete or rebind live control objects; detect observable substitution and fail closed
 - **Windows sharing**: Support local-store coordination within one Windows OS user/session in this milestone; do not claim cross-user, cross-service, or cross-session authority
@@ -80,7 +80,7 @@ Historical baseline (2026-08-29): 777 collected tests, 749 passing, 26 skipped a
 - **Concurrency**: Same-key operations must not corrupt payloads or produce metadata/payload disagreement
 - **Startup and maintenance**: Initialize before shared workers; schema migration/cutover requires stopped workers and explicit maintenance, not an online startup protocol
 - **Derived state**: Optional projections never gate canonical reads/cleanup or revoke commits; explicitly requested external metadata failures retain typed committed-partial outcomes, including concurrent cache close after the engine commit
-- **Performance**: Correctness comes first during migration; final acceptance includes measured budgets against checked-in benchmarks
+- **Performance**: Correctness comes first during migration; the harness remains checked in, while controlled-Linux budgets stay explicitly unqualified until SEED-006
 - **Runtime**: Maintain Python 3.11+ support and verify supported versions rather than relying only on the current Python 3.13 environment
 
 ## Key Decisions
@@ -94,7 +94,7 @@ Historical baseline (2026-08-29): 777 collected tests, 749 passing, 26 skipped a
 | Target trusted application payloads | Retains useful pickle/dill capabilities while focusing security work on boundaries the library can enforce | — Pending |
 | Trust the local store owner for lifecycle-control availability | Portable per-key coordination cannot remain immutable against the same principal deleting every authority object without an external coordinator or store-wide serialization | ✓ Phase 3 contract clarification |
 | Scope initial Windows local-store sharing to one user/session | Preserves advertised Windows use for ordinary applications without claiming an unverified cross-principal authority or ACL model | ✓ Phase 3 contract clarification |
-| Include every advertised built-in backend | Backend unification is not credible if S3 or PostgreSQL remain direct-use-only or untested | — Pending |
+| Include every advertised built-in backend | Backend unification is not credible if S3 or PostgreSQL remain direct-use-only or untested | ◐ Candidate implementation and deterministic contracts complete; real-service release qualification deferred to SEED-007 |
 | Prioritize correctness with measured performance guardrails | Phase 8 keeps the harness, workloads, hash comparison, and diagnostic measurements; controlled-Linux budgets remain unqualified until `SEED-006` runs on an eligible host | ◐ Deferred, 2026-09-15 |
 | Cache instances consume BlobStore; separate cache/non-cache namespaces are sufficient | Reuse the complete engine without imposing shared retention policy or a dual-role store | ✓ User clarification, 2026-09-06 |
 | Customize catalog metadata without replacing the lifecycle implementation | Cataloging blobs is a primary product use case, not a cache-only extension | ✓ User goal; BACK-07 acceptance added for Phase 4 |
@@ -106,6 +106,7 @@ Historical baseline (2026-08-29): 777 collected tests, 749 passing, 26 skipped a
 | Keep handler-owned transforms and explicit rebuild separate from lifecycle authority | Format handlers own serialization changes while the catalog remains the sole visibility and recovery authority | ✓ Phase 7 |
 | Use obstore for built-in payload object mechanics only | Removes duplicate filesystem/S3 mechanics while preserving `BlobStore`/`AuthorityLifecycleEngine` as the sole owner of intent, visibility, reconciliation, and cleanup debt | ✓ Phase 07.1 |
 | Treat ETag/version as opaque signed transport evidence | Enables server-side corroboration without pretending ETag is the canonical blob digest or extending database ACID across the object store | ✓ Phase 07.1 |
+| Close the current milestone on local readiness without inventing remote or publication evidence | Enables immediate local use while preserving the original real-service and immutable-publication standard for an eligible future environment | ✓ User approved, 2026-09-15; BACK-05/publication deferred to SEED-007 |
 
 ## Evolution
 
@@ -125,4 +126,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-09-13 after Phase 07.1 completion*
+*Last updated: 2026-09-15 after the Phase 8 local-readiness cutover*

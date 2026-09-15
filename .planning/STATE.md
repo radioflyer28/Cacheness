@@ -4,15 +4,15 @@ milestone: v1.0
 current_phase: 08
 current_phase_name: Production Gates and Performance Stabilization
 status: executing
-stopped_at: Completed 08-15-PLAN.md; Plan 08-11 awaits protected real-service qualification
+stopped_at: Phase 08 replanned for local readiness; 08-16 is ready to execute
 last_updated: "2026-09-15T17:04:09.367Z"
 last_activity: 2026-09-15
-last_activity_desc: Planned configuration-only protected-live preflight before exact-SHA collection
+last_activity_desc: Deferred real-service qualification/publication to SEED-007 and planned local-readiness closure
 state_head: 8577d499c9ae824d197a1215c906574919e6cdcd
 progress:
   total_phases: 9
   completed_phases: 7
-  total_plans: 131
+  total_plans: 132
   completed_plans: 128
 milestone_name: milestone
 ---
@@ -29,9 +29,9 @@ See: .planning/PROJECT.md (updated 2026-09-15)
 ## Current Position
 
 Phase: 08 — Production Gates and Performance Stabilization
-Plan: 15 of 15
-Status: Ready to execute 08-15, then 08-11 and 08-12
-Last activity: 2026-09-15 — planned a configuration-only protected-live preflight before exact-SHA collection
+Plan: 16 of 16 (08-11 and 08-12 superseded)
+Status: Ready to execute 08-16 local-readiness closure
+Last activity: 2026-09-15 — deferred exact-SHA real-service qualification and immutable publication to SEED-007 without claiming either passed
 
 Phase 07.1 closed with 11/11 plans summarized and an independent 46/46
 must-have verification pass. Built-in filesystem, memory, and S3 payload
@@ -41,9 +41,11 @@ single `AuthorityLifecycleEngine`, and `UnifiedCache` remains policy-only.
 The security audit closes 47/47 plan threats after a bounded canonical-evidence
 parser repair. ETag/version remain opaque signed transport corroboration;
 canonical SHA-256 plus size remains the integrity decision. Live AWS,
-PostgreSQL, and platform/package evidence remain unqualified until their Phase 8
-gates run. Structural RSS contracts and hash-benchmark capability are retained;
-controlled-Linux performance qualification is deferred to SEED-006 by D-23.
+PostgreSQL, and remote platform/package evidence remain unqualified until their
+eligible gates run. Structural RSS contracts and hash-benchmark capability are
+retained; controlled-Linux performance qualification is deferred to SEED-006 by
+D-23, while real PostgreSQL/Amazon-S3 qualification and immutable publication are
+deferred to SEED-007 by D-24.
 
 Roadmap progress: [█████████░] 8 of 9 phases complete. The generated disk plan
 counter still includes the deliberately superseded Phase 03 plan; do not reopen
@@ -64,8 +66,8 @@ Phase numbering, order, dependencies, requirement ownership, and milestone scope
 are unchanged. Phases 4 through 7 subsequently completed the catalog,
 supported-topology, cache-policy, and explicit maintenance work. Phase 8 is the
 only remaining milestone phase. Plan 01 established the deterministic exact-commit
-evidence tracer; its remaining release-evidence classes stay unavailable until their
-dedicated qualification plans complete. GSD's raw disk count still includes superseded 03-19 and may call Phase 3 partial;
+evidence tracer; Plan 16 now closes only the local-readiness boundary while the
+remote-service and publication classes stay unavailable under SEED-007. GSD's raw disk count still includes superseded 03-19 and may call Phase 3 partial;
 the canonical 24/24 disposition and direct qualification ledger remain controlling.
 Do not fabricate a 03-19 completion or reopen the closed gaps to repair that count.
 
@@ -505,21 +507,22 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - [Phase 08]: Phase 08 Plan 13: Only cacheness-perf-linux-x64 plus clean detached exact SHA and canonical allow-listed digest can qualify capture.
 - [Phase 08]: D-23 supersedes only the current release-blocking controlled-Linux portions of D-20/D-22; QUAL-06 is DEFERRED/NOT_QUALIFIED under SEED-006.
 - [Phase 08]: macOS performance evidence remains diagnostic and establishes neither Linux equivalence nor a cross-platform budget.
-- [Phase 08]: Plan 08-14 must revise release collection/aggregation/fixed verification before exact-SHA live evidence collection; all non-deferred evidence classes remain mandatory.
+- [Phase 08 historical before D-24]: Plan 08-14 revised release collection/aggregation/fixed verification before exact-SHA live evidence collection; D-24 later deferred BACK-05/publication to SEED-007.
 - [Phase 08]: D-23 defers only QUAL-06 controlled Linux performance to SEED-006; macOS remains diagnostic-only.
 - [Phase 08]: Immutable publication requires an approval-bound prepublication digest and exact remote asset verification.
 - [Phase 08]: Phase 08 Plan 15: Protected-live preflight is configuration-only; every result is service_state NOT_RUN and cannot qualify BACK-05.
 - [Phase 08]: Phase 08 Plan 15: Fixed verifier inventory now binds Plan 08-15 and T-08-15-01 through T-08-15-05 to literal preflight selectors.
+- [Phase 08]: D-24 closes the milestone on exact-source local readiness; Plans 08-11/08-12 are superseded and preserved for SEED-007, BACK-05 remains DEFERRED/NOT_QUALIFIED, and publication remains DEFERRED/NOT_PUBLISHED.
 
 ### Pending Todos
 
 - Apply ADR 0001 and the Phase 7 maintenance boundaries during Phase 8 qualification; a failing contention probe does not authorize another coordination mechanism.
-- Keep live PostgreSQL/AWS S3, supported-Python, packaging, coverage, and structural evidence in Phase 8; retain controlled-performance capability but defer its qualification to SEED-006 and native Windows to Phase 999.1.
+- Close Phase 8 with deterministic local, base-package, coverage/Ruff, structural, and integrity/recovery evidence. Preserve supported-Python and live-service tooling, but keep unrun remote/platform claims explicit and defer BACK-05/publication to SEED-007, controlled performance to SEED-006, and native Windows to Phase 999.1.
 
 ### Blockers/Concerns
 
 - QUAL-06 controlled-Linux thresholds remain unqualified until SEED-006; no macOS or diagnostic measurement may substitute.
-- PostgreSQL/AWS S3 BACK-05, native Windows, supported-Python, and packaging evidence remain unqualified until Phase 8 runs their non-substitutable gates.
+- PostgreSQL/AWS S3 BACK-05 and immutable publication remain `DEFERRED`/`NOT_QUALIFIED` or `NOT_PUBLISHED` until SEED-007; native Windows remains unqualified until Phase 999.1. These are nonclaims, not Phase 8 blockers after D-24.
 
 ### Roadmap Evolution
 
@@ -528,6 +531,7 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - Phase 8 edited: edited fields: depends_on
 - Phase 8 replanned: D-23 removes controlled-Linux performance from the current blocking aggregate, adds Plan 08-14, and preserves SEED-006 as the future qualification path.
 - Phase 8 gap plan 08-15 adds the missing configuration-only `tools/run_phase8_qualification.py --preflight` contract before Plan 08-11; it cannot contact services, mutate resources, write evidence, or qualify BACK-05.
+- Phase 8 local-readiness replan supersedes 08-11 and 08-12, preserves their tooling and evidence standard under SEED-007, and adds 08-16 as the only remaining canonical plan.
 
 ## Deferred Items
 
@@ -538,9 +542,10 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 | APIs | Native async storage/cache APIs and distributed coherence | Deferred to v2 | Project initialization |
 | Security | Hostile pickle/dill deserialization | Out of scope; trusted payload boundary | Project initialization |
 | Architecture | `SqlCache` redesign or merger | Out of scope | Project initialization |
+| Remote qualification | Real PostgreSQL/Amazon-S3 exact-SHA qualification and immutable GitHub release publication | Deferred to SEED-007 / NOT_QUALIFIED / NOT_PUBLISHED | Phase 08 D-24 |
 
 ## Session Continuity
 
 Last session: 2026-09-15T17:04:09.199Z
-Stopped at: Completed 08-15-PLAN.md; Plan 08-11 awaits protected real-service qualification
+Stopped at: Phase 08 replanned for local readiness; 08-16 is ready to execute
 Resume file: None
