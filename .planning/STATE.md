@@ -86,8 +86,9 @@ delivers explicit offline migration/rebuild tooling for future released versions
 
 Phase 03 rows in this historical table include superseded attempts and do not
 define current completion. The roadmap records Phases 1 through 7 complete and
-Phase 8 unplanned. The raw GSD disk counter reports 104/105 because it still sees
-the deliberately superseded Phase 03 plan; do not fabricate its completion.
+Phase 8 at 13/14 canonical plans executed: 08-11 and 08-12 are superseded by
+D-24/SEED-007, and 08-16 is the only remaining executable local-readiness plan.
+Raw file counts include superseded plans and therefore are not completion claims.
 
 | Plan | Duration | Tasks | Files |
 |------|----------|-------|-------|
@@ -502,10 +503,10 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - [Phase 08]: Phase 08 Plan 09 keeps core quality evidence separate from TensorFlow-compatible wheel qualification so optional dependency availability cannot downgrade core support evidence.
 - [Phase 08]: Phase 08 Plan 09 qualifies retained TensorFlow support only on Python 3.11 and 3.12, matching the package probe's declared compatible range.
 - [Phase 08]: Phase 08 Plan 10: exact-SHA release collection records fresh run IDs and fixed artifact names; latest-run selection is prohibited.
-- [Phase 08]: Phase 08 Plan 10: bounded UNAVAILABLE packaging/platform envelopes stay explicit release-blocking nonclaims rather than generic failures or passes.
+- [Phase 08 historical before D-24]: Plan 08-10 kept bounded UNAVAILABLE packaging/platform envelopes as explicit release-blocking nonclaims; D-24 now preserves those nonclaims while closing only local readiness.
 - [Phase 08]: Phase 08 Plan 13: Controlled-runner preflight emits bounded eligibility only; its original Plan 08-11 performance handoff is superseded by D-23 and retained for SEED-006.
 - [Phase 08]: Phase 08 Plan 13: Only cacheness-perf-linux-x64 plus clean detached exact SHA and canonical allow-listed digest can qualify capture.
-- [Phase 08]: D-23 supersedes only the current release-blocking controlled-Linux portions of D-20/D-22; QUAL-06 is DEFERRED/NOT_QUALIFIED under SEED-006.
+- [Phase 08 historical before D-24]: D-23 superseded only the then-current release-blocking controlled-Linux portions of D-20/D-22; QUAL-06 remains DEFERRED/NOT_QUALIFIED under SEED-006, and D-24 subsequently narrowed current closure to local readiness.
 - [Phase 08]: macOS performance evidence remains diagnostic and establishes neither Linux equivalence nor a cross-platform budget.
 - [Phase 08 historical before D-24]: Plan 08-14 revised release collection/aggregation/fixed verification before exact-SHA live evidence collection; D-24 later deferred BACK-05/publication to SEED-007.
 - [Phase 08]: D-23 defers only QUAL-06 controlled Linux performance to SEED-006; macOS remains diagnostic-only.

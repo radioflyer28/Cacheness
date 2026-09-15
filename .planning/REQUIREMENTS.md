@@ -154,8 +154,9 @@ advertised until SEED-007 produces the original real-service evidence.
 **Coverage:**
 
 - v1 requirements recorded: 44 total
-- Current milestone requirements mapped to phases: 43
+- Completed requirements mapped to milestone phases: 42
 - Explicitly deferred: 2 (`QUAL-06` → `SEED-006`; `BACK-05` → `SEED-007`)
+- Total requirements accounted for: 44
 - Unmapped: 0 ✓
 
 ---
