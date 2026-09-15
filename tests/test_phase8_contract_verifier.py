@@ -17,9 +17,9 @@ VERIFIER_PATH = REPOSITORY_ROOT / "tools" / "verify_phase8_contracts.py"
 EXPECTED_PLAN_PATHS = tuple(
     ".planning/phases/08-production-gates-and-performance-stabilization/"
     f"08-{number:02d}-PLAN.md"
-    for number in range(1, 14)
+    for number in range(1, 15)
 )
-EXPECTED_DECISIONS = {f"D-{number:02d}" for number in range(1, 23)}
+EXPECTED_DECISIONS = {f"D-{number:02d}" for number in range(1, 24)}
 EXPECTED_REQUIREMENTS = {
     "BACK-05",
     "QUAL-01",
@@ -27,9 +27,11 @@ EXPECTED_REQUIREMENTS = {
     "QUAL-03",
     "QUAL-04",
     "QUAL-05",
-    "QUAL-06",
     "QUAL-07",
 }
+
+DEFERRED_PERFORMANCE_REQUIREMENT = "QUAL-06"
+SEED006_PATH = ".planning/seeds/SEED-006-qualify-controlled-linux-performance.md"
 
 
 def _load_verifier() -> ModuleType:
@@ -163,7 +165,7 @@ def test_external_statuses_are_explicit_nonclaims() -> None:
 
     report = verifier.render_external_statuses({})
 
-    assert "controlled_performance: UNAVAILABLE" in report
+    assert "controlled_performance: DEFERRED" in report
     assert "live_services: UNAVAILABLE" in report
     assert "windows: NOT_QUALIFIED" in report
 
@@ -232,3 +234,71 @@ def test_all_mode_reports_unavailable_local_evidence_without_stopping(
     report = capsys.readouterr().out
     assert "packaging: UNAVAILABLE" in report
     assert "platform: UNAVAILABLE" in report
+
+
+def test_fixed_manifest_covers_deferred_performance_decision() -> None:
+    """Plan 14 closes current evidence without treating QUAL-06 as complete."""
+    verifier = _load_verifier()
+
+    assert verifier.PHASE8_PLAN_PATHS[-1].endswith("08-14-PLAN.md")
+    assert verifier.PHASE8_REQUIREMENTS == tuple(
+        requirement
+        for requirement in verifier._REVIEWED_REQUIREMENTS
+        if requirement != DEFERRED_PERFORMANCE_REQUIREMENT
+    )
+    assert verifier.DEFERRED_REQUIREMENTS == (DEFERRED_PERFORMANCE_REQUIREMENT,)
+    assert "D-23" in verifier.DECISION_NODES
+    assert {f"T-08-14-{number:02d}" for number in range(1, 5)}.issubset(
+        verifier.THREAT_NODES
+    )
+    assert verifier.validate_fixed_manifest(REPOSITORY_ROOT) == ()
+
+
+def test_deferred_performance_status_is_nonblocking_but_not_qualified() -> None:
+    """The controlled runner is visible as a nonclaim, never a synthetic pass."""
+    verifier = _load_verifier()
+
+    report = verifier.render_external_statuses({})
+
+    assert "controlled_performance: DEFERRED" in report
+    assert "qualification: NOT_QUALIFIED" in report
+    assert DEFERRED_PERFORMANCE_REQUIREMENT in report
+    assert SEED006_PATH in report
+    assert (
+        verifier.external_status_is_blocking("controlled_performance", "DEFERRED")
+        is False
+    )
+    assert (
+        verifier.external_status_is_blocking("controlled_performance", "NOT_QUALIFIED")
+        is False
+    )
+    assert verifier.external_status_is_blocking("live_services", "UNAVAILABLE") is True
+
+
+def test_all_mode_still_blocks_on_unavailable_current_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The deferral cannot cure a missing required packaging or live result."""
+    verifier = _load_verifier()
+
+    monkeypatch.setattr(
+        verifier,
+        "_run_local",
+        lambda _mode: (0, {"packaging": "UNAVAILABLE", "platform": "PASS"}),
+    )
+
+    assert verifier.main(["--all"]) == 2
+
+
+def test_release_documentation_preserves_seed006_nonclaim() -> None:
+    """Public qualification text must preserve the retained, diagnostic-only harness."""
+    document = (REPOSITORY_ROOT / "docs" / "RELEASE_QUALIFICATION.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "DEFERRED" in document
+    assert "NOT_QUALIFIED" in document
+    assert SEED006_PATH in document
+    assert "macOS timings are diagnostic" in document
+    assert "do not establish Linux equivalence" in document
+    assert "not collected or published" in document

@@ -45,6 +45,7 @@ _REVIEWED_PLAN_PATHS = (
     f"{PHASE_DIRECTORY}/08-11-PLAN.md",
     f"{PHASE_DIRECTORY}/08-12-PLAN.md",
     f"{PHASE_DIRECTORY}/08-13-PLAN.md",
+    f"{PHASE_DIRECTORY}/08-14-PLAN.md",
 )
 PHASE8_PLAN_PATHS = tuple(_REVIEWED_PLAN_PATHS)
 
@@ -58,7 +59,12 @@ _REVIEWED_REQUIREMENTS = (
     "QUAL-06",
     "QUAL-07",
 )
-PHASE8_REQUIREMENTS = tuple(_REVIEWED_REQUIREMENTS)
+DEFERRED_REQUIREMENTS = ("QUAL-06",)
+PHASE8_REQUIREMENTS = tuple(
+    requirement
+    for requirement in _REVIEWED_REQUIREMENTS
+    if requirement not in DEFERRED_REQUIREMENTS
+)
 
 _REVIEWED_THREATS = (
     "T-08-01-01",
@@ -194,6 +200,9 @@ _DECISION_TESTS = {
     "D-22": (
         "tests/performance/test_memory_bounds.py::test_structural_evidence_keeps_counts_and_peak_rss_without_a_timing_claim",
     ),
+    "D-23": (
+        "tests/test_phase8_contract_verifier.py::test_fixed_manifest_covers_deferred_performance_decision",
+    ),
 }
 DECISION_NODES = dict(_DECISION_TESTS)
 
@@ -214,11 +223,36 @@ _THREAT_TEST_MODULES = {
     "11": "tests/test_phase8_contract_verifier.py::test_external_statuses_are_explicit_nonclaims",
     "12": "tests/test_phase8_contract_verifier.py::test_external_statuses_are_explicit_nonclaims",
     "13": "tests/performance/test_phase8_benchmarks.py::test_preflight_runner_emits_only_the_bounded_eligibility_record",
+    "14": "tests/test_phase8_contract_verifier.py::test_fixed_manifest_covers_deferred_performance_decision",
 }
 _REVIEWED_THREAT_NODES = {
     threat: (_THREAT_TEST_MODULES[threat.split("-")[2]],)
     for threat in _REVIEWED_THREATS
 }
+_REVIEWED_THREAT_NODES.update(
+    {
+        "T-08-14-01": (
+            "tests/qualification/test_phase8_release.py::test_required_release_collection_excludes_deferred_performance",
+        ),
+        "T-08-14-02": (
+            "tests/qualification/test_phase8_release.py::test_deferred_performance_artifacts_and_macos_diagnostics_are_rejected",
+        ),
+        "T-08-14-03": (
+            "tests/qualification/test_phase8_release.py::test_aggregate_records_exact_deferred_performance_nonclaim",
+        ),
+        "T-08-14-04": (
+            "tests/test_phase8_contract_verifier.py::test_fixed_manifest_covers_deferred_performance_decision",
+        ),
+    }
+)
+_REVIEWED_THREATS = (
+    *_REVIEWED_THREATS,
+    "T-08-14-01",
+    "T-08-14-02",
+    "T-08-14-03",
+    "T-08-14-04",
+)
+PHASE8_THREATS = tuple(_REVIEWED_THREATS)
 THREAT_NODES = dict(_REVIEWED_THREAT_NODES)
 
 _REVIEWED_SOURCE_PATHS = (
@@ -263,6 +297,9 @@ WORKFLOW_PATHS = (
     ".github/workflows/live_qualification.yml",
 )
 EXTERNAL_EVIDENCE_CLASSES = ("controlled_performance", "live_services")
+CONTROLLED_PERFORMANCE_SEED = (
+    ".planning/seeds/SEED-006-qualify-controlled-linux-performance.md"
+)
 
 
 def _module_level_test_names(path: Path) -> set[str]:
@@ -400,7 +437,11 @@ def _validate_static_exports() -> list[str]:
     errors: list[str] = []
     if PHASE8_PLAN_PATHS != _REVIEWED_PLAN_PATHS:
         errors.append("plan inventory was mutated")
-    if PHASE8_REQUIREMENTS != _REVIEWED_REQUIREMENTS:
+    if PHASE8_REQUIREMENTS != tuple(
+        requirement
+        for requirement in _REVIEWED_REQUIREMENTS
+        if requirement not in DEFERRED_REQUIREMENTS
+    ):
         errors.append("requirement inventory was mutated")
     if PHASE8_THREATS != _REVIEWED_THREATS:
         errors.append("threat inventory was mutated")
@@ -438,7 +479,7 @@ def validate_fixed_manifest(root: Path = REPOSITORY_ROOT) -> tuple[str, ...]:
             ):
                 if threat not in text:
                     errors.append(f"plan omits threat {threat}")
-    for requirement in PHASE8_REQUIREMENTS:
+    for requirement in (*PHASE8_REQUIREMENTS, *DEFERRED_REQUIREMENTS):
         if requirement not in (root / ".planning/REQUIREMENTS.md").read_text(
             encoding="utf-8"
         ):
@@ -463,7 +504,7 @@ def render_external_statuses(statuses: Mapping[str, str]) -> str:
     """Render explicit nonclaims without choosing a substitute evidence class."""
     packaging_status = statuses.get("packaging", "NOT_RUN")
     platform_status = statuses.get("platform", "NOT_RUN")
-    controlled = statuses.get("controlled_performance", "UNAVAILABLE")
+    controlled = statuses.get("controlled_performance", "DEFERRED")
     live = statuses.get("live_services", "UNAVAILABLE")
     windows = statuses.get("windows", "NOT_QUALIFIED")
     return "\n".join(
@@ -471,10 +512,22 @@ def render_external_statuses(statuses: Mapping[str, str]) -> str:
             f"packaging: {packaging_status}",
             f"platform: {platform_status}",
             f"controlled_performance: {controlled}",
+            "controlled_performance qualification: NOT_QUALIFIED",
+            "controlled_performance requirement: QUAL-06",
+            f"controlled_performance deferred_to: {CONTROLLED_PERFORMANCE_SEED}",
             f"live_services: {live}",
             f"windows: {windows}",
         )
     )
+
+
+def external_status_is_blocking(evidence_class: str, status: str) -> bool:
+    """Return whether one external status blocks the current release boundary."""
+    if evidence_class == "controlled_performance":
+        return False
+    if evidence_class == "live_services":
+        return status != "QUALIFIED"
+    return status != "PASS"
 
 
 def _run(command: Sequence[str]) -> subprocess.CompletedProcess[str]:

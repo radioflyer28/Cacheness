@@ -20,14 +20,16 @@ or wrong-class input.
 | Platform | `tools/run_phase8_platform_gates.py` through `tools/run_phase8_local_gates.py platform` | Every required stable Linux and macOS boundary row must be `PASS`; prerelease is advisory only. Missing rows, a wrong host/interpreter identity, or `UNAVAILABLE` blocks the relevant support claim. | Each row records actual and expected OS/Python/profile plus revision/source digest. Required rows are retained with the release evidence. |
 | Coverage/quality | `tools/verify_phase8_coverage.py` through `tools/run_phase8_local_gates.py coverage` | The named selectors and repository/critical statement and branch floors must pass. Direct scoped Ruff lint and formatting must pass; global legacy lint debt is not a release scope. | Coverage report/XML and canonical envelope bind the reviewed candidate SHA/source digest. Qualifying artifact is retained for the release lifetime. |
 | Structural | `tools/run_phase8_scale_gates.py` through `tools/run_phase8_local_gates.py structural` | Fixed authority/participant call formulas and isolated RSS observations must pass. A missing child result or invalid units is `NOT_QUALIFIED`; elapsed time is not a structural result. | Envelope contains fixed-scale counters, normalized RSS facts, revision, and source digest. Qualifying artifact is retained for the release lifetime. |
-| Controlled performance | `benchmarks/phase8_benchmarks.py` and `.github/workflows/performance.yml` | Only the reviewed `cacheness-perf-linux-x64` runner may produce a blocking baseline comparison. Missing runner/baseline is `UNAVAILABLE` and blocks release qualification rather than weakening the envelope. | Candidate SHA, source digest, runner fingerprint, raw distributions, and baseline reference are captured. Redacted operational artifacts are retained for 30 days; the accepted qualification reference remains with the release. |
+| Controlled performance | Retained `benchmarks/phase8_benchmarks.py` and `.github/workflows/performance.yml` machinery | `DEFERRED` and `NOT_QUALIFIED` for this milestone under `QUAL-06`; it is not a current release prerequisite and cannot become a `PASS` through an unavailable runner or diagnostic result. | No controlled-performance artifact is collected or published for the current release. The retained harness, preflight, workload inventory, and baseline contract are reserved for [SEED-006](../.planning/seeds/SEED-006-qualify-controlled-linux-performance.md). |
 | Live service | `tools/run_phase8_qualification.py` and `.github/workflows/live_qualification.yml` | Protected release-candidate execution requires real PostgreSQL and Amazon S3 to emit sanitized `QUALIFIED` and `CLEAN` evidence. `UNAVAILABLE`, failed cleanup, a mock, a compatible substitute service, or a scheduled diagnostic is never a pass. | Exact SHA/source digest, bounded cleanup evidence, and run ID are recorded. Sanitized `QUALIFIED` evidence is retained for the release lifetime; failed, unavailable, and scheduled diagnostics are retained for 30 days. |
 | Publication | `tools/verify_phase8_release.py` | A final report requires one complete same-revision input for every required class, then verifies the exact tag, published immutable release, allow-listed assets, and SHA-256 digests. Missing evidence blocks publication. | The immutable report preserves source identity, artifact digests, and workflow/run references for the release lifetime. |
 
-`PASS` means the declared class completed for its stated identity. `UNAVAILABLE`
-means an external prerequisite or unsupported environment was absent. `NOT_QUALIFIED`
-means evidence was incomplete, invalid, dirty, failed, or did not meet the class
-contract. Neither non-passing state may be relabeled as success.
+`PASS` means the declared current class completed for its stated identity.
+`UNAVAILABLE` means an external prerequisite or unsupported environment was absent.
+`NOT_QUALIFIED` means evidence was incomplete, invalid, dirty, failed, or did not
+meet the class contract. `DEFERRED` is a closed nonclaim, not a pass: only
+controlled performance is deferred to [SEED-006](../.planning/seeds/SEED-006-qualify-controlled-linux-performance.md)
+with `NOT_QUALIFIED` status. Neither non-passing state may be relabeled as success.
 
 ## Supported runtime and package scope
 
@@ -61,10 +63,14 @@ attached as release qualification. Remote PostgreSQL/S3 latency is also
 diagnostic only. It cannot replace controlled-Linux timing evidence or change
 the outcome of the live integrity/recovery suite.
 
-Controlled regression review compares named workload distributions only on the
-approved Linux runner. It can block a release against its checked baseline, but
-it never becomes a runtime deadline, universal timeout, or stronger progress
-promise.
+Controlled regression review remains available only for future work on the
+approved Linux runner. It is deferred from the current release under `QUAL-06` /
+[SEED-006](../.planning/seeds/SEED-006-qualify-controlled-linux-performance.md):
+controlled performance is `DEFERRED` and `NOT_QUALIFIED`, and its diagnostics are
+not collected or published as current release assets. macOS timings are diagnostic
+and do not establish Linux equivalence or a cross-platform budget. When the seed
+is promoted, its Linux comparison must remain a performance measurement rather
+than a runtime deadline, universal timeout, or stronger progress promise.
 
 Structural evidence independently records bounded page/work, backend-call, and
 peak-memory behavior. It does not measure wall-clock latency, promise
