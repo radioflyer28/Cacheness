@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 import hashlib
 from pathlib import Path
+import sqlite3
 from typing import Any
 
 from obstore.store import MemoryStore
@@ -35,6 +36,7 @@ from cacheness.storage.lifecycle_authority import (
     VerificationProof,
 )
 from cacheness.storage.obstore_generation_io import ObstoreGenerationIO
+from cacheness.storage.sqlite_lifecycle_authority import SqliteLifecycleAuthority
 
 
 def _query_text(query: object) -> str:
@@ -725,3 +727,108 @@ def test_lifecycle_bounded_clear_preserves_changed_generations(tmp_path: Path) -
         assert store.get("other") is None
     finally:
         store.close()
+
+
+def test_sqlite_lifecycle_rejects_invalid_configuration_objects_without_materializing(
+    tmp_path: Path,
+) -> None:
+    """Invalid authority configuration is rejected before a root is created."""
+
+    invalid_limits_root = tmp_path / "invalid-limits"
+    with pytest.raises(
+        TypeError, match="lifecycle_limits must be a LifecycleLimits instance"
+    ):
+        SqliteLifecycleAuthority.for_root(
+            invalid_limits_root, lifecycle_limits=object()
+        )
+    assert not invalid_limits_root.exists()
+
+    invalid_topology_root = tmp_path / "invalid-topology"
+    with pytest.raises(
+        TypeError,
+        match="lifecycle_topology must be a LifecycleAuthorityTopology instance",
+    ):
+        SqliteLifecycleAuthority.for_root(
+            invalid_topology_root, lifecycle_topology=object()
+        )
+    assert not invalid_topology_root.exists()
+
+
+def test_sqlite_lifecycle_rejects_invalid_deadline_and_busy_budget_inputs(
+    tmp_path: Path,
+) -> None:
+    """Deadline and PRAGMA input validation leaves SQLite and roots unchanged."""
+
+    root = tmp_path / "invalid-inputs"
+    authority = SqliteLifecycleAuthority.for_root(root)
+    connection = sqlite3.connect(":memory:")
+    try:
+        for deadline in (True, "not-a-monotonic-timestamp"):
+            with pytest.raises(
+                TypeError, match="deadline must be a monotonic timestamp"
+            ):
+                authority._deadline(deadline)
+        assert not root.exists()
+
+        before = connection.execute("PRAGMA busy_timeout").fetchone()
+        assert before is not None
+        for milliseconds in (-1, True, 1.5):
+            with pytest.raises(
+                ValueError,
+                match="SQLite busy timeout must be a non-negative integer",
+            ):
+                authority._set_busy_timeout(connection, milliseconds)
+            assert connection.execute("PRAGMA busy_timeout").fetchone() == before
+    finally:
+        connection.close()
+        authority.close()
+
+
+def test_sqlite_lifecycle_timeout_and_sqlite_failures_preserve_typed_context(
+    tmp_path: Path,
+) -> None:
+    """Expired budgets and real SQLite errors retain their public failure contracts."""
+
+    authority = SqliteLifecycleAuthority.for_root(
+        tmp_path / "deadline-errors",
+        lifecycle_limits=LifecycleLimits(authority_busy_timeout_seconds=2.0),
+    )
+    authority._monotonic_clock = lambda: 10.0
+    try:
+        with pytest.raises(CacheBlobLifecycleTimeoutError) as timeout:
+            authority._remaining_for_stage(
+                10.0,
+                stage="phase8_expired_budget",
+                started_at=8.0,
+            )
+
+        assert str(timeout.value) == "Lifecycle authority busy deadline expired"
+        assert timeout.value.context == {
+            "operation": "lifecycle_authority",
+            "stage": "phase8_expired_budget",
+            "elapsed_seconds": 2.0,
+            "remaining_seconds": 0.0,
+            "authority_busy_timeout_seconds": 2.0,
+            "authority_path": str(authority.path),
+            "retryable": True,
+            "reason": "blob_lifecycle_timeout",
+        }
+
+        closed_connection = sqlite3.connect(":memory:")
+        closed_connection.close()
+        with pytest.raises(CacheBlobBackendError) as backend_error:
+            authority._apply_stage_busy_timeout(
+                closed_connection,
+                deadline=12.0,
+                started_at=10.0,
+                stage="phase8_closed_connection",
+            )
+
+        assert str(backend_error.value) == "Lifecycle authority SQLite operation failed"
+        assert backend_error.value.context == {
+            "operation": "lifecycle_authority",
+            "reason": "blob_backend_failure",
+        }
+        assert isinstance(backend_error.value.__cause__, sqlite3.ProgrammingError)
+    finally:
+        authority.close()
