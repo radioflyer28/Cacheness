@@ -16,7 +16,10 @@ from cacheness.error_handling import (
     CacheBlobBackendError,
     CacheBlobLifecycleTimeoutError,
 )
-from cacheness.storage.sqlite_lifecycle_authority import SqliteLifecycleAuthority
+from cacheness.storage.sqlite_lifecycle_authority import (
+    SQLITE_APPLICATION_ID,
+    SqliteLifecycleAuthority,
+)
 
 
 def _join(thread: Thread) -> None:
@@ -30,7 +33,9 @@ def _warm_authority(authority: SqliteLifecycleAuthority) -> None:
     authority.begin_clear()
 
 
-def _fork_ownership_child(root: str, inherited: SqliteLifecycleAuthority, fd: int) -> None:
+def _fork_ownership_child(
+    root: str, inherited: SqliteLifecycleAuthority, fd: int
+) -> None:
     """Prove inherited resources fail closed while a child-created authority works."""
     fresh: SqliteLifecycleAuthority | None = None
     try:
@@ -56,7 +61,9 @@ def _fork_ownership_child(root: str, inherited: SqliteLifecycleAuthority, fd: in
         os._exit(0)
 
 
-def test_sqlite_contention_returns_a_contextual_retryable_timeout(tmp_path: Path) -> None:
+def test_sqlite_contention_returns_a_contextual_retryable_timeout(
+    tmp_path: Path,
+) -> None:
     """Held SQLite authority contention is bounded without a FIFO success gate."""
     limits = LifecycleLimits(authority_busy_timeout_seconds=0.04)
     authority = SqliteLifecycleAuthority.for_root(
@@ -76,39 +83,70 @@ def test_sqlite_contention_returns_a_contextual_retryable_timeout(tmp_path: Path
     context = raised.value.context
     assert context["operation"] == "lifecycle_authority"
     assert context["authority_path"] == str(authority.path)
-    assert context["authority_busy_timeout_seconds"] == limits.authority_busy_timeout_seconds
+    assert (
+        context["authority_busy_timeout_seconds"]
+        == limits.authority_busy_timeout_seconds
+    )
     assert context["retryable"] is True
     assert isinstance(raised.value.__cause__, sqlite3.OperationalError)
     authority.begin_clear()
     authority.close()
 
 
-def test_fresh_root_bootstrap_converges_through_sqlite(tmp_path: Path) -> None:
-    """Independent first users converge without a process-global admission queue."""
+def test_initialized_root_shared_workers_converge_through_sqlite(
+    tmp_path: Path,
+) -> None:
+    """Independent workers progress after explicit SQLite root initialization."""
     root = tmp_path / "fresh-root"
+    initializer = SqliteLifecycleAuthority.for_root(root)
+    try:
+        initializer.initialize()
+        initializer_diagnostics = initializer.diagnostics()
+        assert initializer_diagnostics["application_id"] == SQLITE_APPLICATION_ID
+        initialized_store_identity = initializer_diagnostics["store_identity"]
+        assert initialized_store_identity
+    finally:
+        initializer.close()
+
     first = SqliteLifecycleAuthority.for_root(root)
     second = SqliteLifecycleAuthority.for_root(root)
     start = Event()
-    errors: list[BaseException] = []
+    diagnostics: dict[str, dict[str, object]] = {}
+    errors: dict[str, BaseException] = {}
 
-    def initialize(authority: SqliteLifecycleAuthority) -> None:
-        start.wait(timeout=5)
+    def begin_clear(name: str, authority: SqliteLifecycleAuthority) -> None:
+        if not start.wait(timeout=5):
+            errors[name] = AssertionError("initialized workers were not released")
+            return
         try:
             authority.begin_clear()
+            diagnostics[name] = authority.diagnostics()
         except BaseException as error:  # pragma: no cover - asserted below.
-            errors.append(error)
+            errors[name] = error
 
     threads = [
-        Thread(target=initialize, args=(authority,)) for authority in (first, second)
+        Thread(target=begin_clear, args=(name, authority))
+        for name, authority in (("first", first), ("second", second))
     ]
-    for thread in threads:
-        thread.start()
-    start.set()
-    for thread in threads:
-        _join(thread)
     try:
-        assert errors == []
-        assert first.diagnostics()["application_id"] == second.diagnostics()["application_id"]
+        for thread in threads:
+            thread.start()
+        start.set()
+        for thread in threads:
+            _join(thread)
+
+        assert errors == {}
+        assert set(diagnostics) == {"first", "second"}
+        assert all(
+            worker_diagnostics["application_id"] == SQLITE_APPLICATION_ID
+            for worker_diagnostics in diagnostics.values()
+        )
+        store_identities = {
+            worker_diagnostics["store_identity"]
+            for worker_diagnostics in diagnostics.values()
+        }
+        assert store_identities == {initialized_store_identity}
+        first.begin_clear()
     finally:
         first.close()
         second.close()
