@@ -4,15 +4,15 @@ milestone: v1.0
 current_phase: 08
 current_phase_name: Production Gates and Performance Stabilization
 status: executing
-stopped_at: Completed 08-14-PLAN.md
-last_updated: "2026-09-15T15:08:29.060Z"
+stopped_at: Planned 08-15-PLAN.md
+last_updated: "2026-09-15T16:39:06Z"
 last_activity: 2026-09-15
-last_activity_desc: Controlled-Linux performance qualification deferred to SEED-006; current release evidence replanned around D-23
-state_head: e924d4c4f7132df17cac043dc7ba33108d84a089
+last_activity_desc: Planned configuration-only protected-live preflight before exact-SHA collection
+state_head: 403b90a66a0203599a5750aa4a82e292f2379ca2
 progress:
   total_phases: 9
   completed_phases: 7
-  total_plans: 130
+  total_plans: 131
   completed_plans: 127
 milestone_name: milestone
 ---
@@ -29,9 +29,9 @@ See: .planning/PROJECT.md (updated 2026-09-15)
 ## Current Position
 
 Phase: 08 — Production Gates and Performance Stabilization
-Plan: 14 of 14
-Status: Ready to execute 08-14, then 08-11 and 08-12
-Last activity: 2026-09-15 — D-23 deferred controlled-Linux performance qualification to SEED-006 without a macOS substitution claim
+Plan: 15 of 15
+Status: Ready to execute 08-15, then 08-11 and 08-12
+Last activity: 2026-09-15 — planned a configuration-only protected-live preflight before exact-SHA collection
 
 Phase 07.1 closed with 11/11 plans summarized and an independent 46/46
 must-have verification pass. Built-in filesystem, memory, and S3 payload
@@ -524,6 +524,7 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - Phase 07.1 inserted after Phase 7: Obstore Payload Participant Unification (URGENT)
 - Phase 8 edited: edited fields: depends_on
 - Phase 8 replanned: D-23 removes controlled-Linux performance from the current blocking aggregate, adds Plan 08-14, and preserves SEED-006 as the future qualification path.
+- Phase 8 gap plan 08-15 adds the missing configuration-only `tools/run_phase8_qualification.py --preflight` contract before Plan 08-11; it cannot contact services, mutate resources, write evidence, or qualify BACK-05.
 
 ## Deferred Items
 
@@ -537,6 +538,6 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 
 ## Session Continuity
 
-Last session: 2026-09-15T15:08:28.881Z
-Stopped at: Completed 08-14-PLAN.md
+Last session: 2026-09-15
+Stopped at: Planned 08-15-PLAN.md
 Resume file: None
