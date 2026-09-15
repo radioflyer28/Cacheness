@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 08
 current_phase_name: Production Gates and Performance Stabilization
 status: executing
-stopped_at: Planned 08-19 coverage-ratchet recovery; execute 08-19 before resuming 08-16
-last_updated: "2026-09-15T20:05:00Z"
+stopped_at: Completed 08-19 coverage-ratchet recovery; resume 08-16 local-readiness closure
+last_updated: "2026-09-15T20:37:05.168Z"
 last_activity: 2026-09-15
-last_activity_desc: Planned deterministic SQLite validation coverage to restore the frozen ratchet before resuming local-readiness closure
-state_head: 262916947e3d1f18f533eebc179f666513fb04e6
+last_activity_desc: Restored the frozen coverage ratchet through deterministic SQLite validation/error contracts; 08-16 local-readiness closure is next
+state_head: 759e947af793d51217ee1e09709e50ddfa11a31f
 progress:
   total_phases: 9
   completed_phases: 7
   total_plans: 133
-  completed_plans: 130
+  completed_plans: 131
 milestone_name: milestone
 ---
 
@@ -30,10 +30,10 @@ See: .planning/PROJECT.md (updated 2026-09-15)
 
 Phase: 08 — Production Gates and Performance Stabilization
 Plan: 19 of 19 (08-11 and 08-12 superseded; 08-19 precedes 08-16)
-Status: Ready to execute 08-19 coverage-ratchet recovery, then resume 08-16 local-readiness closure
-Last activity: 2026-09-15 — converted the post-08-18 measured coverage deficit into deterministic SQLite validation/error tests with no lifecycle change
+Status: Ready to execute 08-16 local-readiness closure after completed coverage-ratchet recovery
+Last activity: 2026-09-15 — restored the post-08-18 raw coverage floors through deterministic SQLite validation/error tests with no lifecycle change
 
-Current execution chain: **08-18 complete → 08-19 pending → 08-16 pending final
+Current execution chain: **08-18 complete → 08-19 complete → 08-16 pending final
 local-readiness closure**. No older Phase 8 ordering statement overrides this chain.
 
 Phase 07.1 closed with 11/11 plans summarized and an independent 46/46
@@ -89,7 +89,7 @@ delivers explicit offline migration/rebuild tooling for future released versions
 
 Phase 03 rows in this historical table include superseded attempts and do not
 define current completion. The roadmap records Phases 1 through 7 complete and
-Phase 8 is at 15/17 canonical plans executed: 08-11 and 08-12 are superseded by
+Phase 8 is at 16/17 canonical plans executed: 08-11 and 08-12 are superseded by
 D-24/SEED-007, 08-17 corrected one inherited progress assertion, 08-18 corrected
 one inherited initialization assertion, 08-19 restores the frozen coverage
 ratchet, and 08-16 then resumes the local-readiness evidence run.
@@ -218,6 +218,7 @@ Raw file counts include superseded plans and therefore are not completion claims
 | Phase 08 P15 | 10m | 2 tasks | 4 files |
 | Phase 08 P17 | 7m | 2 tasks | 1 files |
 | Phase 08 P18 | 8min | 1 tasks | 1 files |
+| Phase 08 P19 | 9m | 2 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -527,11 +528,12 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - [Phase 08]: Phase 08 Plan 18: SQLite shared-worker tests initialize explicitly before release; concurrent first creation remains outside the availability contract.
 - [Phase 08]: Phase 08 Plan 18: Worker diagnostics must equal SQLITE_APPLICATION_ID and the initializer store identity, not merely agree with each other.
 - [Phase 08]: The post-08-18 coverage deficit is a tests-only validation gap: Plan 08-19 exercises exact SQLite configuration, deadline, error-translation, identity, and schema rejection paths without lowering the baseline or changing lifecycle code.
+- [Phase 08]: Phase 08 Plan 19 restores QUAL-05 only through meaningful SQLite validation and fail-closed corruption tests; no lifecycle, baseline, or concurrency semantics changed.
 
 ### Pending Todos
 
 - Apply ADR 0001 and the Phase 7 maintenance boundaries during Phase 8 qualification; a failing contention probe does not authorize another coordination mechanism.
-- Execute tests-only Plan 08-19 before resuming 08-16; it restores the frozen raw statement/branch floors with meaningful SQLite validation/error paths and no production lifecycle change.
+- Execute Plan 08-16 local-readiness closure with the restored frozen raw statement/branch floors and no production lifecycle change.
 - Close Phase 8 with deterministic local, base-package, coverage/Ruff, structural, and integrity/recovery evidence. Preserve supported-Python and live-service tooling, but keep unrun remote/platform claims explicit and defer BACK-05/publication to SEED-007, controlled performance to SEED-006, and native Windows to Phase 999.1.
 
 ### Blockers/Concerns
@@ -550,6 +552,7 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - Historical before the second gap (superseded): Plan 08-17 was once expected to lead directly through Plan 08-18 to 08-16. The current chain is 08-18 complete → 08-19 pending → 08-16 pending.
 - Historical before the coverage measurement (superseded): Plan 08-18 was once described as the final prerequisite for 08-16. The exact post-08-18 report made Plan 08-19 the final prerequisite instead.
 - Phase 8 gap Plan 08-19 restores the coverage ratchet after the approved Plan 08-18 test correction; it becomes the final prerequisite before Plan 08-16 resumes and cannot edit production code or the baseline.
+- Phase 8 Plan 08-19 completed with deterministic SQLite validation/error and malformed-evidence coverage; raw repository/critical floors now exceed the frozen baseline, so 08-16 is the only remaining canonical plan.
 
 ## Deferred Items
 
@@ -564,6 +567,6 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 
 ## Session Continuity
 
-Last session: 2026-09-15T20:05:00Z
-Stopped at: Planned 08-19 coverage-ratchet recovery; execute it before resuming 08-16
-Resume file: .planning/phases/08-production-gates-and-performance-stabilization/08-19-PLAN.md
+Last session: 2026-09-15T20:37:05.007Z
+Stopped at: Completed 08-19 coverage-ratchet recovery; resume 08-16 local-readiness closure
+Resume file: .planning/phases/08-production-gates-and-performance-stabilization/08-16-PLAN.md

@@ -65,7 +65,7 @@ Phase 3 completion below is scoped to the qualified initialized local SQLite/fil
 - [x] **QUAL-02**: Each advertised optional dependency group installs and imports independently.
 - [x] **QUAL-03**: CI definitions cover supported Python versions, backend contracts, lint policy, coverage, packaging, and protected PostgreSQL/AWS S3 qualification. Phase 8 locally verifies the deterministic/package/quality/structural paths and the fail-closed remote workflow contract; actual real-service support remains separately gated by BACK-05 and `SEED-007`.
 - [x] **QUAL-04**: Carry forward the finite Phase 3 integrity/recovery regressions and cover named commit boundaries for each new supported topology with deterministic fault/crash tests. Shared-worker fixtures initialize first; success/conflict/typed retryable outcomes are distinguished from corruption. No universal scheduling guarantee or automatic repeated race-fix loop is required.
-- [ ] **QUAL-05**: Lifecycle and cache-policy code meets targeted statement and branch coverage thresholds established by the project. **Recovery pending:** the approved Plan 08-18 test-contract correction removed incidental coverage without changing production source; Plan 08-19 must restore the immutable raw-count/rate ratchet through deterministic SQLite validation/error tests before local readiness closes.
+- [x] **QUAL-05**: Lifecycle and cache-policy code meets targeted statement and branch coverage thresholds established by the project. **Complete:** Plan 08-19 restored the immutable raw-count/rate ratchet through deterministic SQLite validation/error tests without changing production source.
 - [ ] **QUAL-06**: Checked-in benchmarks establish final performance budgets and distributions for named workloads/environments after lifecycle behavior stabilizes. Benchmark thresholds do not become runtime deadlines or strengthen public progress/atomicity promises. **Deferred / NOT_QUALIFIED:** controlled-Linux capture is deferred to `SEED-006`; macOS diagnostics do not satisfy this requirement and QUAL-06 does not block the current milestone.
 - [x] **QUAL-07**: Supported inventory and aggregate operations avoid unbounded memory use and accidental N+1 backend calls.
 
@@ -147,19 +147,19 @@ advertised until SEED-007 produces the original real-service evidence.
 | QUAL-02 | Phase 8 | Complete |
 | QUAL-03 | Phase 8 | Complete |
 | QUAL-04 | Phase 8 | Complete |
-| QUAL-05 | Phase 8 | Pending Plan 08-19 |
+| QUAL-05 | Phase 8 | Complete |
 | QUAL-06 | SEED-006 | Deferred / NOT_QUALIFIED |
 | QUAL-07 | Phase 8 | Complete |
 
 **Coverage:**
 
 - v1 requirements recorded: 44 total
-- Completed requirements mapped to milestone phases: 41
-- Pending current-phase requirements: 1 (`QUAL-05` → Phase 8 Plan 08-19)
+- Completed requirements mapped to milestone phases: 42
+- Pending current-phase requirements: 0
 - Explicitly deferred: 2 (`QUAL-06` → `SEED-006`; `BACK-05` → `SEED-007`)
 - Total requirements accounted for: 44
 - Unmapped: 0 ✓
 
 ---
 *Requirements defined: 2026-08-29*
-*Last updated: 2026-09-15 after planning the tests-only QUAL-05 ratchet recovery required before local-readiness closure*
+*Last updated: 2026-09-15 after completing the tests-only QUAL-05 ratchet recovery required before local-readiness closure*
