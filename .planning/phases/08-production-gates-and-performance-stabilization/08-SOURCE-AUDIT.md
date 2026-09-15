@@ -24,7 +24,7 @@
 | RESEARCH | R-09 | Explicit structural formulas and scale tiers | 06, 16 | COVERED | Local closure reruns them. |
 | RESEARCH | R-10 | Preserve fail-closed live runner and exact cleanup | 08, 15; SEED-007 | DEFERRED | Tooling is preserved; no current live proof is claimed. |
 | RESEARCH | R-11 | Protected RC versus scheduled live diagnostics | 08; SEED-007 | DEFERRED | Cadence contract remains executable for the seed. |
-| RESEARCH | R-12 | Fixed selector/source/decision/threat verifier | 10, 14-16 | COVERED | Plan 16 binds D-24, superseded plans, and the local closure threats literally. |
+| RESEARCH | R-12 | Fixed selector/source/decision/threat verifier | 10, 14-16 | COVERED | Plan 16 binds D-24, canonical Plan 17, both exact clear/delete selectors, the five Plan 17 threats, superseded plans, and the local closure threats literally. |
 | RESEARCH | R-13 | Lifetime evidence and immutable publication | 08, 10, 14; SEED-007 | DEFERRED | Publication stays `NOT_PUBLISHED`; controller remains intact. |
 | RESEARCH | R-14 | No new benchmark dependency | 07 | COVERED | Existing stdlib approach remains. |
 | CONTEXT | D-01 | Qualify the Phase 07.1 obstore architecture; no legacy fallback | 01, 07, 08, 10, 16 | COVERED | Local closure audits the final production composition only. |
@@ -50,7 +50,7 @@
 | CONTEXT | D-21 | Page/work and backend-call formulas | 06, 09, 16 | COVERED | Closure reruns structural evidence. |
 | CONTEXT | D-22 | Controlled performance blocking; remote latency diagnostic | 07-10, 13, 14 | SUPERSEDED IN PART | D-23 defers performance; remote latency remains diagnostic. |
 | CONTEXT | D-23 | Defer QUAL-06 and preserve harness/nonclaims | 14, 16 | COVERED | Local report retains SEED-006 identity. |
-| CONTEXT | D-24 | Close on local readiness; defer BACK-05/publication intact | 16; SEED-007 | COVERED | Plan 16 is the only remaining current plan. |
+| CONTEXT | D-24 | Close on local readiness; defer BACK-05/publication intact | 16; SEED-007 | COVERED | Plan 17 corrects the inherited deterministic progress contract before Plan 16 produces the local-readiness result; neither changes the deferred remote/publication boundary. |
 
 ## Exclusions (Not Gaps)
 
