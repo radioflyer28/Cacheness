@@ -180,6 +180,14 @@ class FakeGh:
 
     def __call__(self, command: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
         self.commands.append(command)
+        if command[:3] == ("git", "rev-parse", "--verify"):
+            return subprocess.CompletedProcess(command, 0, self.revision + "\n", "")
+        if command[:3] == ("gh", "auth", "status"):
+            return subprocess.CompletedProcess(command, 0, "authenticated\n", "")
+        if command[:3] == ("gh", "workflow", "view"):
+            return subprocess.CompletedProcess(command, 0, "workflow: visible\n", "")
+        if command[1:] == ("tools/verify_phase8_contracts.py", "--quick"):
+            return subprocess.CompletedProcess(command, 0, "", "")
         if command[:3] == ("gh", "run", "list"):
             workflow = command[command.index("--workflow") + 1]
             if workflow not in self.dispatched:
@@ -244,7 +252,9 @@ def test_dispatch_requires_exact_candidate_sha_and_records_one_run_id(
         candidate_sha=candidate, output_directory=tmp_path, execute=fake
     )
 
-    assert {item.workflow for item in collected} == set(release.WORKFLOW_SPECS)
+    assert {item.workflow for item in collected} == set(
+        release.CURRENT_RELEASE_WORKFLOW_SPECS
+    )
     assert {item.revision for item in collected} == {candidate}
     assert all(
         item.run_id > 0 and len(item.artifact_sha256) == 64 for item in collected
@@ -252,7 +262,7 @@ def test_dispatch_requires_exact_candidate_sha_and_records_one_run_id(
     dispatches = [
         command for command in fake.commands if command[:3] == ("gh", "workflow", "run")
     ]
-    assert len(dispatches) == len(release.WORKFLOW_SPECS)
+    assert len(dispatches) == len(release.CURRENT_RELEASE_WORKFLOW_SPECS)
     for command in dispatches:
         assert "--ref" in command and command[command.index("--ref") + 1] == candidate
         assert "candidate_sha=" + candidate in command
@@ -316,7 +326,8 @@ def test_artifact_collection_requires_run_id_fixed_name_and_one_bounded_file(
         for command in downloads
     )
     assert all(
-        item.artifact_name in release.ARTIFACT_EVIDENCE_CLASS for item in collected
+        item.artifact_name in release.CURRENT_ARTIFACT_EVIDENCE_CLASS
+        for item in collected
     )
 
 
@@ -340,7 +351,9 @@ def test_aggregate_requires_one_same_revision_same_digest_qualifying_class(
     )
 
     assert manifest["revision"] == candidate
-    assert set(manifest["evidence"]) == set(release.ARTIFACT_EVIDENCE_CLASS.values())
+    assert set(manifest["evidence"]) == set(
+        release.CURRENT_ARTIFACT_EVIDENCE_CLASS.values()
+    )
     assert (tmp_path / "aggregate.json").is_file()
 
 
@@ -390,11 +403,15 @@ def test_preflight_collection_reports_exact_current_inventory(tmp_path: Path) ->
     assert report["candidate_sha"] == candidate
     assert report["workflows"] == ["quality.yml", "live_qualification.yml"]
     assert report["artifacts"] == sorted(release.CURRENT_ARTIFACT_EVIDENCE_CLASS)
-    assert not any(command[:3] == ("gh", "workflow", "run") for command in fake.commands)
+    assert not any(
+        command[:3] == ("gh", "workflow", "run") for command in fake.commands
+    )
     assert ("gh", "auth", "status") in fake.commands
 
 
-def test_required_release_collection_excludes_deferred_performance(tmp_path: Path) -> None:
+def test_required_release_collection_excludes_deferred_performance(
+    tmp_path: Path,
+) -> None:
     """Current release collection retains, but never dispatches, performance capability."""
     release = _load_release()
     candidate = "a" * 40
@@ -463,21 +480,26 @@ def test_deferred_performance_artifacts_and_macos_diagnostics_are_rejected(
     release.write_collection_manifest(collection, collected)
     manifest_path = collection / release.COLLECTION_MANIFEST_NAME
     document = json.loads(manifest_path.read_text(encoding="utf-8"))
-    document["artifacts"].append(
-        {
-            **document["artifacts"][0],
-            "artifact_name": "controlled-performance-envelope",
-            "evidence_class": "controlled_performance",
-        }
-    )
-    manifest_path.write_text(json.dumps(document), encoding="utf-8")
+    original_artifacts = list(document["artifacts"])
+    for forbidden_name in (
+        "controlled-performance-envelope",
+        "macos-performance-diagnostic.json",
+    ):
+        document["artifacts"] = original_artifacts + [
+            {
+                **original_artifacts[0],
+                "artifact_name": forbidden_name,
+                "evidence_class": "controlled_performance",
+            }
+        ]
+        manifest_path.write_text(json.dumps(document), encoding="utf-8")
 
-    with pytest.raises(release.ReleaseEvidenceError, match="exact artifact inventory"):
-        release.aggregate_collection(
-            candidate_sha=candidate,
-            collection_directory=collection,
-            output=tmp_path / "forbidden.json",
-        )
+        with pytest.raises(release.ReleaseEvidenceError, match="exactly one artifact"):
+            release.aggregate_collection(
+                candidate_sha=candidate,
+                collection_directory=collection,
+                output=tmp_path / f"{forbidden_name}.json",
+            )
 
     aggregate = {
         "schema": "cacheness-phase8-release-qualification-v2",

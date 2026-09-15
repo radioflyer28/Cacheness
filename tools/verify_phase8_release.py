@@ -70,6 +70,13 @@ WORKFLOW_SPECS = {
         artifacts=("phase8-live-qualification-envelope",),
     ),
 }
+# Full workflow capability is retained for SEED-006, but current release
+# qualification is deliberately a smaller literal inventory under D-23.
+CURRENT_RELEASE_WORKFLOW_NAMES = ("quality.yml", "live_qualification.yml")
+CURRENT_RELEASE_WORKFLOW_SPECS = {
+    "quality.yml": WORKFLOW_SPECS["quality.yml"],
+    "live_qualification.yml": WORKFLOW_SPECS["live_qualification.yml"],
+}
 ARTIFACT_EVIDENCE_CLASS = {
     "phase8-deterministic-envelope": "deterministic",
     "phase8-packaging-envelope": "packaging",
@@ -79,9 +86,25 @@ ARTIFACT_EVIDENCE_CLASS = {
     "controlled-performance-envelope": "controlled_performance",
     "phase8-live-qualification-envelope": "live_services",
 }
-COLLECTION_SCHEMA = "cacheness-phase8-collection-v1"
+CURRENT_ARTIFACT_EVIDENCE_CLASS = {
+    "phase8-deterministic-envelope": "deterministic",
+    "phase8-packaging-envelope": "packaging",
+    "phase8-platform-envelope": "platform",
+    "phase8-coverage-envelope": "coverage",
+    "phase8-structural-envelope": "structural",
+    "phase8-live-qualification-envelope": "live_services",
+}
+CURRENT_RELEASE_EVIDENCE_CLASSES = frozenset(CURRENT_ARTIFACT_EVIDENCE_CLASS.values())
+DEFERRED_PERFORMANCE_RECORD = {
+    "decision": "D-23",
+    "qualification": "NOT_QUALIFIED",
+    "requirement": "QUAL-06",
+    "seed": ".planning/seeds/SEED-006-qualify-controlled-linux-performance.md",
+    "status": "DEFERRED",
+}
+COLLECTION_SCHEMA = "cacheness-phase8-collection-v2"
 COLLECTION_MANIFEST_NAME = "phase8-collection.json"
-RELEASE_MANIFEST_SCHEMA = "cacheness-phase8-release-qualification-v1"
+RELEASE_MANIFEST_SCHEMA = "cacheness-phase8-release-qualification-v2"
 _FORBIDDEN_MANIFEST_TEXT = re.compile(
     r"://|access[_-]?key|credential|password|secret|token|private[_-]?key",
     re.IGNORECASE,
@@ -103,6 +126,78 @@ class CollectedArtifact:
 
 
 CommandExecutor = Callable[[tuple[str, ...]], subprocess.CompletedProcess[str]]
+
+
+def _current_release_inventory() -> None:
+    """Fail closed if mutable exports no longer describe the reviewed D-23 set."""
+    if tuple(CURRENT_RELEASE_WORKFLOW_SPECS) != CURRENT_RELEASE_WORKFLOW_NAMES:
+        raise ReleaseEvidenceError("current release workflow inventory was mutated")
+    if set(CURRENT_ARTIFACT_EVIDENCE_CLASS) != {
+        artifact
+        for spec in CURRENT_RELEASE_WORKFLOW_SPECS.values()
+        for artifact in spec.artifacts
+    }:
+        raise ReleaseEvidenceError("current release artifact inventory was mutated")
+    if CURRENT_RELEASE_EVIDENCE_CLASSES != frozenset(
+        CURRENT_ARTIFACT_EVIDENCE_CLASS.values()
+    ):
+        raise ReleaseEvidenceError("current release evidence classes were mutated")
+
+
+def _validate_trusted_workflow_definition(spec: WorkflowSpec) -> None:
+    """Require the reviewed local definition for a remotely visible workflow."""
+    path = REPOSITORY_ROOT / ".github" / "workflows" / spec.workflow
+    if (
+        path.is_symlink()
+        or not path.is_file()
+        or path.stat().st_size > MAX_ARTIFACT_BYTES
+    ):
+        raise ReleaseEvidenceError(
+            "trusted workflow definition is unavailable or unsafe"
+        )
+    try:
+        definition = path.read_text(encoding="utf-8")
+    except OSError as error:
+        raise ReleaseEvidenceError(
+            "trusted workflow definition is unreadable"
+        ) from error
+    required_fragments = (
+        f"name: {spec.workflow_name}",
+        "workflow_dispatch:",
+        "candidate_sha:",
+        "git rev-parse HEAD",
+    )
+    if any(fragment not in definition for fragment in required_fragments):
+        raise ReleaseEvidenceError(
+            "trusted workflow definition lacks release safeguards"
+        )
+
+
+def preflight_collection(
+    *, candidate_sha: str, execute: CommandExecutor | None = None
+) -> dict[str, object]:
+    """Read only current dispatch prerequisites without starting a workflow."""
+    if not _SHA_PATTERN.fullmatch(candidate_sha):
+        raise ReleaseEvidenceError("candidate SHA must be lowercase and 40 characters")
+    if execute is None:
+        execute = _run
+    _current_release_inventory()
+    _require_success(
+        ("git", "rev-parse", "--verify", f"{candidate_sha}^{{commit}}"), execute
+    )
+    _require_success(("gh", "auth", "status"), execute)
+    for spec in CURRENT_RELEASE_WORKFLOW_SPECS.values():
+        _validate_trusted_workflow_definition(spec)
+        _require_success(("gh", "workflow", "view", spec.workflow, "--yaml"), execute)
+    _require_success(
+        (sys.executable, "tools/verify_phase8_contracts.py", "--quick"), execute
+    )
+    return {
+        "candidate_sha": candidate_sha,
+        "workflows": list(CURRENT_RELEASE_WORKFLOW_NAMES),
+        "artifacts": sorted(CURRENT_ARTIFACT_EVIDENCE_CLASS),
+        "local_contract": "PASS",
+    }
 
 
 def _run(command: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
@@ -313,7 +408,7 @@ def _download_one_artifact(
         raise ReleaseEvidenceError(
             "artifact download must contain exactly one regular file"
         )
-    evidence_class = ARTIFACT_EVIDENCE_CLASS[artifact_name]
+    evidence_class = CURRENT_ARTIFACT_EVIDENCE_CLASS[artifact_name]
     artifact = files[0]
     revision, source_digest = _artifact_payload(artifact, evidence_class, candidate_sha)
     return CollectedArtifact(
@@ -372,12 +467,14 @@ def collect_workflow_evidence(
         raise ReleaseEvidenceError("candidate SHA must be lowercase and 40 characters")
     if execute is None:
         execute = _run
+    _current_release_inventory()
+    preflight_collection(candidate_sha=candidate_sha, execute=execute)
     output_directory.mkdir(parents=True, exist_ok=True)
     if any(output_directory.iterdir()):
         raise ReleaseEvidenceError("collection output directory must be empty")
     collected: list[CollectedArtifact] = []
     try:
-        for spec in WORKFLOW_SPECS.values():
+        for spec in CURRENT_RELEASE_WORKFLOW_SPECS.values():
             run_id = _dispatch_and_identify(spec, candidate_sha, execute)
             for artifact_name in spec.artifacts:
                 collected.append(
@@ -393,7 +490,9 @@ def collect_workflow_evidence(
     except Exception:
         # Do not return a partial collection as reusable release evidence.
         raise
-    if {item.artifact_name for item in collected} != set(ARTIFACT_EVIDENCE_CLASS):
+    if {item.artifact_name for item in collected} != set(
+        CURRENT_ARTIFACT_EVIDENCE_CLASS
+    ):
         raise ReleaseEvidenceError(
             "collection did not contain the fixed artifact inventory"
         )
@@ -439,6 +538,12 @@ def write_collection_manifest(
     """Persist sanitized run/artifact provenance beside an exact collection."""
     if not collected:
         raise ReleaseEvidenceError("collection cannot be empty")
+    if {item.artifact_name for item in collected} != set(
+        CURRENT_ARTIFACT_EVIDENCE_CLASS
+    ) or len(collected) != len(CURRENT_ARTIFACT_EVIDENCE_CLASS):
+        raise ReleaseEvidenceError(
+            "collection does not contain the exact artifact inventory"
+        )
     revisions = {item.revision for item in collected}
     if len(revisions) != 1:
         raise ReleaseEvidenceError("collection has conflicting revisions")
@@ -487,7 +592,7 @@ def _load_collection_manifest(collection_directory: Path) -> list[dict[str, obje
     ):
         raise ReleaseEvidenceError("collection manifest has an invalid identity")
     artifacts = value["artifacts"]
-    if len(artifacts) != len(ARTIFACT_EVIDENCE_CLASS):
+    if len(artifacts) != len(CURRENT_ARTIFACT_EVIDENCE_CLASS):
         raise ReleaseEvidenceError(
             "collection must contain exactly one artifact per declared evidence class"
         )
@@ -531,7 +636,7 @@ def _validate_recorded_artifact(
     evidence_class = record.get("evidence_class")
     if (
         not isinstance(artifact_name, str)
-        or ARTIFACT_EVIDENCE_CLASS.get(artifact_name) != evidence_class
+        or CURRENT_ARTIFACT_EVIDENCE_CLASS.get(artifact_name) != evidence_class
         or record.get("revision") != candidate_sha
     ):
         raise ReleaseEvidenceError(
@@ -596,15 +701,18 @@ def aggregate_collection(
     """Write a canonical aggregate only from one complete exact candidate collection."""
     if not _SHA_PATTERN.fullmatch(candidate_sha):
         raise ReleaseEvidenceError("candidate SHA must be lowercase and 40 characters")
+    _current_release_inventory()
     records = _load_collection_manifest(collection_directory)
     if {record.get("artifact_name") for record in records} != set(
-        ARTIFACT_EVIDENCE_CLASS
+        CURRENT_ARTIFACT_EVIDENCE_CLASS
     ):
         raise ReleaseEvidenceError(
             "collection does not contain the exact artifact inventory"
         )
     classes = [record.get("evidence_class") for record in records]
-    if len(set(classes)) != len(ARTIFACT_EVIDENCE_CLASS):
+    if set(classes) != CURRENT_RELEASE_EVIDENCE_CLASSES or len(classes) != len(
+        CURRENT_ARTIFACT_EVIDENCE_CLASS
+    ):
         raise ReleaseEvidenceError(
             "collection must contain exactly one artifact per evidence class"
         )
@@ -635,9 +743,47 @@ def aggregate_collection(
         "revision": candidate_sha,
         "source_digest": source_digest,
         "evidence": evidence,
+        "deferred_requirements": [dict(DEFERRED_PERFORMANCE_RECORD)],
     }
+    validate_release_aggregate(manifest, candidate_sha=candidate_sha)
     _atomic_write_json(output, manifest)
     return manifest
+
+
+def validate_release_aggregate(
+    aggregate: Mapping[str, object], *, candidate_sha: str
+) -> None:
+    """Validate the closed current-release aggregate before it can be published."""
+    if not _SHA_PATTERN.fullmatch(candidate_sha):
+        raise ReleaseEvidenceError("candidate SHA must be lowercase and 40 characters")
+    if set(aggregate) != {
+        "schema",
+        "revision",
+        "source_digest",
+        "evidence",
+        "deferred_requirements",
+    }:
+        raise ReleaseEvidenceError("release aggregate has an unexpected shape")
+    if aggregate.get("schema") != RELEASE_MANIFEST_SCHEMA:
+        raise ReleaseEvidenceError("release aggregate has an invalid schema")
+    if aggregate.get("revision") != candidate_sha:
+        raise ReleaseEvidenceError(
+            "release aggregate revision does not match candidate SHA"
+        )
+    source_digest = aggregate.get("source_digest")
+    if not isinstance(source_digest, str) or not _DIGEST_PATTERN.fullmatch(
+        source_digest
+    ):
+        raise ReleaseEvidenceError("release aggregate source digest is invalid")
+    evidence = aggregate.get("evidence")
+    if (
+        not isinstance(evidence, Mapping)
+        or set(evidence) != CURRENT_RELEASE_EVIDENCE_CLASSES
+    ):
+        raise ReleaseEvidenceError("release aggregate evidence inventory is invalid")
+    deferred = aggregate.get("deferred_requirements")
+    if deferred != [DEFERRED_PERFORMANCE_RECORD]:
+        raise ReleaseEvidenceError("release aggregate deferred requirement is invalid")
 
 
 def verify_published_release(
@@ -766,7 +912,10 @@ def _require_matching_live_input(
 def main(arguments: Sequence[str] | None = None) -> int:
     """Run bounded collection, aggregation, or read-only publication inspection."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("collect", "aggregate", "verify-published"))
+    parser.add_argument(
+        "command",
+        choices=("preflight-collection", "collect", "aggregate", "verify-published"),
+    )
     parser.add_argument("--candidate-sha", required=True)
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--evidence-dir", type=Path)
@@ -777,6 +926,25 @@ def main(arguments: Sequence[str] | None = None) -> int:
     parser.add_argument("--asset", type=Path, action="append", default=[])
     parsed = parser.parse_args(arguments)
     try:
+        if parsed.command == "preflight-collection":
+            if (
+                any(
+                    value is not None
+                    for value in (
+                        parsed.output_dir,
+                        parsed.evidence_dir,
+                        parsed.live_output,
+                        parsed.live_evidence,
+                        parsed.output,
+                        parsed.tag,
+                    )
+                )
+                or parsed.asset
+            ):
+                parser.error("preflight-collection requires only --candidate-sha")
+            preflight_collection(candidate_sha=parsed.candidate_sha)
+            print("current release collection preflight passed")
+            return 0
         if parsed.command == "collect":
             if (
                 parsed.output_dir is None
