@@ -17,7 +17,7 @@ VERIFIER_PATH = REPOSITORY_ROOT / "tools" / "verify_phase8_contracts.py"
 EXPECTED_PLAN_PATHS = tuple(
     ".planning/phases/08-production-gates-and-performance-stabilization/"
     f"08-{number:02d}-PLAN.md"
-    for number in range(1, 15)
+    for number in range(1, 16)
 )
 EXPECTED_DECISIONS = {f"D-{number:02d}" for number in range(1, 24)}
 EXPECTED_REQUIREMENTS = {
@@ -73,6 +73,40 @@ def test_fixed_manifest_covers_full_phase_decision_requirement_and_threat_sets()
     }
     assert verifier.validate_fixed_manifest(REPOSITORY_ROOT) == ()
     assert not hasattr(verifier, "discover_tests")
+
+
+def test_fixed_manifest_binds_live_configuration_preflight_gap() -> None:
+    """Plan 15 keeps its protected-live prerequisite boundary executable."""
+    verifier = _load_verifier()
+
+    assert verifier.PHASE8_PLAN_PATHS == EXPECTED_PLAN_PATHS
+    assert {
+        threat: verifier.THREAT_NODES[threat]
+        for threat in (
+            "T-08-15-01",
+            "T-08-15-02",
+            "T-08-15-03",
+            "T-08-15-04",
+            "T-08-15-05",
+        )
+    } == {
+        "T-08-15-01": (
+            "tests/qualification/test_phase8_evidence.py::test_preflight_accepts_sanitized_configuration_without_external_effects",
+        ),
+        "T-08-15-02": (
+            "tests/qualification/test_phase8_evidence.py::test_preflight_rejects_missing_invalid_and_disallowed_configuration_without_external_effects",
+        ),
+        "T-08-15-03": (
+            "tests/qualification/test_phase8_evidence.py::test_preflight_requires_clean_source_and_reviewed_cleanup_contract",
+        ),
+        "T-08-15-04": (
+            "tests/qualification/test_phase8_evidence.py::test_preflight_requires_clean_source_and_reviewed_cleanup_contract",
+        ),
+        "T-08-15-05": (
+            "tests/qualification/test_phase8_evidence.py::test_preflight_cli_never_runs_or_writes_qualification_evidence",
+        ),
+    }
+    assert verifier.validate_fixed_manifest(REPOSITORY_ROOT) == ()
 
 
 def test_fixed_manifest_rejects_source_mutation_that_drops_plan_or_threat() -> None:
@@ -240,7 +274,7 @@ def test_fixed_manifest_covers_deferred_performance_decision() -> None:
     """Plan 14 closes current evidence without treating QUAL-06 as complete."""
     verifier = _load_verifier()
 
-    assert verifier.PHASE8_PLAN_PATHS[-1].endswith("08-14-PLAN.md")
+    assert any(path.endswith("08-14-PLAN.md") for path in verifier.PHASE8_PLAN_PATHS)
     assert verifier.PHASE8_REQUIREMENTS == tuple(
         requirement
         for requirement in verifier._REVIEWED_REQUIREMENTS

@@ -46,6 +46,7 @@ _REVIEWED_PLAN_PATHS = (
     f"{PHASE_DIRECTORY}/08-12-PLAN.md",
     f"{PHASE_DIRECTORY}/08-13-PLAN.md",
     f"{PHASE_DIRECTORY}/08-14-PLAN.md",
+    f"{PHASE_DIRECTORY}/08-15-PLAN.md",
 )
 PHASE8_PLAN_PATHS = tuple(_REVIEWED_PLAN_PATHS)
 
@@ -243,6 +244,21 @@ _REVIEWED_THREAT_NODES.update(
         "T-08-14-04": (
             "tests/test_phase8_contract_verifier.py::test_fixed_manifest_covers_deferred_performance_decision",
         ),
+        "T-08-15-01": (
+            "tests/qualification/test_phase8_evidence.py::test_preflight_accepts_sanitized_configuration_without_external_effects",
+        ),
+        "T-08-15-02": (
+            "tests/qualification/test_phase8_evidence.py::test_preflight_rejects_missing_invalid_and_disallowed_configuration_without_external_effects",
+        ),
+        "T-08-15-03": (
+            "tests/qualification/test_phase8_evidence.py::test_preflight_requires_clean_source_and_reviewed_cleanup_contract",
+        ),
+        "T-08-15-04": (
+            "tests/qualification/test_phase8_evidence.py::test_preflight_requires_clean_source_and_reviewed_cleanup_contract",
+        ),
+        "T-08-15-05": (
+            "tests/qualification/test_phase8_evidence.py::test_preflight_cli_never_runs_or_writes_qualification_evidence",
+        ),
     }
 )
 _REVIEWED_THREATS = (
@@ -251,6 +267,11 @@ _REVIEWED_THREATS = (
     "T-08-14-02",
     "T-08-14-03",
     "T-08-14-04",
+    "T-08-15-01",
+    "T-08-15-02",
+    "T-08-15-03",
+    "T-08-15-04",
+    "T-08-15-05",
 )
 PHASE8_THREATS = tuple(_REVIEWED_THREATS)
 THREAT_NODES = dict(_REVIEWED_THREAT_NODES)
