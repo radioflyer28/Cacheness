@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 08
 current_phase_name: Production Gates and Performance Stabilization
 status: executing
-stopped_at: Planned 08-15-PLAN.md
-last_updated: "2026-09-15T16:39:06Z"
+stopped_at: Completed 08-15-PLAN.md; Plan 08-11 awaits protected real-service qualification
+last_updated: "2026-09-15T17:04:09.367Z"
 last_activity: 2026-09-15
 last_activity_desc: Planned configuration-only protected-live preflight before exact-SHA collection
-state_head: 403b90a66a0203599a5750aa4a82e292f2379ca2
+state_head: 8577d499c9ae824d197a1215c906574919e6cdcd
 progress:
   total_phases: 9
   completed_phases: 7
   total_plans: 131
-  completed_plans: 127
+  completed_plans: 128
 milestone_name: milestone
 ---
 
@@ -207,6 +207,7 @@ the deliberately superseded Phase 03 plan; do not fabricate its completion.
 | Phase 08 P10 | 3301s | 3 tasks | 4 files |
 | Phase 08 P13 | 12min | 1 tasks | 4 files |
 | Phase 08-production-gates-and-performance-stabilization P14 | 1200 | 3 tasks | 5 files |
+| Phase 08 P15 | 10m | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -507,6 +508,8 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - [Phase 08]: Plan 08-14 must revise release collection/aggregation/fixed verification before exact-SHA live evidence collection; all non-deferred evidence classes remain mandatory.
 - [Phase 08]: D-23 defers only QUAL-06 controlled Linux performance to SEED-006; macOS remains diagnostic-only.
 - [Phase 08]: Immutable publication requires an approval-bound prepublication digest and exact remote asset verification.
+- [Phase 08]: Phase 08 Plan 15: Protected-live preflight is configuration-only; every result is service_state NOT_RUN and cannot qualify BACK-05.
+- [Phase 08]: Phase 08 Plan 15: Fixed verifier inventory now binds Plan 08-15 and T-08-15-01 through T-08-15-05 to literal preflight selectors.
 
 ### Pending Todos
 
@@ -538,6 +541,6 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 
 ## Session Continuity
 
-Last session: 2026-09-15
-Stopped at: Planned 08-15-PLAN.md
+Last session: 2026-09-15T17:04:09.199Z
+Stopped at: Completed 08-15-PLAN.md; Plan 08-11 awaits protected real-service qualification
 Resume file: None
