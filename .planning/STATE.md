@@ -4,12 +4,12 @@ milestone: v1.0
 current_phase: 09
 status: ready_to_plan
 stopped_at: Phase 09 context gathered
-last_updated: "2026-09-16T22:34:17.112Z"
+last_updated: "2026-09-16T22:36:45.172Z"
 last_activity: 2026-09-15
 last_activity_desc: Phase 09 added from the v1.0 milestone audit
-state_head: fe6eac462c4b05212028833cd3d632f92f017402
+state_head: 99b8aefe0e595b4177859b005a0a2cb1112e73b1
 progress:
-  total_phases: 10
+  total_phases: 11
   completed_phases: 8
   total_plans: 133
   completed_plans: 132
@@ -48,8 +48,9 @@ retained; controlled-Linux performance qualification is deferred to SEED-006 by
 D-23, while real PostgreSQL/Amazon-S3 qualification and immutable publication are
 deferred to SEED-007 by D-24.
 
-Roadmap progress: [████████░░] 8 of 10 phases complete. Phase 9 is a bounded
-adoption-surface closure phase; it does not reopen storage lifecycle design. The generated disk plan
+Roadmap progress: [███████░░░░] 8 of 11 phases complete. Phase 9 is a bounded
+adoption-surface closure phase, followed by the separately scoped Phase 10
+direct removal of SqlCache; neither reopens storage lifecycle design. The generated disk plan
 counter still includes the deliberately superseded Phase 03 plan; do not reopen
 that closed phase merely to repair the counter.
 
@@ -559,6 +560,7 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - Historical before the coverage measurement (superseded): Plan 08-18 was once described as the final prerequisite for 08-16. The exact post-08-18 report made Plan 08-19 the final prerequisite instead.
 - Phase 8 gap Plan 08-19 restores the coverage ratchet after the approved Plan 08-18 test correction; it becomes the final prerequisite before Plan 08-16 resumes and cannot edit production code or the baseline.
 - Phase 8 Plan 08-19 completed with deterministic SQLite validation/error and malformed-evidence coverage; raw repository/critical floors now exceed the frozen baseline, so 08-16 is the only remaining canonical plan.
+- Phase 10 added: Direct pre-production SqlCache removal approved to narrow Cacheness to BlobStore plus UnifiedCache and reduce unrelated maintenance surface.
 
 ## Deferred Items
 

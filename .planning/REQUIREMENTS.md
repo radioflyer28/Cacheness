@@ -36,7 +36,7 @@ Phase 3 completion below is scoped to the qualified initialized local SQLite/fil
 - [x] **CACH-04**: A cached `None` value remains distinguishable from a cache miss.
 - [x] **CACH-05**: Cache statistics distinguish absent, expired, corrupt, conflict, and backend-error outcomes through one documented aggregate/result model; legacy counter shapes need not be preserved.
 - [ ] **CACH-06**: The milestone publishes one coherent cache import, constructor, configuration, decorator, and result surface over `BlobStore`. Pre-production aliases and overlapping constructors may be removed instead of routed through compatibility adapters; explicit initialization, optional-export warnings, and requested-external-metadata committed-partial errors remain required semantic contracts. **Partial:** the implementation surface is complete, but Phase 9 must replace primary documentation and examples that still publish removed APIs.
-- [x] **CACH-07**: `SqlCache` remains a separate subsystem and retains representative import and behavioral regression coverage.
+- [ ] **CACH-07**: The unrelated table/range-oriented `SqlCache` pull-through subsystem is removed before the first supported release, including its public exports, dedicated implementation, tests, examples, documentation, and dependencies that become unused; BlobStore, UnifiedCache, SQL-backed lifecycle authorities, catalog metadata, and dataframe format handlers remain intact.
 
 ### Security and Integrity
 
@@ -85,7 +85,6 @@ Deferred to future releases and not included in the current roadmap.
 
 | Feature | Reason |
 |---------|--------|
-| `SqlCache` redesign or merger into `BlobStore` | Its table-oriented pull-through lifecycle is separate; this release protects it with regression coverage. |
 | Safe deserialization of hostile pickle or dill payloads | These formats execute code by design; v1 documents and enforces a trusted-application-payload boundary. |
 | Runtime compatibility with pre-production APIs and development-only stored layouts | No production deployment depends on them. Unsupported layouts fail explicitly; migration/rebuild tooling remains for future versioned releases. |
 | Universal physical migration between backend combinations | V1 supports same-backend format/schema migration and an explicit rebuild path for incompatible or cross-backend data. |
@@ -127,7 +126,7 @@ advertised until SEED-007 produces the original real-service evidence.
 | CACH-04 | Phase 6 | Complete |
 | CACH-05 | Phase 6 | Complete |
 | CACH-06 | Phase 6 + Phase 9 | Partial — implementation complete; published adoption surface pending |
-| CACH-07 | Phase 1 | Complete |
+| CACH-07 | Phase 10 | Pending — direct pre-production removal approved |
 | SECU-01 | Phase 1 | Complete |
 | SECU-02 | Phase 1 | Complete |
 | SECU-03 | Phase 2 | Complete |
@@ -154,8 +153,8 @@ advertised until SEED-007 produces the original real-service evidence.
 **Coverage:**
 
 - v1 requirements recorded: 44 total
-- Completed requirements mapped to milestone phases: 41
-- Pending current-phase requirements: 1 (`CACH-06` publication closure → Phase 9)
+- Completed requirements mapped to milestone phases: 40
+- Pending current-phase requirements: 2 (`CACH-06` publication closure → Phase 9; `CACH-07` SqlCache removal → Phase 10)
 - Explicitly deferred: 2 (`QUAL-06` → `SEED-006`; `BACK-05` → `SEED-007`)
 - Total requirements accounted for: 44
 - Unmapped: 0 ✓

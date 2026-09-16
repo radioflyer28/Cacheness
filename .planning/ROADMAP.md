@@ -22,7 +22,7 @@ Cacheness will move from overlapping cache and storage paths to one storage engi
 
 **Goal**: Users have a frozen compatibility baseline and safe boundary behavior before lifecycle ownership changes.
 **Depends on**: Nothing (first phase)
-**Requirements**: MIGR-01, CACH-07, SECU-01, SECU-02, SECU-06, SECU-07
+**Requirements**: MIGR-01, SECU-01, SECU-02, SECU-06, SECU-07
 **Success Criteria** (what must be TRUE):
 
   1. Users can run the supported public imports, constructors, configuration names, registries, aliases, decorators, exceptions, and representative result behaviors against an executable compatibility baseline.
@@ -625,11 +625,31 @@ Plans:
   4. Package description, release-facing identity, and optional-integration behavior match the current BlobStore-first architecture; absent optional dataframe integrations remain quiet until requested.
   5. The missing Narwhals investigation is captured as a future seed, and Phase 3/Phase 8 verification metadata is refreshed from existing post-replan evidence without changing production lifecycle behavior.
   6. Existing bounded local package, documentation-example, and regression gates pass. Phase 9 introduces no new lifecycle authority, lock, queue, retry coordinator, compatibility shim, backend family, or stronger guarantee than ADR 0001 permits.
+
 **Plans:** 0 plans
 
 Plans:
 
 - [ ] TBD (run /gsd-plan-phase 9 to break down)
+
+### Phase 10: Remove SqlCache Pull-Through Subsystem
+
+**Goal:** Remove the unrelated table/range-oriented `SqlCache` product so the first supported Cacheness release has one coherent BlobStore foundation and one cache-policy layer built over it.
+**Requirements**: CACH-07
+**Depends on:** Phase 9
+**Success Criteria** (what must be TRUE):
+
+  1. `SqlCache`, `SqlCacheAdapter`, their builders, dedicated errors, and public exports are removed directly without compatibility aliases or deprecation shims.
+  2. Dedicated SqlCache tests, documentation, and examples are removed; any generally useful material is retained only when it applies to BlobStore, UnifiedCache, or their supported format handlers.
+  3. DuckDB and other dependency/extras surface used only by SqlCache is removed, while SQL-backed lifecycle authorities, catalog metadata, and Parquet dataframe handlers remain intact.
+  4. Public import, package, and documentation gates prove that the supported product surface contains BlobStore, UnifiedCache, and their shared format-handler ecosystem without dangling SqlCache references.
+  5. Removal does not redesign BlobStore, UnifiedCache, lifecycle authority, backend topology, or handler persistence contracts.
+
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 10 to break down)
 
 ## Progress
 
@@ -645,6 +665,7 @@ Plans:
 | 07.1. Obstore Payload Participant Unification | 11/11 | Complete | 2026-09-13 |
 | 8. Production Gates and Performance Stabilization | 17/17 | Complete    | 2026-09-15 |
 | 9. Adoption and Release Surface Closure | 0/0 | Not planned | — |
+| 10. Remove SqlCache Pull-Through Subsystem | 0/0 | Not planned | — |
 
 ## Backlog
 

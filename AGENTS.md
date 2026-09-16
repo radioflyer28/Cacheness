@@ -14,7 +14,7 @@ The intended audience is Python applications that need local or remote persisten
 
 - **Pre-production cutover**: Cacheness is not in production; current development-only APIs and stored layouts may be replaced instead of supported through compatibility adapters
 - **Migration**: Retain explicit schema/format versions plus offline migration and rebuild tooling for future releases; unsupported current layouts fail explicitly rather than upgrading implicitly
-- **Architecture**: `BlobStore` owns storage lifecycle; `UnifiedCache` depends on it and owns cache policy; `SqlCache` remains separate
+- **Architecture**: `BlobStore` owns storage lifecycle; `UnifiedCache` depends on it and owns cache policy; Phase 10 removes the unrelated `SqlCache` subsystem before the first supported release
 - **Backends**: The unified lifecycle must cover filesystem, memory, S3, JSON, SQLite, and PostgreSQL implementations
 - **Security**: Treat application payloads as trusted while enforcing safe parsing, path containment, and fail-closed integrity boundaries
 - **Reliability**: Payload and metadata operations must have atomic commit, rollback, or deterministic reconciliation semantics

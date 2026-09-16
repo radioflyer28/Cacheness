@@ -2,7 +2,7 @@
 
 ## What This Is
 
-Cacheness is a Python storage and caching library for arbitrary objects, arrays, dataframes, and function results. Its object-storage path uses a reliable `BlobStore` foundation that `UnifiedCache` consumes as its policy layer. Built-in filesystem, memory, and S3 payload mechanics now share one guarded obstore participant beneath the single lifecycle authority. Catalog customization, cache-policy coverage, and explicit offline migration/rebuild tooling are implemented; Phase 8 closes deterministic local readiness while remote-service qualification and immutable release publication remain explicit future work. `SqlCache` remains separate.
+Cacheness is a Python storage and caching library for arbitrary objects, arrays, dataframes, and function results. Its object-storage path uses a reliable `BlobStore` foundation that `UnifiedCache` consumes as its policy layer. Built-in filesystem, memory, and S3 payload mechanics now share one guarded obstore participant beneath the single lifecycle authority. Catalog customization, cache-policy coverage, and explicit offline migration/rebuild tooling are implemented; Phase 8 closes deterministic local readiness while remote-service qualification and immutable release publication remain explicit future work. The unrelated table/range-oriented `SqlCache` subsystem is scheduled for direct removal in Phase 10 before the first supported release.
 
 The intended audience is Python applications that need local or remote persistence with predictable cache semantics across filesystem, memory, S3, JSON, SQLite, and PostgreSQL backends.
 
@@ -22,7 +22,6 @@ Applications can store and retrieve data reliably through one backend-neutral li
 - ✓ Users can persist metadata with JSON, memory, or SQLite implementations and access an optional PostgreSQL implementation — existing
 - ✓ Users can access filesystem, memory, and optional S3 blob backend implementations through backend registries — existing
 - ✓ Users can use `BlobStore` directly for object storage without TTL or eviction semantics — existing
-- ✓ Users can use `SqlCache` separately for SQLAlchemy-backed pull-through dataframe caching — existing
 - ✓ Users can configure TTL, compression, integrity hashing, HMAC entry signing, handler selection, and cache statistics — existing
 - ✓ Initialized local SQLite/filesystem storage preserves complete generations through exact publication, attributable cleanup debt and resumable recovery — Phase 3 direct qualification at `5282dca`
 - ✓ Canonical local cache operations consume BlobStore entry snapshots/receipts; optional projection failure cannot revoke a valid blob, and requested external metadata failures report committed partial outcomes — Phase 3
@@ -36,6 +35,7 @@ Applications can store and retrieve data reliably through one backend-neutral li
 
 ### Active
 
+- [ ] Remove the separate `SqlCache` pull-through subsystem and its now-unused maintenance surface before the first supported release
 - [ ] Release-qualify real PostgreSQL/Amazon-S3 lifecycle behavior and publish the immutable release — deferred to `SEED-007`; local readiness does not imply this claim
 - [ ] Publish complete generations through one catalog transaction; coordinate external payload effects with attributable intent/debt and deterministic reconciliation when resources are available, not cross-resource ACID or instantaneous orphan-free cleanup
 - [ ] Guarantee same-key integrity and defined success/conflict/retryable-failure outcomes within each explicitly supported backend topology
@@ -45,7 +45,6 @@ Applications can store and retrieve data reliably through one backend-neutral li
 
 ### Out of Scope
 
-- Redesigning or merging `SqlCache` into the object/blob storage architecture — it remains a separate subsystem for this cycle
 - Building a general cache-policy plugin framework now — the layered design must leave a clean seam for that later evolution
 - Supporting hostile or untrusted pickle/dill payloads — application data is trusted; boundaries, metadata, paths, and parsers are still hardened
 - Defending a live local store against its owning OS principal deleting or rebinding Cacheness lifecycle-control objects — control objects are validated and fail closed when tampering is detected, but the store owner is part of the trusted deployment boundary
@@ -57,7 +56,7 @@ Applications can store and retrieve data reliably through one backend-neutral li
 
 ## Context
 
-The codebase began as a disk cache and expanded into direct blob storage, backend registries, remote S3/PostgreSQL support, custom metadata, and a separate SQL pull-through cache. The expansion left three adjacent products (`UnifiedCache`, `BlobStore`, and `SqlCache`) plus blob backend implementations that are not composed into one lifecycle.
+The codebase began as a disk cache and expanded into direct blob storage, backend registries, remote S3/PostgreSQL support, custom metadata, and a separate SQL pull-through cache. The expansion left three adjacent products (`UnifiedCache`, `BlobStore`, and `SqlCache`) plus blob backend implementations that were not composed into one lifecycle. BlobStore and UnifiedCache are now composed; Phase 10 removes the remaining unrelated SqlCache product before the first supported release.
 
 At project initialization, payload writes and metadata writes were separate, without rollback; cleanup and composition were incomplete. Phase 3 now has a SQLite lifecycle authority, immutable native generations, exact publication, and intent/debt recovery. The direct implementation removed the cache's projection-repair/deferred-cleanup orchestration and added supported same-generation entry snapshots and receipts. See [the implementation ledger](../docs/phase3-direct-implementation-2026-09-06.md) and [initialization/failure guide](../docs/STORAGE_INITIALIZATION.md), not the earlier audit alone, for the delivered baseline.
 
@@ -71,7 +70,7 @@ Historical baseline (2026-08-29): 777 collected tests, 749 passing, 26 skipped a
 
 - **Pre-production cutover**: Cacheness is not yet in production, so the milestone may replace current public APIs and development-only stored layouts instead of carrying runtime compatibility adapters. Preserve only deliberately reaffirmed contracts; incompatible stores fail explicitly.
 - **Migration**: Keep versioned schema/format identification plus explicit offline migration and rebuild tooling for future releases; dropping current backward compatibility does not authorize implicit upgrade, silent deletion, or removal of migration infrastructure.
-- **Architecture**: `BlobStore` owns storage lifecycle; `UnifiedCache` depends on it and owns cache policy; `SqlCache` remains separate
+- **Architecture**: `BlobStore` owns storage lifecycle; `UnifiedCache` depends on it and owns cache policy; Phase 10 removes the separate `SqlCache` subsystem rather than merging it into either layer
 - **Backends**: Cover all advertised backend families through explicit supported combinations and capability tiers; real PostgreSQL/Amazon-S3 release support remains unqualified until SEED-007, and a backend-neutral interface does not imply identical durability/progress or all Cartesian pairings
 - **Security**: Treat application payloads as trusted while enforcing safe parsing, path containment, and fail-closed integrity boundaries
 - **Local-store trust**: Treat the OS principal that owns a local store and its lifecycle-control namespace as trusted not to delete or rebind live control objects; detect observable substitution and fail closed
@@ -89,7 +88,7 @@ Historical baseline (2026-08-29): 777 collected tests, 749 passing, 26 skipped a
 |----------|-----------|---------|
 | Start with a layered `BlobStore` core and `UnifiedCache` policy layer | Provides the cleanest incremental repair while preserving a future path to pluggable cache policies | ✓ Local engine integration qualified in Phase 3; remaining policy/backend coverage stays scoped downstream |
 | Defer the policy-plugin framework | Avoids over-engineering before lifecycle contracts and backend behavior are reliable | — Pending |
-| Keep `SqlCache` separate | Its row/table pull-through model has different query and lifecycle semantics | — Pending |
+| Remove `SqlCache` before the first supported release | Its row/table pull-through model is outside the BlobStore lifecycle, confuses the product boundary, and adds a substantial independent maintenance surface | ◐ Approved 2026-09-16; Phase 10 pending |
 | Use a pre-production compatibility reset while retaining migration tooling | No production deployment depends on the current API/layout, so a clean composition/catalog contract is cheaper and safer than maintaining parallel legacy paths; future releases still need explicit migrations | ✓ User approved, 2026-09-07 |
 | Target trusted application payloads | Retains useful pickle/dill capabilities while focusing security work on boundaries the library can enforce | — Pending |
 | Trust the local store owner for lifecycle-control availability | Portable per-key coordination cannot remain immutable against the same principal deleting every authority object without an external coordinator or store-wide serialization | ✓ Phase 3 contract clarification |
