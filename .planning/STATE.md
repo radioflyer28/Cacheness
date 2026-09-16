@@ -1,15 +1,15 @@
 ---
 gsd_state_version: 1.0
 milestone: v1.0
-current_phase: 08
-status: completed
-stopped_at: Phase 08 complete — all phases complete
-last_updated: "2026-09-15T21:24:43.737Z"
+current_phase: 09
+status: ready_to_plan
+stopped_at: Phase 09 added — ready for discussion and planning
+last_updated: "2026-09-15T20:13:14-04:00"
 last_activity: 2026-09-15
-last_activity_desc: Phase 08 complete
-state_head: 502c410009361e7ec37c399358202e9a3659263f
+last_activity_desc: Phase 09 added from the v1.0 milestone audit
+state_head: 4ce96c1c4df6d75d848f26a9976fd70d542d1ca6
 progress:
-  total_phases: 9
+  total_phases: 10
   completed_phases: 8
   total_plans: 133
   completed_plans: 132
@@ -23,14 +23,14 @@ milestone_name: milestone
 See: .planning/PROJECT.md (updated 2026-09-15)
 
 **Core value:** Applications can store and retrieve data reliably through one backend-neutral lifecycle, with caching policy layered above storage without compromising integrity or cleanup correctness.
-**Current focus:** Phase 08 — Production Gates and Performance Stabilization
+**Current focus:** Phase 09 — Adoption and Release Surface Closure
 
 ## Current Position
 
-Phase: 08
+Phase: 09
 Plan: Not started
-Status: All phases complete
-Last activity: 2026-09-15 — Phase 08 complete
+Status: Ready for discussion and planning
+Last activity: 2026-09-15 — Phase 09 added from the v1.0 milestone audit
 
 Current execution chain: **08-18 complete → 08-19 complete → 08-16 complete → independent Phase 08 verification**. No older Phase 8 ordering statement overrides this chain.
 
@@ -48,11 +48,18 @@ retained; controlled-Linux performance qualification is deferred to SEED-006 by
 D-23, while real PostgreSQL/Amazon-S3 qualification and immutable publication are
 deferred to SEED-007 by D-24.
 
-Roadmap progress: [█████████░] 8 of 9 phases complete. The generated disk plan
+Roadmap progress: [████████░░] 8 of 10 phases complete. Phase 9 is a bounded
+adoption-surface closure phase; it does not reopen storage lifecycle design. The generated disk plan
 counter still includes the deliberately superseded Phase 03 plan; do not reopen
 that closed phase merely to repair the counter.
 
 ## Roadmap Evolution
+
+- Phase 9 added: Adoption and Release Surface Closure. It closes the partial
+  CACH-06 publication surface identified by the v1.0 milestone audit through
+  current documentation, executable examples, package presentation, seed
+  capture, and evidence refresh. It explicitly excludes lifecycle,
+  concurrency, backend, compatibility-shim, or guarantee expansion work.
 
 2026-09-06 — User-approved downstream alignment after Phase 3 direct qualification:
 

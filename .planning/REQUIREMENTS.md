@@ -35,7 +35,7 @@ Phase 3 completion below is scoped to the qualified initialized local SQLite/fil
 - [x] **CACH-03**: Every invalidation path, including TTL, eviction, predicate, decorator, single-key, and global clear, removes the complete stored entry through the storage lifecycle.
 - [x] **CACH-04**: A cached `None` value remains distinguishable from a cache miss.
 - [x] **CACH-05**: Cache statistics distinguish absent, expired, corrupt, conflict, and backend-error outcomes through one documented aggregate/result model; legacy counter shapes need not be preserved.
-- [x] **CACH-06**: The milestone publishes one coherent cache import, constructor, configuration, decorator, and result surface over `BlobStore`. Pre-production aliases and overlapping constructors may be removed instead of routed through compatibility adapters; explicit initialization, optional-export warnings, and requested-external-metadata committed-partial errors remain required semantic contracts.
+- [ ] **CACH-06**: The milestone publishes one coherent cache import, constructor, configuration, decorator, and result surface over `BlobStore`. Pre-production aliases and overlapping constructors may be removed instead of routed through compatibility adapters; explicit initialization, optional-export warnings, and requested-external-metadata committed-partial errors remain required semantic contracts. **Partial:** the implementation surface is complete, but Phase 9 must replace primary documentation and examples that still publish removed APIs.
 - [x] **CACH-07**: `SqlCache` remains a separate subsystem and retains representative import and behavioral regression coverage.
 
 ### Security and Integrity
@@ -126,7 +126,7 @@ advertised until SEED-007 produces the original real-service evidence.
 | CACH-03 | Phase 6 | Complete |
 | CACH-04 | Phase 6 | Complete |
 | CACH-05 | Phase 6 | Complete |
-| CACH-06 | Phase 6 | Complete |
+| CACH-06 | Phase 6 + Phase 9 | Partial — implementation complete; published adoption surface pending |
 | CACH-07 | Phase 1 | Complete |
 | SECU-01 | Phase 1 | Complete |
 | SECU-02 | Phase 1 | Complete |
@@ -154,8 +154,8 @@ advertised until SEED-007 produces the original real-service evidence.
 **Coverage:**
 
 - v1 requirements recorded: 44 total
-- Completed requirements mapped to milestone phases: 42
-- Pending current-phase requirements: 0
+- Completed requirements mapped to milestone phases: 41
+- Pending current-phase requirements: 1 (`CACH-06` publication closure → Phase 9)
 - Explicitly deferred: 2 (`QUAL-06` → `SEED-006`; `BACK-05` → `SEED-007`)
 - Total requirements accounted for: 44
 - Unmapped: 0 ✓

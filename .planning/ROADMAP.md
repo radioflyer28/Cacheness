@@ -612,6 +612,25 @@ Plans:
 - [x] 08-19-PLAN.md — Restore the frozen statement/branch ratchet with deterministic SQLite validation and fail-closed schema/identity coverage after the approved Plan 08-18 test correction.
 - [x] 08-16-PLAN.md — Close deterministic local readiness and encode the remote/performance/platform/publication nonclaims after 08-19 restores the coverage gate.
 
+### Phase 9: Adoption and Release Surface Closure
+
+**Goal:** Make the completed BlobStore/UnifiedCache architecture accurately usable from the project's primary documentation, examples, package presentation, and milestone evidence without reopening lifecycle or concurrency design.
+**Requirements**: CACH-06
+**Depends on:** Phase 8
+**Success Criteria** (what must be TRUE):
+
+  1. The README and primary BlobStore, API-reference, configuration/backend-selection, security, and plugin-development documentation teach only the current public imports, constructors, result model, decorator composition, topology guarantees, and store-local handler registration.
+  2. Canonical memory/local and durable filesystem-plus-SQLite quick starts, plus an MCAP-style custom-handler example, execute as bounded tests; stale historical examples are removed or explicitly archived rather than presented as supported usage.
+  3. Public guidance prominently states the trusted-payload boundary, 128 MiB default transfer ceiling, bounded handler staging, catalog-field/index limitations, and remote/platform/performance nonclaims.
+  4. Package description, release-facing identity, and optional-integration behavior match the current BlobStore-first architecture; absent optional dataframe integrations remain quiet until requested.
+  5. The missing Narwhals investigation is captured as a future seed, and Phase 3/Phase 8 verification metadata is refreshed from existing post-replan evidence without changing production lifecycle behavior.
+  6. Existing bounded local package, documentation-example, and regression gates pass. Phase 9 introduces no new lifecycle authority, lock, queue, retry coordinator, compatibility shim, backend family, or stronger guarantee than ADR 0001 permits.
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 9 to break down)
+
 ## Progress
 
 | Phase | Plans Complete | Status | Completed |
@@ -625,6 +644,7 @@ Plans:
 | 7. Explicit Migration and Rebuild Cutover | 24/24 | Complete    | 2026-09-11 |
 | 07.1. Obstore Payload Participant Unification | 11/11 | Complete | 2026-09-13 |
 | 8. Production Gates and Performance Stabilization | 17/17 | Complete    | 2026-09-15 |
+| 9. Adoption and Release Surface Closure | 0/0 | Not planned | — |
 
 ## Backlog
 
