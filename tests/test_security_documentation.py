@@ -63,6 +63,27 @@ def test_security_guide_preserves_native_format_ownership_without_future_promise
     assert "phase 2" not in normalized
 
 
+def test_security_guide_preserves_fail_closed_parsing_and_contained_staging() -> None:
+    """Trust guidance keeps the payload boundary separate from release qualification."""
+    guide = SECURITY_GUIDE.read_text(encoding="utf-8")
+    boundary = _section(guide, "## Trusted Payload and Executable Serializer Boundary")
+    normalized = boundary.lower()
+
+    for phrase in (
+        "safe parsing",
+        "path containment",
+        "fail closed",
+        "private staging",
+        "regular artifact",
+        "sha-256 plus size",
+        "opaque corroborating transport evidence",
+    ):
+        assert phrase in normalized
+
+    assert "## Evidence matrix" not in guide
+    assert "[Release qualification](RELEASE_QUALIFICATION.md)" in guide
+
+
 def test_readme_points_to_the_canonical_security_boundary_without_serializer_claims() -> None:
     """README readers receive a truthful handoff instead of a second contract."""
     readme = README.read_text(encoding="utf-8")

@@ -8,6 +8,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parent.parent
 README = PROJECT_ROOT / "README.md"
 DOCS_INDEX = PROJECT_ROOT / "docs" / "README.md"
+QUALIFICATION_GUIDE = PROJECT_ROOT / "docs" / "RELEASE_QUALIFICATION.md"
 
 
 def _read(relative_path: str) -> str:
@@ -115,3 +116,40 @@ def test_task_guides_own_their_current_capabilities() -> None:
     for source in (blob_store, cache_policy, initialization, migration):
         assert "SqlCache" not in source
         assert "SQL pull-through" not in source
+
+
+def test_qualification_guide_is_the_one_detailed_owner_of_current_nonclaims() -> None:
+    """One evidence matrix distinguishes local readiness from every deferred boundary."""
+    guide = QUALIFICATION_GUIDE.read_text(encoding="utf-8")
+    topology_reference = _read("docs/CATALOG_AND_TOPOLOGY.md")
+
+    for evidence_class in (
+        "Deterministic/local",
+        "Packaging",
+        "Platform",
+        "Coverage/quality",
+        "Structural",
+        "Controlled performance",
+        "Live service",
+        "Publication",
+    ):
+        assert evidence_class in guide
+
+    for boundary in (
+        "S3 and PostgreSQL remain `NOT_QUALIFIED`",
+        "Windows remains `UNAVAILABLE` / `NOT_QUALIFIED`",
+        "controlled Linux performance remains `DEFERRED` / `NOT_QUALIFIED`",
+        "immutable publication remains `NOT_PUBLISHED`",
+        "128 MiB",
+        "private staging",
+        "canonical SHA-256 plus size",
+        "string, signed 64-bit integer, and boolean",
+        "bounded keyset scans",
+        "cross-resource ACID",
+        "typed contention outcomes",
+    ):
+        assert boundary in guide
+
+    assert "[Release qualification](RELEASE_QUALIFICATION.md)" in topology_reference
+    assert "Phase 8 satisfies" not in topology_reference
+    assert "## Evidence matrix" not in topology_reference
