@@ -12,6 +12,7 @@ PHASE8_VALIDATION = (
     ROOT
     / ".planning/phases/08-production-gates-and-performance-stabilization/08-VALIDATION.md"
 )
+SEEDS_DIRECTORY = ROOT / ".planning/seeds"
 
 
 def test_phase3_verification_is_historical_with_named_local_closure_evidence():
@@ -52,3 +53,28 @@ def test_phase8_validation_records_completed_local_evidence_without_promoting_no
         "publication",
     ):
         assert marker in validation
+
+
+def test_one_dormant_narwhals_investigation_preserves_handler_owned_parquet():
+    """A future compatibility investigation must not become a dependency decision."""
+    seeds = list(SEEDS_DIRECTORY.glob("*narwhals*"))
+    assert len(seeds) == 1
+
+    seed = seeds[0].read_text(encoding="utf-8")
+    for marker in (
+        "id: SEED-008",
+        "status: dormant",
+        "pandas",
+        "PyArrow",
+        "Polars",
+        "Parquet remains handler-owned",
+        "dataframes",
+        "D-08",
+        "future developer-kit",
+        "Do not install Narwhals",
+        "Do not implement an adapter",
+    ):
+        assert marker in seed
+
+    assert "narwhals" not in (ROOT / "pyproject.toml").read_text(encoding="utf-8").lower()
+    assert "narwhals" not in (ROOT / "uv.lock").read_text(encoding="utf-8").lower()
