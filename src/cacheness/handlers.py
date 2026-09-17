@@ -15,7 +15,7 @@ import warnings
 
 # Import focused interfaces
 from .interfaces import (
-    CacheHandler,
+    FormatHandler,
     CacheWriteError,
     CacheReadError,
     PayloadTransformationEdge,
@@ -219,20 +219,7 @@ def _contains_object_dtype_array(data: Any) -> bool:
         )
     return False
 
-# Log DataFrame backend availability with debug info
-if POLARS_AVAILABLE and PANDAS_AVAILABLE:
-    logger.info("📊 Both Polars and Pandas available for DataFrame caching")
-elif POLARS_AVAILABLE:
-    logger.info("📊 Polars available for DataFrame caching")
-elif PANDAS_AVAILABLE:
-    logger.info("📊 Pandas available for DataFrame caching (Polars not found)")
-else:
-    logger.warning(
-        "⚠️  Neither Polars nor Pandas available - DataFrame caching disabled"
-    )
-
-
-class PolarsDataFrameHandler(CacheHandler):
+class PolarsDataFrameHandler(FormatHandler):
     """Handler for Polars DataFrames using Parquet format."""
 
     @property
@@ -337,7 +324,7 @@ class PolarsDataFrameHandler(CacheHandler):
         return "polars_dataframe"
 
 
-class PandasSeriesHandler(CacheHandler):
+class PandasSeriesHandler(FormatHandler):
     """Handler for Pandas Series using Parquet format."""
 
     @property
@@ -423,7 +410,7 @@ class PandasSeriesHandler(CacheHandler):
         return "pandas_series"
 
 
-class PolarsSeriesHandler(CacheHandler):
+class PolarsSeriesHandler(FormatHandler):
     """Handler for Polars Series using Parquet format."""
 
     @property
@@ -505,7 +492,7 @@ class PolarsSeriesHandler(CacheHandler):
         return "polars_series"
 
 
-class PandasDataFrameHandler(CacheHandler):
+class PandasDataFrameHandler(FormatHandler):
     """Handler for Pandas DataFrames using Parquet format."""
 
     @property
@@ -570,7 +557,7 @@ class PandasDataFrameHandler(CacheHandler):
         return "pandas_dataframe"
 
 
-class ArrayHandler(CacheHandler):
+class ArrayHandler(FormatHandler):
     """Handler for native NPZ arrays and read-only legacy Blosc2 payloads."""
 
     @property
@@ -783,7 +770,7 @@ class ArrayHandler(CacheHandler):
         return "array"
 
 
-class TensorFlowTensorHandler(CacheHandler):
+class TensorFlowTensorHandler(FormatHandler):
     """Handler for TensorFlow tensors using blosc2.save_tensor/load_tensor."""
 
     @property
@@ -933,7 +920,7 @@ class TensorFlowTensorHandler(CacheHandler):
         return "tensorflow_tensor"
 
 
-class ObjectHandler(CacheHandler):
+class ObjectHandler(FormatHandler):
     """Handler for general Python objects using compressed pickle."""
 
     @property
@@ -1263,7 +1250,7 @@ class HandlerRegistry:
         >>> registry = HandlerRegistry()
         >>> 
         >>> # Register custom handler
-        >>> class MyHandler(CacheHandler):
+        >>> class MyHandler(FormatHandler):
         ...     def can_handle(self, data): return isinstance(data, MyType)
         ...     # ... other methods
         >>> 
@@ -1383,7 +1370,7 @@ class HandlerRegistry:
             return getattr(config.handlers, config_attr, True)
         return True
 
-    def get_handler(self, data: Any) -> CacheHandler:
+    def get_handler(self, data: Any) -> FormatHandler:
         """Get the appropriate handler for the given data."""
         if _contains_object_dtype_array(data):
             return self._get_trusted_object_array_handler()
@@ -1400,7 +1387,7 @@ class HandlerRegistry:
 
         raise ValueError(f"No handler available for data type: {type(data)}")
 
-    def _get_trusted_object_array_handler(self) -> CacheHandler:
+    def _get_trusted_object_array_handler(self) -> FormatHandler:
         """Return ObjectHandler only for the complete trusted-array policy."""
         config = self.config
         handlers = getattr(config, "handlers", None)
@@ -1435,7 +1422,7 @@ class HandlerRegistry:
             reason=CacheReason.UNSAFE_OBJECT_ARRAY,
         )
 
-    def get_handler_by_type(self, data_type: str) -> CacheHandler:
+    def get_handler_by_type(self, data_type: str) -> FormatHandler:
         """Get handler by data type string."""
         for handler in self.handlers:
             if handler.data_type == data_type:
@@ -1448,7 +1435,7 @@ class HandlerRegistry:
         handler_type: str,
         payload_format: str,
         payload_format_version: int,
-    ) -> CacheHandler:
+    ) -> FormatHandler:
         """Resolve a declared native handler contract without opening payload bytes."""
         context = {
             "handler_type": handler_type,
@@ -1480,7 +1467,7 @@ class HandlerRegistry:
         source_version: int,
         target_format: str,
         target_version: int,
-    ) -> tuple[CacheHandler, PayloadTransformationEdge]:
+    ) -> tuple[FormatHandler, PayloadTransformationEdge]:
         """Resolve exactly one registered handler-owned directed transform.
 
         A source contract must be readable by the same store-local handler
@@ -1521,7 +1508,7 @@ class HandlerRegistry:
 
     def register_handler(
         self, 
-        handler: CacheHandler, 
+        handler: FormatHandler,
         priority: Optional[int] = None,
         name: Optional[str] = None
     ) -> None:
@@ -1529,7 +1516,7 @@ class HandlerRegistry:
         Register a custom handler with optional priority.
         
         Args:
-            handler: Handler instance implementing CacheHandler interface
+            handler: Handler instance implementing FormatHandler interface
             priority: Position in handler list (0 = highest priority, None = append to end)
             name: Optional name for the handler (defaults to handler.data_type)
             
@@ -1538,7 +1525,7 @@ class HandlerRegistry:
             ValueError: If handler with same name already exists
             
         Example:
-            >>> class ParquetHandler(CacheHandler):
+            >>> class ParquetHandler(FormatHandler):
             ...     @property
             ...     def data_type(self): return "parquet"
             ...     # ... other methods
@@ -1631,7 +1618,7 @@ class HandlerRegistry:
     
     def _validate_handler(self, handler: Any) -> None:
         """
-        Validate that handler implements required CacheHandler interface.
+        Validate that handler implements required FormatHandler interface.
         
         Raises:
             ValueError: If handler is missing required methods/properties
@@ -1663,7 +1650,7 @@ class HandlerRegistry:
         if missing:
             raise ValueError(
                 f"Handler {handler.__class__.__name__} missing required: {', '.join(missing)}. "
-                f"Handlers must implement the CacheHandler interface."
+                f"Handlers must implement the FormatHandler interface."
             )
         payload_format = handler.payload_format
         payload_format_version = handler.payload_format_version
@@ -1675,7 +1662,7 @@ class HandlerRegistry:
         if not isinstance(edges, tuple):
             raise ValueError("handler payload transformation edges must be a tuple")
         transform_implementation = getattr(type(handler), "transform_payload", None)
-        if edges and transform_implementation is CacheHandler.transform_payload:
+        if edges and transform_implementation is FormatHandler.transform_payload:
             raise ValueError(
                 "handler payload transformations require a concrete transform implementation"
             )

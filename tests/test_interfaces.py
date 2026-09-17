@@ -424,7 +424,7 @@ class TestSpecializedHandlerInterfaces:
 class TestFormatHandlerErrors:
     """Test format handler exception classes."""
 
-    def test_cache_handler_error_base(self, caplog):
+    def test_format_handler_error_base(self, caplog):
         """Test base FormatHandlerError functionality."""
         error = FormatHandlerError(
             "Test error", 
@@ -441,7 +441,7 @@ class TestFormatHandlerErrors:
         assert "handler=TestHandler" in caplog.text
         assert "data_type=test_data" in caplog.text
 
-    def test_cache_handler_error_without_optional_params(self, caplog):
+    def test_format_handler_error_without_optional_params(self, caplog):
         """Test FormatHandlerError with minimal parameters."""
         error = FormatHandlerError("Simple error")
         

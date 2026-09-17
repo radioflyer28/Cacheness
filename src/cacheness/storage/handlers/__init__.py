@@ -25,7 +25,7 @@ Usage:
         metadata = handler.put(my_array, path, config)
 """
 
-# Re-export from parent handlers.py for backward compatibility
+# Re-export implementation handlers from the package handler module.
 from cacheness.handlers import (
     # Handler classes
     ArrayHandler,
@@ -35,14 +35,14 @@ from cacheness.handlers import (
 
 # Re-export from interfaces
 from cacheness.interfaces import (
-    CacheHandler,
+    FormatHandler,
     CacheabilityChecker,
     CacheWriter,
     CacheReader,
     FormatProvider,
     DataFrameHandler,
     SeriesHandler,
-    CacheHandlerError,
+    FormatHandlerError,
     CacheWriteError,
     CacheReadError,
     CacheFormatError,
@@ -69,7 +69,7 @@ except ImportError:
 
 __all__ = [
     # Base interfaces
-    "CacheHandler",
+    "FormatHandler",
     "CacheabilityChecker",
     "CacheWriter",
     "CacheReader",
@@ -77,7 +77,7 @@ __all__ = [
     "DataFrameHandler",
     "SeriesHandler",
     # Errors
-    "CacheHandlerError",
+    "FormatHandlerError",
     "CacheWriteError",
     "CacheReadError",
     "CacheFormatError",

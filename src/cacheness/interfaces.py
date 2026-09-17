@@ -1,6 +1,6 @@
 """
-Cache Handler Interfaces
-=======================
+Format Handler Interfaces
+=========================
 
 This module defines focused interfaces for cache handlers, following the Interface Segregation Principle.
 Each interface is responsible for a specific aspect of cache handling.
@@ -148,7 +148,7 @@ class PayloadTransformationEdge:
             raise ValueError("payload transformation endpoints must be distinct")
 
 
-class CacheHandler(CacheabilityChecker, CacheWriter, CacheReader, FormatProvider):
+class FormatHandler(CacheabilityChecker, CacheWriter, CacheReader, FormatProvider):
     """
     Complete cache handler interface combining all capabilities.
 
@@ -250,7 +250,7 @@ class GuardedHandlerIO(Protocol):
 
     def put(
         self,
-        handler: CacheHandler,
+        handler: FormatHandler,
         data: Any,
         storage_id: str,
         config: Any,
@@ -264,7 +264,7 @@ class GuardedHandlerIO(Protocol):
 
 
 # Specific handler interfaces for different data categories
-class DataFrameHandler(CacheHandler):
+class DataFrameHandler(FormatHandler):
     """Specialized interface for DataFrame handlers."""
 
     @abstractmethod
@@ -281,7 +281,7 @@ class DataFrameHandler(CacheHandler):
         pass
 
 
-class SeriesHandler(CacheHandler):
+class SeriesHandler(FormatHandler):
     """Specialized interface for Series handlers."""
 
     @abstractmethod
@@ -301,7 +301,7 @@ class SeriesHandler(CacheHandler):
         pass
 
 
-class ArrayHandler(CacheHandler):
+class ArrayHandler(FormatHandler):
     """Specialized interface for array handlers."""
 
     @abstractmethod
@@ -319,7 +319,7 @@ class ArrayHandler(CacheHandler):
         pass
 
 
-class ObjectHandler(CacheHandler):
+class ObjectHandler(FormatHandler):
     """Specialized interface for general object handlers."""
 
     @abstractmethod
@@ -337,8 +337,8 @@ class ObjectHandler(CacheHandler):
 
 
 # Exception classes for handler errors
-class CacheHandlerError(Exception):
-    """Base exception for cache handler errors."""
+class FormatHandlerError(Exception):
+    """Base exception for format handler errors."""
 
     def __init__(
         self,
@@ -356,25 +356,25 @@ class CacheHandlerError(Exception):
         )
 
 
-class CacheWriteError(CacheHandlerError):
+class CacheWriteError(FormatHandlerError):
     """Exception raised when data cannot be written to cache."""
 
     pass
 
 
-class CacheReadError(CacheHandlerError):
+class CacheReadError(FormatHandlerError):
     """Exception raised when data cannot be read from cache."""
 
     pass
 
 
-class CacheFormatError(CacheHandlerError):
+class CacheFormatError(FormatHandlerError):
     """Exception raised when data format is incompatible with handler."""
 
     pass
 
 
-class CacheValidationError(CacheHandlerError):
+class CacheValidationError(FormatHandlerError):
     """Exception raised when data validation fails."""
 
     pass
@@ -385,7 +385,7 @@ class HandlerFactory(ABC):
     """Interface for creating cache handlers."""
 
     @abstractmethod
-    def create_handler(self, data_type: str, config: Any = None) -> CacheHandler:
+    def create_handler(self, data_type: str, config: Any = None) -> FormatHandler:
         """
         Create a handler for the specified data type.
 
@@ -417,7 +417,7 @@ class HandlerRegistry(ABC):
     """Interface for registering and retrieving cache handlers."""
 
     @abstractmethod
-    def register_handler(self, handler: CacheHandler, priority: int = 0) -> None:
+    def register_handler(self, handler: FormatHandler, priority: int = 0) -> None:
         """
         Register a new cache handler.
 
@@ -428,7 +428,7 @@ class HandlerRegistry(ABC):
         pass
 
     @abstractmethod
-    def get_handler(self, data: Any) -> CacheHandler:
+    def get_handler(self, data: Any) -> FormatHandler:
         """
         Get the most appropriate handler for the given data.
 
@@ -444,7 +444,7 @@ class HandlerRegistry(ABC):
         pass
 
     @abstractmethod
-    def get_handler_by_type(self, data_type: str) -> CacheHandler:
+    def get_handler_by_type(self, data_type: str) -> FormatHandler:
         """
         Get handler by data type identifier.
 
@@ -460,7 +460,7 @@ class HandlerRegistry(ABC):
         pass
 
     @abstractmethod
-    def list_handlers(self) -> Dict[str, CacheHandler]:
+    def list_handlers(self) -> Dict[str, FormatHandler]:
         """
         List all registered handlers.
 

@@ -175,7 +175,9 @@ def test_storage_handler_barrels_expose_only_format_handler_contract() -> None:
     assert "FormatHandler" in storage_handlers.__all__
     assert "FormatHandlerError" in storage_handlers.__all__
     assert not hasattr(storage, "CacheHandler")
+    assert not hasattr(storage, "CacheHandlerError")
     assert not hasattr(storage_handlers, "CacheHandler")
+    assert not hasattr(storage_handlers, "CacheHandlerError")
 
 
 def test_unregister_reports_truthful_current_registry_state() -> None:

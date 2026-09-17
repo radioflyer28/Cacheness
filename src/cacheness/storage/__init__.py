@@ -28,7 +28,8 @@ Usage:
 from importlib.util import find_spec
 
 from .handlers import (
-    CacheHandler,
+    FormatHandler,
+    FormatHandlerError,
     HandlerRegistry,
     ArrayHandler,
     ObjectHandler,
@@ -255,7 +256,8 @@ __all__ = [
     "MaintenanceRunEvidence",
     "render_migration_report",
     # Handlers
-    "CacheHandler",
+    "FormatHandler",
+    "FormatHandlerError",
     "HandlerRegistry",
     "ArrayHandler",
     "ObjectHandler",
