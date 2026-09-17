@@ -153,3 +153,34 @@ def test_qualification_guide_is_the_one_detailed_owner_of_current_nonclaims() ->
     assert "[Release qualification](RELEASE_QUALIFICATION.md)" in topology_reference
     assert "Phase 8 satisfies" not in topology_reference
     assert "## Evidence matrix" not in topology_reference
+
+
+def test_mcap_extension_tutorial_uses_one_store_local_safe_format_path() -> None:
+    """The generic format guide follows the executable MCAP-style example."""
+
+    source = _read("docs/PLUGIN_DEVELOPMENT.md")
+
+    for required in (
+        "examples/custom_mcap_format.py",
+        "FormatHandler",
+        "data_type",
+        "payload_format",
+        "payload_format_version",
+        "`.mcap`",
+        "store.handlers.register_handler",
+        "private staging",
+        "contained regular file",
+        "round trip",
+        "persisted payload identities",
+        '"actual_path": str(',
+    ):
+        assert required in source
+
+    for retired_or_out_of_scope in (
+        "CacheHandler",
+        "from cacheness import register_handler",
+        "register_blob_backend",
+        "obstore locator",
+        "conformance kit",
+    ):
+        assert retired_or_out_of_scope not in source

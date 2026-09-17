@@ -228,11 +228,15 @@ def test_public_storage_docs_keep_the_d16_transport_boundary_explicit():
     repository_root = Path(__file__).parents[1]
     documented = {
         "README.md": ("128 MiB", "opaque transport evidence", "Phase 8"),
-        "docs/API_REFERENCE.md": ("owner pinning", "SHA-256", "Phase 8"),
+        "docs/API_REFERENCE.md": (
+            "BlobStore",
+            "CacheOutcome",
+            "Release qualification",
+        ),
         "docs/PLUGIN_DEVELOPMENT.md": (
             "store.handlers.register_handler",
-            "custom endpoint",
-            "Phase 8",
+            "private staging",
+            "persisted payload identities",
         ),
         "docs/SECURITY.md": (
             "ExpectedBucketOwner",
@@ -255,3 +259,47 @@ def test_public_storage_docs_keep_the_d16_transport_boundary_explicit():
         source = (repository_root / relative_path).read_text(encoding="utf-8")
         assert '"actual_path": str(' in source
         assert '"file_path": str(' not in source
+
+
+def test_api_reference_imports_are_current_barrel_exports() -> None:
+    """The focused reference names only imports consumers can use today."""
+
+    repository_root = Path(__file__).parents[1]
+    source = (repository_root / "docs" / "API_REFERENCE.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "## Current public imports" in source
+    assert "from cacheness import CacheConfig, UnifiedCache, cached" in source
+    assert "from cacheness.storage import (" in source
+
+    top_level = (
+        "BlobStore",
+        "CacheConfig",
+        "CacheLookupResult",
+        "CacheOutcome",
+        "CachePutResult",
+        "StoreTopology",
+        "UnifiedCache",
+        "cached",
+    )
+    storage = (
+        "BackendRef",
+        "BlobEntry",
+        "BlobReceipt",
+        "CatalogQuery",
+        "CatalogSchema",
+        "FormatHandler",
+        "FormatHandlerError",
+        "HandlerRegistry",
+        "MigrationPlan",
+        "OfflineMigrationService",
+    )
+
+    import cacheness.storage as storage_module
+
+    assert all(hasattr(cacheness, name) for name in top_level)
+    assert all(hasattr(storage_module, name) for name in storage)
+    assert all(name in source for name in (*top_level, *storage))
+    assert "SqlCache" not in source
+    assert "CacheHandler" not in source
