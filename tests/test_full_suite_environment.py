@@ -25,13 +25,10 @@ PHASE6_LOCAL_SUITE_COMMAND = (
 
 TEST_ISOLATION_CLASSIFICATION = {
     "bare_collection": "uv run pytest --collect-only",
-    "bare_collection_missing": (
-        "SQLAlchemy for test_custom_metadata.py and pandas for the three SQL-cache "
-        "modules"
-    ),
+    "bare_collection_missing": "SQLAlchemy for test_custom_metadata.py",
     "mutating_cascade": (
         "three public-import failures, 23 S3/botocore setup errors, and 13 "
-        "SQL/pandas failures after nested Ruff dependency resolution"
+        "pandas failures after nested Ruff dependency resolution"
     ),
 }
 
