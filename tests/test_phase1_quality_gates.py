@@ -24,7 +24,6 @@ VALIDATION_FILE = (
 HANDLERS_FILE = PROJECT_ROOT / "src" / "cacheness" / "handlers.py"
 CATALOG_FILE = PROJECT_ROOT / "src" / "cacheness" / "storage" / "catalog.py"
 BLOB_STORE_FILE = PROJECT_ROOT / "src" / "cacheness" / "storage" / "blob_store.py"
-SQL_CACHE_FILE = PROJECT_ROOT / "src" / "cacheness" / "sql_cache.py"
 
 WAVE_ZERO_FILES = (
     "tests/test_public_api_contract.py",
@@ -32,7 +31,6 @@ WAVE_ZERO_FILES = (
     "tests/test_filesystem_containment.py",
     "tests/test_legacy_array_security.py",
     "tests/test_query_meta_security.py",
-    "tests/test_sql_cache_failure_contract.py",
     "tests/test_security_documentation.py",
 )
 
@@ -47,7 +45,6 @@ PHASE_CREATED_PYTHON_FILES = (
     "tests/test_clear_recovery.py",
     "tests/test_legacy_array_security.py",
     "tests/test_query_meta_security.py",
-    "tests/test_sql_cache_failure_contract.py",
     "tests/test_security_documentation.py",
     "tests/test_phase1_quality_gates.py",
 )
@@ -232,15 +229,15 @@ def test_catalog_query_boundary_has_no_caller_field_interpolation() -> None:
     assert not _contains_query_field_interpolation(catalog_query)
 
 
-def test_sql_cache_has_no_direct_print_failure_path() -> None:
-    """The sentinel catches direct printing and the SqlCache class remains logged."""
+def test_blob_store_has_no_direct_print_failure_path() -> None:
+    """The sentinel catches direct printing and the BlobStore remains logged."""
     assert _contains_direct_print(ast.parse('def fetch():\n    print("failure")'))
-    sql_cache = next(
+    blob_store = next(
         node
-        for node in ast.walk(_module_tree(SQL_CACHE_FILE))
-        if isinstance(node, ast.ClassDef) and node.name == "SqlCache"
+        for node in ast.walk(_module_tree(BLOB_STORE_FILE))
+        if isinstance(node, ast.ClassDef) and node.name == "BlobStore"
     )
-    assert not _contains_direct_print(sql_cache)
+    assert not _contains_direct_print(blob_store)
 
 
 def test_validation_artifact_records_terminal_approval_and_gap_wave_history() -> None:
