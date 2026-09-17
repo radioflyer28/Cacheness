@@ -137,7 +137,7 @@ def test_base_probe_freezes_the_alias_free_storage_surface_and_quiet_import():
         "cacheness.storage": ("CacheHandler", "CacheHandlerError")
     }
     assert runner.RETIRED_IMPORT_MODULES == ("cacheness.sql_cache",)
-    assert runner.RETIRED_WHEEL_MEMBERS == {"cacheness/sql_cache.py"}
+    assert runner.RETIRED_WHEEL_MODULE_STEMS == {"cacheness/sql_cache"}
 
     source = runner._base_probe_source()
     assert "redirect_stdout" in source
@@ -149,12 +149,25 @@ def test_base_probe_freezes_the_alias_free_storage_surface_and_quiet_import():
     assert "sql extra" in source
 
 
+@pytest.mark.parametrize(
+    "member",
+    (
+        "cacheness/sql_cache",
+        "cacheness/sql_cache.py",
+        "cacheness/sql_cache.pyi",
+        "cacheness/sql_cache.cpython-313-darwin.so",
+        "cacheness/sql_cache.pyc",
+        "cacheness/sql_cache/__init__.py",
+        "cacheness/sql_cache/__pycache__/__init__.cpython-313.pyc",
+        "cacheness\\sql_cache.pyi",
+    ),
+)
 def test_base_probe_rejects_a_retired_wheel_member_before_installation(
-    tmp_path: Path,
+    tmp_path: Path, member: str
 ) -> None:
-    """A stale wheel member fails before the isolated package install runs."""
+    """A stale module file or package member fails before wheel installation."""
     runner = _load_runner()
-    artifact = _synthetic_artifact(runner, tmp_path, "cacheness/sql_cache.py")
+    artifact = _synthetic_artifact(runner, tmp_path, member)
     calls: list[tuple[str, ...]] = []
 
     def fake_run(command, **_kwargs):

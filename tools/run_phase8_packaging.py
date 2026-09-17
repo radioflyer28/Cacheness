@@ -174,7 +174,7 @@ RETIRED_PUBLIC_EXPORTS: dict[str, tuple[str, ...]] = {
     "cacheness.storage": ("CacheHandler", "CacheHandlerError"),
 }
 RETIRED_IMPORT_MODULES = ("cacheness.sql_cache",)
-RETIRED_WHEEL_MEMBERS = frozenset({"cacheness/sql_cache.py"})
+RETIRED_WHEEL_MODULE_STEMS = frozenset({"cacheness/sql_cache"})
 BASE_PROBE_NAMES = (
     "public_exports",
     "blobstore_generic",
@@ -225,15 +225,41 @@ def _require_current_wheel_artifact(artifact: WheelArtifact) -> None:
         raise PackagingQualificationError("wheel artifact changed after its digest was recorded")
 
 
+def _normalized_wheel_member(member: str) -> str:
+    """Normalize one archive path without allowing it to escape its wheel root."""
+    parts: list[str] = []
+    for part in member.replace("\\", "/").split("/"):
+        if part in {"", "."}:
+            continue
+        if part == "..":
+            if parts:
+                parts.pop()
+            continue
+        parts.append(part)
+    return "/".join(parts)
+
+
+def _is_retired_wheel_member(member: str) -> bool:
+    """Return whether one normalized wheel member occupies a retired module path."""
+    normalized = _normalized_wheel_member(member).rstrip("/")
+    for module_stem in RETIRED_WHEEL_MODULE_STEMS:
+        if normalized == module_stem or normalized.startswith(f"{module_stem}/"):
+            return True
+        parent, separator, name = normalized.rpartition("/")
+        if separator and f"{parent}/{name.split('.', maxsplit=1)[0]}" == module_stem:
+            return True
+    return False
+
+
 def _assert_retired_wheel_members_are_absent(artifact: WheelArtifact) -> None:
-    """Reject the exact wheel when it still packages a retired source module."""
+    """Reject wheels that retain a retired module file or package namespace."""
     _require_current_wheel_artifact(artifact)
     try:
         with ZipFile(artifact.path) as wheel:
             members = frozenset(wheel.namelist())
     except (BadZipFile, OSError) as error:
         raise PackagingQualificationError("wheel members are unavailable") from error
-    retired_members = sorted(RETIRED_WHEEL_MEMBERS & members)
+    retired_members = sorted(member for member in members if _is_retired_wheel_member(member))
     if retired_members:
         raise PackagingQualificationError(
             f"wheel contains retired members: {', '.join(retired_members)}"
