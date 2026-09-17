@@ -16,6 +16,14 @@ _SPEC.loader.exec_module(_VERIFIER)
 audit_source = _VERIFIER.audit_source
 
 
+def test_verifier_keeps_only_the_retained_owned_matrix_live() -> None:
+    """Historical deferred SqlCache paths are not executable verifier inputs."""
+    assert _VERIFIER.PHASE4_MATRIX == _VERIFIER.load_owned_matrix()
+    assert all("sql_cache" not in path for path in _VERIFIER.PHASE4_MATRIX)
+    assert not hasattr(_VERIFIER, "DEFERRED_SQL_CACHE_PATHS")
+    assert not hasattr(_VERIFIER, "EXPECTED_DEFERRED_PATHS")
+
+
 @pytest.mark.parametrize(
     ("source", "expected"),
     [
