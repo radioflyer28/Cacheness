@@ -558,15 +558,15 @@ class TestErrorHandlingIntegration:
     def test_comprehensive_error_context_propagation(self):
         """Test that error context is properly propagated through layers."""
         @with_error_handling(
-            error_type=CacheHandlerError,
+            error_type=FormatHandlerError,
             context={"layer": "handler", "operation": "process"}
         )
         def handler_operation():
             with cache_operation_context("handler_process", item_id="123"):
                 raise RuntimeError("Core failure")
         
-        # Now the decorator should properly convert to CacheHandlerError
-        with pytest.raises(CacheHandlerError) as exc_info:
+        # Now the decorator should properly convert to FormatHandlerError
+        with pytest.raises(FormatHandlerError) as exc_info:
             handler_operation()
         
         # Check that context from decorator is preserved

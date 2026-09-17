@@ -108,8 +108,8 @@ class CacheSerializationError(CacheError):
     pass
 
 
-class CacheHandlerError(CacheError):
-    """Raised when cache handler operations fail."""
+class FormatHandlerError(CacheError):
+    """Raised when format handler operations fail."""
 
     pass
 
