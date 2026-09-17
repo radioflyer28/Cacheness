@@ -947,6 +947,6 @@ cache = cacheness(enhanced_config)
 
 ## Related Documentation
 
-- **[Configuration Guide](CONFIGURATION.md)**: Complete configuration options
+- **[Cache policy guide](CACHE_POLICY.md)**: Current cache construction and policy
 - **[Performance Guide](PERFORMANCE.md)**: Optimization strategies
 - **[API Reference](API_REFERENCE.md)**: Full API documentation

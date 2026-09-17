@@ -441,5 +441,5 @@ The library follows Python best practices for cross-platform compatibility and l
 ## Related Documentation
 
 - [Windows Compatibility](WINDOWS_COMPATIBILITY.md) - Windows-specific details and troubleshooting
-- [Configuration Guide](CONFIGURATION.md) - Platform-agnostic configuration options
+- [Cache policy guide](CACHE_POLICY.md) - Current platform-agnostic cache construction
 - [Performance Guide](PERFORMANCE.md) - Platform-specific performance tips

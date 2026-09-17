@@ -72,8 +72,9 @@ finally:
 
 Catalog updates authenticate and revise catalog data without rewriting the
 payload generation. `BlobReceipt.expectation` is a compare-and-swap precondition:
-if another operation has already changed that entry, `update_catalog` returns
-`None` instead of overwriting the newer record.
+if another operation has already changed that entry, `update_catalog` raises
+`CacheBlobLifecycleConflictError` instead of overwriting the newer record.
+`None` is reserved for an entry that is genuinely absent.
 
 After a close, an ordinary reopen validates the same store rather than creating
 another catalog or silently changing its layout:

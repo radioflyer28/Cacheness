@@ -261,7 +261,7 @@ Cacheness is designed to work with future pandas versions:
 
 ## Related Documentation
 
-- [Configuration Guide](CONFIGURATION.md) - Parquet compression settings
+- [API reference](API_REFERENCE.md) - current storage and handler surface
 - [Performance Guide](PERFORMANCE.md) - DataFrame caching optimization
 - [API Reference](API_REFERENCE.md) - Complete API documentation
 

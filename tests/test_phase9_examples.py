@@ -20,6 +20,7 @@ EXAMPLE_MARKERS = (
     ("unified_cache.py", "UNIFIED_CACHE_EXAMPLE_OK"),
     ("custom_mcap_format.py", "CUSTOM_MCAP_FORMAT_EXAMPLE_OK"),
 )
+EXAMPLE_TIMEOUT_SECONDS = 30
 
 
 def _socket_guard(temporary_directory: Path) -> Path:
@@ -60,14 +61,35 @@ def _run_example(
     environment["PYTHONPATH"] = os.pathsep.join(
         filter(None, (str(guard_directory), environment.get("PYTHONPATH")))
     )
-    return subprocess.run(
-        [sys.executable, str(ROOT / "examples" / name)],
-        cwd=run_directory,
-        env=environment,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    try:
+        return subprocess.run(
+            [sys.executable, str(ROOT / "examples" / name)],
+            cwd=run_directory,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=EXAMPLE_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as error:
+        pytest.fail(
+            f"example {name} exceeded {EXAMPLE_TIMEOUT_SECONDS}s; "
+            f"stdout={error.stdout!r}; stderr={error.stderr!r}"
+        )
+
+
+def test_example_runner_reports_a_named_finite_timeout(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A blocked example fails with its name instead of consuming the job."""
+
+    def expire(*args, **kwargs):
+        assert kwargs["timeout"] == EXAMPLE_TIMEOUT_SECONDS
+        raise subprocess.TimeoutExpired(args[0], kwargs["timeout"], "partial", "blocked")
+
+    monkeypatch.setattr(subprocess, "run", expire)
+    with pytest.raises(pytest.fail.Exception, match="memory_blob_store.py exceeded 30s"):
+        _run_example("memory_blob_store.py", tmp_path, tmp_path)
 
 
 @pytest.mark.parametrize(("name", "marker"), EXAMPLE_MARKERS)

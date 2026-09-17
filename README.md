@@ -109,10 +109,8 @@ deserialize from a hostile source. Integrity signatures detect modification but
 do not sandbox executable serializers. Read the
 [Security Guide](docs/SECURITY.md) for the canonical boundary.
 
-The local Phase 8 boundary retains a 128 MiB payload limit; opaque transport
-evidence corroborates but never replaces the canonical digest. Its documented
-projection uses `{"actual_path": str(...)}` rather than a payload locator;
-see the Phase 8 material in the qualification guide for that bounded evidence.
+The detailed payload, topology, platform, and evidence boundaries live in the
+[release qualification guide](docs/RELEASE_QUALIFICATION.md).
 
 ## Documentation
 

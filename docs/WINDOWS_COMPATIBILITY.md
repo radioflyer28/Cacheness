@@ -284,6 +284,6 @@ When adding new features:
 
 ## Related Documentation
 
-- [Configuration](CONFIGURATION.md) - Cache configuration options
+- [Cache policy](CACHE_POLICY.md) - Current cache construction and policy
 - [Performance](PERFORMANCE.md) - Performance optimization strategies
 - [Security](SECURITY.md) - Security features and best practices

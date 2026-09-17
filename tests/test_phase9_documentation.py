@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
+from urllib.parse import unquote
 
 
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -46,6 +48,12 @@ def test_readme_is_a_local_ready_blobstore_first_gateway() -> None:
         "S3",
     )
     assert all(term not in source for term in retired_or_unqualified)
+    for qualification_detail in (
+        "128 MiB",
+        "opaque transport evidence",
+        '"actual_path"',
+    ):
+        assert qualification_detail not in source
 
 
 def test_base_checkout_install_is_frozen_and_has_no_extra_opt_in() -> None:
@@ -92,6 +100,8 @@ def test_task_guides_own_their_current_capabilities() -> None:
     assert "put_entry" in blob_store
     assert "query_catalog" in blob_store
     assert "update_catalog" in blob_store
+    assert "CacheBlobLifecycleConflictError" in blob_store
+    assert "`None` is reserved for an entry that is genuinely absent" in blob_store
     assert "reopen" in blob_store.lower()
     assert "store.close()" in blob_store
 
@@ -210,3 +220,19 @@ def test_navigation_has_no_pre_cutover_configuration_or_backend_branches() -> No
         "RELEASE_QUALIFICATION.md",
     ):
         assert current_guide in navigation
+
+
+def test_all_relative_documentation_links_resolve() -> None:
+    """Deleting obsolete guides cannot leave supported Markdown links dangling."""
+
+    markdown_link = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
+    missing: list[str] = []
+    for document in sorted((PROJECT_ROOT / "docs").glob("*.md")):
+        for raw_target in markdown_link.findall(document.read_text(encoding="utf-8")):
+            target = raw_target.split("#", 1)[0]
+            if not target or target.startswith("#") or re.match(r"^[a-z]+:", target):
+                continue
+            resolved = (document.parent / unquote(target)).resolve()
+            if not resolved.exists():
+                missing.append(f"{document.name}: {raw_target}")
+    assert missing == []

@@ -672,9 +672,7 @@ def audit_documentation(root: Path = REPOSITORY_ROOT) -> tuple[str, ...]:
     """
     requirements = {
         "README.md": (
-            "128 MiB",
-            "opaque transport evidence",
-            "Phase 8",
+            "release qualification guide",
         ),
         "docs/API_REFERENCE.md": (
             "FormatHandler",

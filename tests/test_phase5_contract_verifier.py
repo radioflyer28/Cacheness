@@ -181,7 +181,7 @@ def test_documentation_declares_requirements_not_an_observed_remote_status() -> 
     # Mutable evidence status belongs only to RELEASE_QUALIFICATION.md.  The
     # static topology/catalog and historical API-coverage contracts must not
     # mirror an observation.
-    for path in (CATALOG_PATH, COVERAGE_PATH):
+    for path in (CATALOG_PATH, INITIALIZATION_PATH, MIGRATION_PATH, COVERAGE_PATH):
         text = path.read_text(encoding="utf-8")
         assert not re.search(r"\b(?:QUALIFIED|UNAVAILABLE|NOT_QUALIFIED)\b", text)
         assert "latest observed status" not in text.lower()
@@ -195,9 +195,42 @@ def test_documentation_declares_requirements_not_an_observed_remote_status() -> 
     assert "Amazon S3" in topology
     assert "shared external manifest signing key" in topology
     assert "Ordinary opens then validate" in initialization
-    assert "read-only" in migration
-    assert "stopped-worker" in migration
+    assert "The stopped-worker maintenance sequence is explicit" in migration
+    assert "inspection is complete and non-mutating" in migration
     assert "S3 and PostgreSQL remain `NOT_QUALIFIED`" in qualification
+
+
+def test_relocated_document_contract_rejects_generic_word_substitution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Generic read-only/stopped-worker prose cannot replace the actual rule."""
+    verifier = _load_verifier()
+    source_paths = {
+        "CATALOG_PATH": CATALOG_PATH,
+        "INITIALIZATION_PATH": INITIALIZATION_PATH,
+        "MIGRATION_PATH": MIGRATION_PATH,
+        "QUALIFICATION_PATH": QUALIFICATION_PATH,
+        "COVERAGE_PATH": COVERAGE_PATH,
+    }
+    copied: dict[str, Path] = {}
+    for attribute, source in source_paths.items():
+        destination = tmp_path / source.name
+        destination.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+        monkeypatch.setattr(verifier, attribute, destination)
+        copied[attribute] = destination
+
+    migration = copied["MIGRATION_PATH"]
+    source = migration.read_text(encoding="utf-8").replace(
+        "The stopped-worker maintenance sequence is explicit",
+        "This generic read-only note mentions stopped-worker operation",
+        1,
+    )
+    migration.write_text(source, encoding="utf-8")
+
+    assert (
+        "migration guide omits: The stopped-worker maintenance sequence is explicit"
+        in verifier.verify_document_contract()
+    )
 
 
 def test_api_coverage_is_complete_and_every_opt_out_is_reasoned() -> None:

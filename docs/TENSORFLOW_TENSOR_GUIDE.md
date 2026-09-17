@@ -647,6 +647,6 @@ hybrid_cache = HybridTensorCache(enable_tensors=True)
 
 ## Related Documentation
 
-- **[Configuration Guide](CONFIGURATION.md)**: TensorFlow handler configuration
+- **[Security guide](SECURITY.md)**: Trusted-payload and handler safety boundaries
 - **[Performance Guide](PERFORMANCE.md)**: Tensor-specific optimizations  
 - **[API Reference](API_REFERENCE.md)**: Complete tensor handling API

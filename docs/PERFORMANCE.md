@@ -169,7 +169,7 @@ Based on comprehensive benchmarking, here's how each backend performs across dif
 
 ### 1. Choose the Right Backend
 
-**This is the most critical performance decision.** See the [Backend Selection Guide](BACKEND_SELECTION.md) for comprehensive comparison and recommendations.
+**This is the most critical performance decision.** See [Release qualification](RELEASE_QUALIFICATION.md) for the current topology and performance boundaries.
 
 **Quick Reference:**
 - **< 200 entries + single process**: JSON backend  

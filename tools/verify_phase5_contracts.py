@@ -208,7 +208,13 @@ def verify_document_contract() -> tuple[str, ...]:
                 initialization,
                 ("Ordinary opens then validate",),
             ),
-            "migration guide": (migration, ("read-only", "stopped-worker")),
+            "migration guide": (
+                migration,
+                (
+                    "The stopped-worker maintenance sequence is explicit",
+                    "inspection is complete and non-mutating",
+                ),
+            ),
             "qualification owner": (
                 qualification,
                 ("S3 and PostgreSQL remain `NOT_QUALIFIED`",),
@@ -220,7 +226,7 @@ def verify_document_contract() -> tuple[str, ...]:
                     errors.append(f"{owner} omits: {required}")
 
         # Mutable evidence status is permitted only in the qualification owner.
-        for path in (CATALOG_PATH, COVERAGE_PATH):
+        for path in (CATALOG_PATH, INITIALIZATION_PATH, MIGRATION_PATH, COVERAGE_PATH):
             text = path.read_text(encoding="utf-8")
             if re.search(r"\b(?:QUALIFIED|UNAVAILABLE|NOT_QUALIFIED)\b", text):
                 errors.append(
