@@ -386,7 +386,7 @@ _ALL_ONLY_NODES = (
     "tests/test_phase6_removal_contract.py::test_predicate_and_global_clear_delegate_exact_removal_to_blob_store",
     "tests/test_phase6_decorator_contract.py::test_function_clear_preserves_a_concurrently_replaced_generation",
     "tests/test_migration_public_contract.py::test_external_api_coverage_declaration_is_detector_backed",
-    "tests/test_public_api_contract.py::test_optional_sqlcache_surface_remains_separate_when_dependency_is_blocked",
+    "tests/test_phase10_sqlcache_removal.py::test_public_names_and_module_are_naturally_absent",
     "tests/test_full_suite_environment.py::test_phase071_runtime_extras_keep_boto3_in_test_tooling_only",
     "tests/qualification/test_live_evidence.py::test_live_qualification_requires_an_explicit_region_without_owner_pinning",
     "tests/test_phase071_contract_verifier.py::test_fixed_manifest_covers_all_phase_plans_decisions_and_non_claims",
