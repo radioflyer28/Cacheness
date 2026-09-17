@@ -10,7 +10,22 @@ from urllib.parse import unquote
 PROJECT_ROOT = Path(__file__).parent.parent
 README = PROJECT_ROOT / "README.md"
 DOCS_INDEX = PROJECT_ROOT / "docs" / "README.md"
+API_REFERENCE = PROJECT_ROOT / "docs" / "API_REFERENCE.md"
+STORAGE_MIGRATION = PROJECT_ROOT / "docs" / "STORAGE_MIGRATION.md"
 QUALIFICATION_GUIDE = PROJECT_ROOT / "docs" / "RELEASE_QUALIFICATION.md"
+CUTOVER_NOTE = (
+    "Cacheness no longer ships SqlCache or a range-aware SQL pull-through cache."
+)
+CUTOVER_NOTE_OWNERS = (API_REFERENCE, STORAGE_MIGRATION, DOCS_INDEX)
+NON_OWNER_CURRENT_GUIDES = (
+    README,
+    PROJECT_ROOT / "docs" / "BLOB_STORE.md",
+    PROJECT_ROOT / "docs" / "CACHE_POLICY.md",
+    PROJECT_ROOT / "docs" / "PLUGIN_DEVELOPMENT.md",
+    PROJECT_ROOT / "docs" / "STORAGE_INITIALIZATION.md",
+    PROJECT_ROOT / "docs" / "PANDAS_API_AUDIT.md",
+    PROJECT_ROOT / "docs" / "CROSS_PLATFORM_GUIDE.md",
+)
 
 
 def _read(relative_path: str) -> str:
@@ -42,6 +57,7 @@ def test_readme_is_a_local_ready_blobstore_first_gateway() -> None:
     retired_or_unqualified = (
         "SqlCache",
         "SQL pull-through",
+        "range-aware SQL",
         "cacheness()",
         "Windows",
         "PostgreSQL",
@@ -83,8 +99,6 @@ def test_task_first_navigation_links_current_journeys_and_single_matrix() -> Non
     ):
         assert document in source
 
-    assert "SqlCache" not in source
-    assert "SQL pull-through" not in source
     assert "NOT_QUALIFIED" not in source
 
 
@@ -93,7 +107,7 @@ def test_task_guides_own_their_current_capabilities() -> None:
     blob_store = _read("docs/BLOB_STORE.md")
     cache_policy = _read("docs/CACHE_POLICY.md")
     initialization = _read("docs/STORAGE_INITIALIZATION.md")
-    migration = _read("docs/STORAGE_MIGRATION.md")
+    migration = STORAGE_MIGRATION.read_text(encoding="utf-8")
 
     assert "from cacheness.storage import (" in blob_store
     assert "store.initialize()" in blob_store
@@ -183,9 +197,43 @@ def test_task_guides_own_their_current_capabilities() -> None:
     assert "remote payload effects remain verifiable external effects" in migration
     assert "This guide makes no promise of automatic or seamless migration" in migration
 
-    for source in (blob_store, cache_policy, initialization, migration):
+    for source in (blob_store, cache_policy, initialization):
         assert "SqlCache" not in source
         assert "SQL pull-through" not in source
+        assert "range-aware SQL" not in source
+
+
+def test_canonical_cutover_notes_have_exact_owners_and_boundaries() -> None:
+    """Only canonical guidance may name the retired product and its limits."""
+    sources = {
+        owner.relative_to(PROJECT_ROOT).as_posix(): owner.read_text(encoding="utf-8")
+        for owner in CUTOVER_NOTE_OWNERS
+    }
+
+    assert tuple(sources) == (
+        "docs/API_REFERENCE.md",
+        "docs/STORAGE_MIGRATION.md",
+        "docs/README.md",
+    )
+    for source in sources.values():
+        assert CUTOVER_NOTE in source
+        assert "UnifiedCache" in source
+        assert "object/function caching" in source
+        assert "BlobStore" in source
+        assert "object persistence" in source
+        assert "no in-package replacement" in source
+        assert "caller-owned SQL tables" in source
+        assert "untouched" in source
+        assert "unsupported" in source
+
+
+def test_non_owner_current_guides_cannot_promote_the_retired_product() -> None:
+    """Removal wording belongs only to the three bounded canonical owners."""
+    retired_product_terms = ("SqlCache", "SQL pull-through", "range-aware SQL")
+
+    for guide in NON_OWNER_CURRENT_GUIDES:
+        source = guide.read_text(encoding="utf-8")
+        assert all(term not in source for term in retired_product_terms), guide
 
 
 def test_qualification_guide_is_the_one_detailed_owner_of_current_nonclaims() -> None:
@@ -271,6 +319,9 @@ def test_navigation_has_no_pre_cutover_configuration_or_backend_branches() -> No
         "BACKEND_SELECTION.md",
         "CONFIGURATION.md",
         "DEVELOPMENT_PLANNING.md",
+        "SQL_CACHE.md",
+        "CUSTOM_GAP_DETECTION.md",
+        "ARBITRARY_TIME_INCREMENTS.md",
     ):
         assert retired_guide not in navigation
 
