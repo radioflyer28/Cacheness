@@ -1,422 +1,131 @@
-# BlobStore - Low-Level Storage API
+# Store objects with `BlobStore`
 
-`BlobStore` provides a simple key-value storage API for Python objects with metadata support. Unlike the high-level `cacheness()` API, BlobStore does **not** implement caching semantics (TTL, eviction) - it's pure storage.
+`BlobStore` is Cacheness's storage foundation. It owns the authoritative
+catalog and the payload lifecycle; it is useful whether or not an application
+also layers cache policy above a separate store.
 
-## When to Use BlobStore
+Choose a topology explicitly, initialize it before workers share it, and close
+it when the application is done. The four canonical examples are executable
+reference implementations, including the [memory round trip](../examples/memory_blob_store.py)
+and the [durable catalog journey](../examples/durable_catalog_store.py).
 
-Use `BlobStore` when you need:
+## Store, query, update, and reopen a local catalog
 
-- **Pure storage** without caching semantics (no TTL, no eviction)
-- **Explicit key control** - you manage storage keys directly
-- **Content deduplication** - identical objects share storage automatically
-- **Metadata-rich storage** - attach queryable metadata to stored objects
-
-Use `cacheness()` or `@cached` when you need:
-
-- **Function memoization** - automatic caching of function results
-- **TTL-based expiration** - cached data expires after a time period
-- **Eviction policies** - automatic cleanup based on size or count
-
-## Quick Start
+The local durable topology uses a filesystem payload participant and a SQLite
+catalog authority. Define catalog fields up front, then use receipts as the
+exact identity for later updates or deletion:
 
 ```python
-from cacheness.storage import BlobStore
+from pathlib import Path
 
-# Create a blob store
-store = BlobStore(
-    cache_dir="./my_storage",
-    backend="sqlite",      # "json" or "sqlite"
-    compression="lz4",     # Compression codec
+from cacheness.storage import (
+    BackendRef,
+    BlobStore,
+    CatalogField,
+    CatalogPredicate,
+    CatalogQuery,
+    CatalogSchema,
+    StoreTopology,
 )
 
-# Store data with metadata
-key = store.put(
-    my_model,
-    key="model_v1",
-    metadata={"accuracy": 0.95, "author": "alice"}
+root = Path("./local-artifacts")
+topology = StoreTopology(
+    payload=BackendRef(name="filesystem", options={"base_dir": root}),
+    authority=BackendRef(name="sqlite", options={"root": root}),
+)
+catalog = CatalogSchema(
+    schema_id="artifacts",
+    fields=(
+        CatalogField("kind", "string", queryable=True),
+        CatalogField("reviewed", "boolean", default=False, queryable=True),
+    ),
 )
 
-# Retrieve data
-model = store.get("model_v1")
+store = BlobStore(topology, cache_dir=root)
+try:
+    store.initialize()
+    receipt = store.put_entry(
+        {"dataset": "measurements", "rows": 3},
+        key="measurement-set-001",
+        metadata={"owner": "research"},
+        catalog_schema=catalog,
+        catalog_values={"kind": "measurement"},
+    )
 
-# Get metadata only (fast - no deserialization)
-meta = store.get_metadata("model_v1")
+    page = store.query_catalog(
+        CatalogQuery(predicates=(CatalogPredicate("kind", "eq", "measurement"),)),
+        schema=catalog,
+    )
+    assert [entry.key for entry in page.entries] == [receipt.key]
 
-# List keys
-all_keys = store.list()
-model_keys = store.list(prefix="model_")
-
-# Delete
-store.delete("model_v1")
+    updated = store.update_catalog(
+        receipt.key,
+        catalog_schema=catalog,
+        catalog_values={"reviewed": True},
+        expected=receipt.expectation,
+    )
+    assert updated is not None
+    assert store.get(receipt.key) == {"dataset": "measurements", "rows": 3}
+finally:
+    store.close()
 ```
 
-## API Reference
+Catalog updates authenticate and revise catalog data without rewriting the
+payload generation. `BlobReceipt.expectation` is a compare-and-swap precondition:
+if another operation has already changed that entry, `update_catalog` returns
+`None` instead of overwriting the newer record.
 
-### Constructor
-
-```python
-BlobStore(
-    cache_dir: str | Path = ".blobstore",
-    backend: str | MetadataBackend = None,
-    compression: str = "lz4",
-    compression_level: int = 3,
-    content_addressable: bool = False,
-)
-```
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `cache_dir` | `str \| Path` | `.blobstore` | Directory for storing blobs and metadata |
-| `backend` | `str \| MetadataBackend` | `None` (json) | Metadata backend: `"json"`, `"sqlite"`, or custom instance |
-| `compression` | `str` | `"lz4"` | Compression codec (lz4, zstd, gzip, blosclz) |
-| `compression_level` | `int` | `3` | Compression level (1-9) |
-| `content_addressable` | `bool` | `False` | Use content hash as key (enables deduplication) |
-
-### Methods
-
-#### `put(data, key=None, metadata=None) -> str`
-
-Store a blob with optional metadata.
+After a close, an ordinary reopen validates the same store rather than creating
+another catalog or silently changing its layout:
 
 ```python
-# Store with explicit key
-key = store.put(model, key="fraud_detector_v1")
-
-# Store with auto-generated key
-key = store.put(model)  # Returns generated key like "a1b2c3d4e5f6g7h8"
-
-# Store with metadata
-key = store.put(
-    model,
-    key="fraud_detector_v1",
-    metadata={
-        "accuracy": 0.95,
-        "training_date": "2024-01-15",
-        "author": "alice"
+reopened = BlobStore(topology, cache_dir=root)
+try:
+    reopened.initialize()
+    assert reopened.get("measurement-set-001") == {
+        "dataset": "measurements",
+        "rows": 3,
     }
-)
+finally:
+    reopened.close()
 ```
 
-#### `get(key) -> Any | None`
+## Read, inspect, and delete
 
-Retrieve a blob by key. Returns `None` if not found.
+`store.get(key)` returns the deserialized value or `None` when no canonical
+entry exists. `store.get_entry_info(key)` exposes authenticated entry metadata
+without reading the payload. For a deletion that must target the exact version
+you observed, retain the receipt expectation:
 
 ```python
-model = store.get("fraud_detector_v1")
-if model is None:
-    print("Not found")
+deleted = store.delete(receipt.key, expected=receipt.expectation)
+assert deleted
 ```
 
-#### `get_metadata(key) -> dict | None`
+Deletion and bounded catalog work are lifecycle operations. They act on an
+authority-selected generation; filesystem presence is not a second source of
+truth.
 
-Get metadata without loading the blob content. Fast for checking properties.
+## Add a native format
+
+The store chooses a built-in format handler from the value being written. To
+add an application format, register a `FormatHandler` on the store that will
+use it:
 
 ```python
-meta = store.get_metadata("fraud_detector_v1")
-if meta:
-    print(f"Accuracy: {meta['metadata']['accuracy']}")
-    print(f"Size: {meta['file_size']} bytes")
+store.handlers.register_handler(my_format_handler)
 ```
 
-#### `update_metadata(key, metadata) -> bool`
-
-Update metadata for an existing blob without re-storing the data.
-
-```python
-store.update_metadata("fraud_detector_v1", {
-    "deployed": True,
-    "deployment_date": "2024-01-20"
-})
-```
-
-#### `delete(key) -> bool`
-
-Delete a blob and its metadata. Returns `True` if deleted.
-
-```python
-if store.delete("old_model"):
-    print("Deleted")
-```
-
-#### `exists(key) -> bool`
-
-Check if a blob exists (both metadata and file).
-
-```python
-if store.exists("fraud_detector_v1"):
-    model = store.get("fraud_detector_v1")
-```
-
-#### `list(prefix=None, metadata_filter=None) -> List[str]`
-
-List blob keys with optional filtering.
-
-```python
-# All keys
-all_keys = store.list()
-
-# Keys starting with prefix
-model_keys = store.list(prefix="model_")
-
-# Filter by metadata (exact match)
-deployed = store.list(metadata_filter={"deployed": True})
-```
-
-#### `clear() -> int`
-
-Remove all blobs. Returns count of removed blobs.
-
-```python
-count = store.clear()
-print(f"Removed {count} blobs")
-```
-
-#### `close()`
-
-Close the store and release resources.
-
-```python
-store.close()
-
-# Or use context manager
-with BlobStore("./store") as store:
-    store.put(data, key="key")
-# Automatically closed
-```
-
-## Content-Addressable Storage
-
-When `content_addressable=True`, the blob key is computed from the content hash. This enables automatic deduplication - storing the same data twice returns the same key.
-
-```python
-store = BlobStore(
-    cache_dir="./models",
-    content_addressable=True,
-)
-
-# Store model
-key1 = store.put(model_a)  # Returns "8f14e45f..."
-
-# Store identical model - same key, no duplicate storage
-key2 = store.put(model_a)  # Returns "8f14e45f..." (same key)
-
-assert key1 == key2  # True - content is deduplicated
-```
-
-This is useful for:
-- **Model versioning**: Identical models share storage
-- **Artifact deduplication**: Pipeline outputs are deduplicated automatically
-- **Immutable storage**: Keys are deterministic from content
-
-## Metadata Backends
-
-### JSON Backend (Default)
-
-Simple file-based storage. Good for small datasets.
-
-```python
-store = BlobStore(cache_dir="./store", backend="json")
-```
-
-Creates `cache_metadata.json` in the cache directory.
-
-### SQLite Backend
-
-Database-backed storage. Better for larger datasets and concurrent access.
-
-```python
-store = BlobStore(cache_dir="./store", backend="sqlite")
-```
-
-Creates `cache_metadata.db` in the cache directory.
-
-## Compression Options
-
-BlobStore supports multiple compression codecs:
-
-| Codec | Speed | Ratio | Notes |
-|-------|-------|-------|-------|
-| `lz4` | ⚡ Fastest | Good | Default, best for most cases |
-| `zstd` | Fast | Better | Good balance of speed/ratio |
-| `gzip` | Slow | Good | Wide compatibility |
-| `blosclz` | Fast | Good | Good for numeric data |
-
-```python
-# Fast compression (default)
-store = BlobStore(compression="lz4")
-
-# Better compression ratio
-store = BlobStore(compression="zstd", compression_level=6)
-```
-
-## Type-Aware Serialization
-
-BlobStore automatically selects the best serialization format based on data type:
-
-| Data Type | Format | Extension |
-|-----------|--------|-----------|
-| NumPy arrays | Blosc2 | `.b2nd` |
-| Pandas DataFrames | Parquet | `.parquet` |
-| General objects | Pickle | `.pkl` |
-
-```python
-import numpy as np
-import pandas as pd
-
-# NumPy arrays use efficient Blosc2 format
-store.put(np.random.randn(1000, 1000), key="array")
-
-# DataFrames use Parquet
-store.put(pd.DataFrame({"a": [1, 2, 3]}), key="df")
-
-# Other objects use pickle
-store.put({"config": "value"}, key="config")
-```
-
-## Example: ML Model Storage
-
-```python
-from cacheness.storage import BlobStore
-from datetime import datetime
-
-# Create model store
-model_store = BlobStore(
-    cache_dir="./models",
-    backend="sqlite",
-    content_addressable=True,  # Deduplicate identical models
-)
-
-# Store model with rich metadata
-model_store.put(
-    trained_model,
-    key="fraud_detector_v2.1",
-    metadata={
-        "model_name": "fraud_detector",
-        "version": "2.1",
-        "accuracy": 0.95,
-        "f1_score": 0.92,
-        "author": "alice",
-        "training_date": datetime.now().isoformat(),
-        "hyperparameters": {
-            "learning_rate": 0.001,
-            "epochs": 100,
-        }
-    }
-)
-
-# List all fraud detector versions
-versions = model_store.list(prefix="fraud_detector")
-for key in versions:
-    meta = model_store.get_metadata(key)
-    nested = meta.get("metadata", {})
-    print(f"{key}: accuracy={nested.get('accuracy')}")
-
-# Mark model as deployed
-model_store.update_metadata("fraud_detector_v2.1", {
-    "deployed": True,
-    "deployment_env": "production",
-})
-```
-
-## Example: Pipeline Artifacts
-
-```python
-from cacheness.storage import BlobStore
-from datetime import datetime
-
-# Create artifact store
-artifact_store = BlobStore(
-    cache_dir="./pipeline_artifacts",
-    backend="sqlite",
-    compression="zstd",
-)
-
-run_id = f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-
-# Stage 1: Extract
-raw_data = extract_from_source()
-artifact_store.put(
-    raw_data,
-    key=f"{run_id}/raw_data",
-    metadata={
-        "stage": "extract",
-        "row_count": len(raw_data),
-        "depends_on": None,
-    }
-)
-
-# Stage 2: Transform
-transformed = transform(raw_data)
-artifact_store.put(
-    transformed,
-    key=f"{run_id}/transformed",
-    metadata={
-        "stage": "transform",
-        "row_count": len(transformed),
-        "depends_on": f"{run_id}/raw_data",  # Track lineage
-    }
-)
-
-# List artifacts for this run
-for key in artifact_store.list(prefix=run_id):
-    meta = artifact_store.get_metadata(key)
-    print(f"{key}: {meta['metadata']['stage']}")
-```
-
-## Example: Training Checkpoints
-
-```python
-from cacheness.storage import BlobStore
-
-checkpoint_store = BlobStore(
-    cache_dir="./checkpoints",
-    compression="lz4",  # Fast for frequent saves
-)
-
-# Training loop with periodic checkpoints
-for epoch in range(100):
-    loss = train_epoch(model)
-    
-    if epoch % 10 == 0:
-        checkpoint_store.put(
-            model.state_dict(),
-            key=f"checkpoint_epoch_{epoch:04d}",
-            metadata={
-                "epoch": epoch,
-                "loss": loss,
-                "learning_rate": current_lr,
-            }
-        )
-
-# Find best checkpoint
-best_loss = float("inf")
-best_key = None
-for key in checkpoint_store.list(prefix="checkpoint_"):
-    meta = checkpoint_store.get_metadata(key)
-    loss = meta["metadata"]["loss"]
-    if loss < best_loss:
-        best_loss = loss
-        best_key = key
-
-# Resume from best checkpoint
-state = checkpoint_store.get(best_key)
-model.load_state_dict(state)
-```
-
-## Comparison: BlobStore vs cacheness()
-
-| Feature | `BlobStore` | `cacheness()` |
-|---------|-------------|---------------|
-| **Use case** | Pure storage | Function caching |
-| **TTL support** | ❌ No | ✅ Yes |
-| **Eviction policies** | ❌ No | ✅ Yes (LRU, size-based) |
-| **Function memoization** | ❌ No | ✅ Yes |
-| **Custom metadata** | ✅ Yes | ✅ Yes |
-| **Content-addressable** | ✅ Yes | ❌ No |
-| **Key-value API** | ✅ Direct | Abstracted |
-
-## Related Documentation
-
-- [Configuration](CONFIGURATION.md) - Compression and serialization options
-- [Custom Metadata](CUSTOM_METADATA.md) - SQLAlchemy-based queryable metadata
-- [Backend Selection](BACKEND_SELECTION.md) - Choosing metadata backends
+The [FormatHandler tutorial](PLUGIN_DEVELOPMENT.md) covers the path-based
+extension contract, stable data and payload identities, one safe suffix, and a
+custom MCAP-style round trip. Format handlers receive private staging or
+snapshot paths, never a managed payload locator.
+
+## Local durability boundary
+
+For this filesystem-plus-SQLite topology, the SQLite transaction is the
+catalog authority. Immutable payload generations and reconciliation provide
+crash consistency across the external filesystem boundary; they are not one
+cross-resource ACID transaction. See [initialization](STORAGE_INITIALIZATION.md),
+[migration and rebuild](STORAGE_MIGRATION.md), and the detailed
+[qualification guide](RELEASE_QUALIFICATION.md) for the declared limits.

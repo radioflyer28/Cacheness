@@ -4,9 +4,14 @@
 
 `BlobStore` is the only payload and canonical-catalog lifecycle owner.
 `UnifiedCache` is a policy layer over one `BlobStore`; it does not migrate a
-store. `SqlCache` is a separate SQL pull-through subsystem. This guide exposes
-the single supported maintenance surface: the Python-library
-`cacheness.storage.OfflineMigrationService` API.
+store. This guide exposes the single supported maintenance surface: the
+Python-library `cacheness.storage.OfflineMigrationService` API.
+
+The stopped-worker maintenance sequence is explicit: inventory the source,
+stage a copy into the selected destination, verify every candidate, then switch
+the authority selection through activation. If the source is incompatible or
+crosses a supported boundary, use the separately confirmed rebuild path rather
+than treating rebuild as a partial migration.
 
 There is no CLI, `project.scripts` entry, global maintenance service, or hidden
 latest-run lookup. If a command-line adapter is added in a future release, it
@@ -24,10 +29,11 @@ destination roots. The work directory stores authenticated maintenance evidence
 only: it is not a payload location, lifecycle authority, or candidate-discovery
 mechanism.
 
-Normal `BlobStore` construction and `initialize()` are validation-only. They
-never migrate, rebuild, adopt, purge, or initialize an unsupported layout. A
-failed version check is a typed migration-or-rebuild requirement, not an
-invitation to remove files or retry with different constructor options.
+Ordinary opens of an existing `BlobStore` and `initialize()` validate the
+layout. They never migrate, rebuild, adopt, or purge an unsupported layout. A
+deliberate initializer may create a fresh current store before workers share
+it, but a failed version check is a typed migration-or-rebuild requirement, not
+an invitation to remove files or retry with different constructor options.
 
 Every run supplies all safety inputs explicitly:
 
