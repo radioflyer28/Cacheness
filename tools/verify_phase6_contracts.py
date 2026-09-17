@@ -37,7 +37,6 @@ PHASE6_CONTRACT_NODES = (
     "tests/contracts/test_phase6_topology_policy.py",
     "tests/test_catalog_projection.py::"
     "test_json_projection_rejects_incompatible_derived_documents",
-    "tests/test_sql_cache.py",
 )
 RETAINED_LIFECYCLE_NODES = (
     "tests/test_phase3_local_workflows.py",
@@ -60,7 +59,6 @@ CACH_REQUIREMENT_NODES = {
     "CACH-06": ("tests/test_phase6_public_api_contract.py",),
 }
 FIXED_REGRESSION_NODES = {
-    "CACH-07 SqlCache regression": ("tests/test_sql_cache.py",),
     "Canonical decorator and key regressions": (
         "tests/test_decorators.py",
         "tests/test_cache_key_consistency.py",
@@ -86,7 +84,6 @@ _PLAN_09_11_CANONICAL_CUTOVER_NODES = (
 CANONICAL_CUTOVER_NODES = tuple(_PLAN_09_11_CANONICAL_CUTOVER_NODES)
 _CUTOVER_REQUIREMENT_LABELS = (
     *CACH_REQUIREMENT_NODES,
-    "CACH-07 SqlCache regression",
 )
 _CACHE_CONFIG_KEYWORDS = frozenset(
     {
