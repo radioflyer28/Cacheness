@@ -745,3 +745,14 @@ Plans:
 Plans:
 
 - [ ] Replace stale global cache-handler examples with `store.handlers.register_handler(...)`, document lifecycle ownership and migration compatibility responsibilities, and provide a contract-test kit; promote with $gsd-review-backlog when ready.
+
+### Phase 11: Clean supplemental documentation and normalize validation evidence
+
+**Goal:** [To be planned]
+**Requirements**: TBD
+**Depends on:** Phase 10
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 11 to break down)
