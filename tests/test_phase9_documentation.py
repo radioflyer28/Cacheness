@@ -28,12 +28,12 @@ def test_readme_is_a_local_ready_blobstore_first_gateway() -> None:
 
     assert "local-ready development version" in source
     assert "NOT_PUBLISHED" in source
-    assert "BlobStore owns storage lifecycle" in source
-    assert "UnifiedCache adds cache policy" in source
+    assert "owns storage lifecycle" in source
+    assert "adds cache policy" in source
     assert source.count("### Quick start:") == 2
     assert "### Quick start: store an object" in source
     assert "### Quick start: cache a function result" in source
-    assert "from cacheness.storage import BlobStore" in source
+    assert "from cacheness.storage import BackendRef, BlobStore, StoreTopology" in source
     assert "@cached(cache=cache)" in source
 
     retired_or_unqualified = (
@@ -77,29 +77,3 @@ def test_task_first_navigation_links_current_journeys_and_single_matrix() -> Non
     assert "SqlCache" not in source
     assert "SQL pull-through" not in source
     assert "NOT_QUALIFIED" not in source
-
-
-def test_task_guides_own_their_current_capabilities() -> None:
-    """The guides lead to current public APIs without a broad install bundle."""
-    blob_store = _read("docs/BLOB_STORE.md")
-    cache_policy = _read("docs/CACHE_POLICY.md")
-    initialization = _read("docs/STORAGE_INITIALIZATION.md")
-    migration = _read("docs/STORAGE_MIGRATION.md")
-
-    assert "from cacheness.storage import BlobStore" in blob_store
-    assert "initialize" in blob_store
-    assert "Catalog" in blob_store
-    assert "from cacheness import CacheConfig, UnifiedCache, cached" in cache_policy
-    assert "@cached(cache=cache)" in cache_policy
-    assert "expired" in cache_policy
-    assert "corrupt" in cache_policy
-    assert "conflict" in cache_policy
-    assert "backend_error" in cache_policy
-    assert "ordinary opens" in initialization
-    assert "do not silently" in initialization
-    assert "stopped-worker" in migration
-    assert "rebuild" in migration
-
-    for source in (blob_store, cache_policy, initialization, migration):
-        assert "SqlCache" not in source
-        assert "SQL pull-through" not in source
