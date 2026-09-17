@@ -77,3 +77,41 @@ def test_task_first_navigation_links_current_journeys_and_single_matrix() -> Non
     assert "SqlCache" not in source
     assert "SQL pull-through" not in source
     assert "NOT_QUALIFIED" not in source
+
+
+def test_task_guides_own_their_current_capabilities() -> None:
+    """Guides bind store, cache, and maintenance work to current contracts."""
+    blob_store = _read("docs/BLOB_STORE.md")
+    cache_policy = _read("docs/CACHE_POLICY.md")
+    initialization = _read("docs/STORAGE_INITIALIZATION.md")
+    migration = _read("docs/STORAGE_MIGRATION.md")
+
+    assert "from cacheness.storage import (" in blob_store
+    assert "store.initialize()" in blob_store
+    assert "put_entry" in blob_store
+    assert "query_catalog" in blob_store
+    assert "update_catalog" in blob_store
+    assert "reopen" in blob_store.lower()
+    assert "store.close()" in blob_store
+
+    assert "from cacheness import CacheConfig, UnifiedCache, cached" in cache_policy
+    assert "@cached(cache=cache)" in cache_policy
+    assert "value can legitimately be `None`" in cache_policy
+    for outcome in ("hit", "absent", "expired", "corrupt", "conflict", "backend_error"):
+        assert f"`{outcome}`" in cache_policy
+    assert "clear_all" in cache_policy
+    assert "exact-generation" in cache_policy
+
+    assert "ordinary opens" in initialization.lower()
+    assert "do not silently" in initialization.lower()
+    assert "initialize before sharing" in initialization.lower()
+    assert "stopped-worker" in migration
+    assert "offline" in migration.lower()
+    assert "copy" in migration.lower()
+    assert "verify" in migration.lower()
+    assert "switch" in migration.lower()
+    assert "rebuild" in migration.lower()
+
+    for source in (blob_store, cache_policy, initialization, migration):
+        assert "SqlCache" not in source
+        assert "SQL pull-through" not in source
