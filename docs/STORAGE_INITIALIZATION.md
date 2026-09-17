@@ -52,6 +52,12 @@ incomplete store fails explicitly; stop ordinary workers and use the
 [migration and rebuild guide](STORAGE_MIGRATION.md) to decide what happens
 next.
 
+The current supported SQLite authority boundary is
+`.cacheness/lifecycle-authority-v2.sqlite3` with application ID `0x43414348`
+and SQLite `user_version = 8`. This database schema identifier is separate from
+the public store and payload-format versions: validation does not turn it into
+an ordinary-open migration switch.
+
 Run initialization before creating independent workers. Concurrent first
 creation is not an availability guarantee. Under supported contention, a typed
 retryable result can be correct when it preserves the store's integrity and
