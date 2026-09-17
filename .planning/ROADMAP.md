@@ -626,7 +626,7 @@ Plans:
   5. The missing Narwhals investigation is captured as a future seed, and Phase 3/Phase 8 verification metadata is refreshed from existing post-replan evidence without changing production lifecycle behavior.
   6. Existing bounded local package, documentation-example, and regression gates pass. Phase 9 introduces no new lifecycle authority, lock, queue, retry coordinator, compatibility shim, backend family, or stronger guarantee than ADR 0001 permits.
 
-**Plans:** 6/10 plans executed
+**Plans:** 7/10 plans executed
 
 Plans:
 
@@ -647,7 +647,7 @@ Plans:
 **Wave 4** *(blocked on package/examples and cleanup)*
 
 - [x] 09-06-PLAN.md — Bind exact published examples to CI and remove the superseded harness/final duplicates.
-- [ ] 09-07-PLAN.md — Replace stale onboarding with a concise gateway and task-first current workflow guides.
+- [x] 09-07-PLAN.md — Replace stale onboarding with a concise gateway and task-first current workflow guides.
 
 **Wave 5** *(blocked on current onboarding)*
 
@@ -693,7 +693,7 @@ Plans:
 | 7. Explicit Migration and Rebuild Cutover | 24/24 | Complete    | 2026-09-11 |
 | 07.1. Obstore Payload Participant Unification | 11/11 | Complete | 2026-09-13 |
 | 8. Production Gates and Performance Stabilization | 17/17 | Complete    | 2026-09-15 |
-| 9. Adoption and Release Surface Closure | 6/10 | In Progress|  |
+| 9. Adoption and Release Surface Closure | 7/10 | In Progress|  |
 | 10. Remove SqlCache Pull-Through Subsystem | 0/0 | Not planned | — |
 
 ## Backlog
