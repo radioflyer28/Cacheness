@@ -14,7 +14,7 @@ affects: [09-08, 09-09, 09-10, phase-10]
 actuals:
   tokens: 22566
   tasks: 2
-  commits: 5
+  commits: 6
 tech-stack:
   added: []
   patterns:
@@ -95,13 +95,14 @@ status: complete
 2. **Task 2: Rewrite store, cache, initialization, and migration guides**
    - `89a3f71` — `test(09-07): add failing task-guide documentation contract`
    - `d1ebce7` — `docs(09-07): align store and cache task guides`
-3. **Post-merge regression correction: retain the SQLite authority boundary**
+3. **Post-merge authority-version corrections**
    - `1ddae9a` — `fix(09-07): retain SQLite authority schema boundary`
+   - `a751288` — `fix(09-07): correct SQLite authority version contract`
 
 ## Verification
 
 - `uv run pytest -q -o log_cli=false tests/test_phase9_documentation.py tests/test_phase9_examples.py tests/test_public_api_contract.py -x` — passed (16 tests).
-- `uv run pytest -q -o log_cli=false tests/test_migration_public_contract.py::test_ordinary_construction_exposes_no_migration_switch_or_cli tests/test_phase9_documentation.py -x` — passed (5 tests) after the post-merge guide correction.
+- `uv run pytest -q -o log_cli=false tests/test_migration_public_contract.py::test_ordinary_construction_exposes_no_migration_switch_or_cli tests/test_manifest_versions.py tests/test_migration_cutover.py::test_release_authority_baseline_exposes_only_the_resolved_publication_states tests/test_phase9_documentation.py -x` — passed (7 tests) after reconciling the final authority-version contract.
 - `git diff --check` — passed.
 - Confirmed that the README and task guides do not promote `SqlCache` or an unqualified remote workflow.
 
@@ -115,20 +116,20 @@ status: complete
 
 ### Auto-fixed Issues
 
-**1. [Rule 1 - Documentation regression] Restored the SQLite authority schema boundary**
+**1. [Rule 1 - Documentation regression] Restored and then reconciled the SQLite authority schema boundary**
 - **Found during:** Post-merge Wave 4 verification
-- **Issue:** The initialization-guide rewrite removed the documented `user_version = 8` validation boundary required by the explicit-maintenance public contract.
-- **Fix:** Restored the bounded authority identity text while retaining no implicit migration switch or CLI.
-- **Files modified:** `docs/STORAGE_INITIALIZATION.md`
-- **Verification:** `tests/test_migration_public_contract.py::test_ordinary_construction_exposes_no_migration_switch_or_cli` and `tests/test_phase9_documentation.py`
-- **Committed in:** `1ddae9a`
+- **Issue:** The initialization-guide rewrite removed the authority-schema boundary. The initial contract test still asserted stale `user_version = 8`, while the authority, manifest, and cutover tests consistently declare `user_version = 9`.
+- **Fix:** Restored the bounded identity text in `1ddae9a`, then corrected the stale guide/test contract to `user_version = 9` in `a751288`; ordinary opens remain validation-only with explicit offline migration/rebuild.
+- **Files modified:** `docs/STORAGE_INITIALIZATION.md`, `tests/test_migration_public_contract.py`
+- **Verification:** migration public-contract, manifest-version, migration-cutover baseline, and Phase 9 documentation selectors
+- **Committed in:** `1ddae9a`, `a751288`
 
 The initial broad red documentation contract was split into one red commit per planned task before the tracer green commit, preserving the plan's atomic TDD boundary.
 
 ## Issues Encountered
 
 - The final test rerun initially could not open the shared uv cache in the filesystem sandbox. Re-running the unchanged command with authorized cache access passed.
-- Wave 4 post-merge verification caught the omitted public schema-boundary sentence before downstream work proceeded.
+- Wave 4 post-merge verification caught the omitted public schema-boundary sentence before downstream work proceeded. The first response exposed a stale test/doc value; authoritative version checks corrected the final contract to schema version 9.
 
 ## Known Stubs
 
@@ -146,7 +147,7 @@ None - no external service configuration is required.
 ## Self-Check: PASSED
 
 - All seven documentation/test artifacts exist and commits `cab6ec0`, `38b78f3`,
-  `89a3f71`, `d1ebce7`, and `1ddae9a` are present in Git history.
+  `89a3f71`, `d1ebce7`, `1ddae9a`, and `a751288` are present in Git history.
 
 *Phase: 09-adoption-and-release-surface-closure*
 *Completed: 2026-09-17*
