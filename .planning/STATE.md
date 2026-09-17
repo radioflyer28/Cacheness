@@ -1,16 +1,17 @@
 ---
 gsd_state_version: 1.0
 milestone: v1.0
-current_phase: 10
-status: completed
-stopped_at: Phase 10 complete — all phases complete
-last_updated: "2026-09-17T19:05:45.669Z"
+current_phase: 11
+current_phase_name: Clean supplemental documentation and normalize validation evidence
+status: ready_to_plan
+stopped_at: Phase 11 context gathered
+last_updated: "2026-09-17T20:03:55.854Z"
 last_activity: 2026-09-17
-last_activity_desc: Phase 10 complete
-state_head: bf9de4b0b231218f0d2f9a2aceaf6dbbeaa4f8ea
+last_activity_desc: Phase 11 added from v1.0 milestone audit debt
+state_head: a54f41d9b34b6ccad4e2ad44a081fc0cbcb0f1be
 progress:
-  total_phases: 11
-  completed_phases: 11
+  total_phases: 12
+  completed_phases: 10
   total_plans: 153
   completed_plans: 152
 milestone_name: milestone
@@ -23,14 +24,14 @@ milestone_name: milestone
 See: .planning/PROJECT.md (updated 2026-09-17)
 
 **Core value:** Applications can store and retrieve data reliably through one backend-neutral lifecycle, with caching policy layered above storage without compromising integrity or cleanup correctness.
-**Current focus:** v1.0 milestone audit and closeout
+**Current focus:** Phase 11 — Clean supplemental documentation and normalize validation evidence
 
 ## Current Position
 
-Phase: 10 (Remove SqlCache Pull-Through Subsystem) — COMPLETE
-Plan: 9 of 9 complete
-Status: Milestone ready to audit
-Last activity: 2026-09-17 — Phase 10 complete
+Phase: 11 (Clean supplemental documentation and normalize validation evidence) — NOT PLANNED
+Plan: Not started
+Status: Ready to discuss or plan
+Last activity: 2026-09-17 — Phase 11 added from the v1.0 milestone audit
 
 Current execution chain: **08-18 complete → 08-19 complete → 08-16 complete → independent Phase 08 verification**. No older Phase 8 ordering statement overrides this chain.
 
@@ -48,7 +49,7 @@ retained; controlled-Linux performance qualification is deferred to SEED-006 by
 D-23, while real PostgreSQL/Amazon-S3 qualification and immutable publication are
 deferred to SEED-007 by D-24.
 
-Roadmap progress: [███████████] 11 of 11 phases complete. Phase 9 closed the bounded
+Roadmap progress: [███████████░] 11 of 12 phases complete. Phase 9 closed the bounded
 adoption surface; Phase 10 directly removed SqlCache while retaining BlobStore,
 UnifiedCache, SQL lifecycle authorities, and dataframe handlers. Neither phase
 reopened storage lifecycle design. The generated disk plan
@@ -597,6 +598,7 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - Phase 8 gap Plan 08-19 restores the coverage ratchet after the approved Plan 08-18 test correction; it becomes the final prerequisite before Plan 08-16 resumes and cannot edit production code or the baseline.
 - Phase 8 Plan 08-19 completed with deterministic SQLite validation/error and malformed-evidence coverage; raw repository/critical floors now exceed the frozen baseline, so 08-16 is the only remaining canonical plan.
 - Phase 10 added: Direct pre-production SqlCache removal approved to narrow Cacheness to BlobStore plus UnifiedCache and reduce unrelated maintenance surface.
+- Phase 11 added: Clean supplemental documentation and normalize validation evidence.
 
 ## Deferred Items
 
@@ -611,6 +613,6 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 
 ## Session Continuity
 
-Last session: 2026-09-17T19:05:45.669Z
-Stopped at: Phase 10 complete — all phases complete
-Resume file: None
+Last session: 2026-09-17T20:03:55.392Z
+Stopped at: Phase 11 context gathered
+Resume file: .planning/phases/11-clean-supplemental-documentation-and-normalize-validation-ev/11-CONTEXT.md
