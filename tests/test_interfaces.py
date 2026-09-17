@@ -16,12 +16,12 @@ from cacheness.interfaces import (
     CacheWriter,
     CacheReader,
     FormatProvider,
-    CacheHandler,
+    FormatHandler,
     DataFrameHandler,
     SeriesHandler,
     ArrayHandler,
     ObjectHandler,
-    CacheHandlerError,
+    FormatHandlerError,
     CacheWriteError,
     CacheReadError,
     CacheFormatError,
@@ -230,24 +230,24 @@ class TestFormatProviderInterface:
         assert isinstance(type(provider).data_type, property)
 
 
-class TestCacheHandlerInterface:
-    """Test the combined CacheHandler interface."""
+class TestFormatHandlerInterface:
+    """Test the combined FormatHandler interface."""
 
     def test_inherits_all_interfaces(self):
-        """Test that CacheHandler inherits from all required interfaces."""
-        assert issubclass(CacheHandler, CacheabilityChecker)
-        assert issubclass(CacheHandler, CacheWriter)
-        assert issubclass(CacheHandler, CacheReader)
-        assert issubclass(CacheHandler, FormatProvider)
+        """Test that FormatHandler inherits from all required interfaces."""
+        assert issubclass(FormatHandler, CacheabilityChecker)
+        assert issubclass(FormatHandler, CacheWriter)
+        assert issubclass(FormatHandler, CacheReader)
+        assert issubclass(FormatHandler, FormatProvider)
 
     def test_is_abstract(self):
-        """Test that CacheHandler is still abstract."""
+        """Test that FormatHandler is still abstract."""
         with pytest.raises(TypeError):
-            CacheHandler()
+            FormatHandler()
 
     def test_concrete_implementation(self):
         """Test that complete implementation works."""
-        class CompleteCacheHandler(CacheHandler):
+        class CompleteFormatHandler(FormatHandler):
             def can_handle(self, data: Any) -> bool:
                 return True
             
@@ -269,7 +269,7 @@ class TestCacheHandlerInterface:
             def data_type(self) -> str:
                 return "test_data"
         
-        handler = CompleteCacheHandler()
+        handler = CompleteFormatHandler()
         
         # Test all inherited functionality
         assert handler.can_handle("test") is True
@@ -289,7 +289,7 @@ class TestSpecializedHandlerInterfaces:
 
     def test_dataframe_handler(self):
         """Test DataFrameHandler specialized interface."""
-        assert issubclass(DataFrameHandler, CacheHandler)
+        assert issubclass(DataFrameHandler, FormatHandler)
         
         class TestDataFrameHandler(DataFrameHandler):
             def can_handle(self, data: Any) -> bool:
@@ -317,7 +317,7 @@ class TestSpecializedHandlerInterfaces:
 
     def test_series_handler(self):
         """Test SeriesHandler specialized interface."""
-        assert issubclass(SeriesHandler, CacheHandler)
+        assert issubclass(SeriesHandler, FormatHandler)
         
         class TestSeriesHandler(SeriesHandler):
             def can_handle(self, data: Any) -> bool:
@@ -350,7 +350,7 @@ class TestSpecializedHandlerInterfaces:
 
     def test_array_handler(self):
         """Test ArrayHandler specialized interface."""
-        assert issubclass(ArrayHandler, CacheHandler)
+        assert issubclass(ArrayHandler, FormatHandler)
         
         class TestArrayHandler(ArrayHandler):
             def can_handle(self, data: Any) -> bool:
@@ -384,7 +384,7 @@ class TestSpecializedHandlerInterfaces:
 
     def test_object_handler(self):
         """Test ObjectHandler specialized interface."""
-        assert issubclass(ObjectHandler, CacheHandler)
+        assert issubclass(ObjectHandler, FormatHandler)
         
         class TestObjectHandler(ObjectHandler):
             def can_handle(self, data: Any) -> bool:
@@ -421,12 +421,12 @@ class TestSpecializedHandlerInterfaces:
         assert handler.validate_pickleable(unpickleable) is False
 
 
-class TestCacheHandlerErrors:
-    """Test cache handler exception classes."""
+class TestFormatHandlerErrors:
+    """Test format handler exception classes."""
 
     def test_cache_handler_error_base(self, caplog):
-        """Test base CacheHandlerError functionality."""
-        error = CacheHandlerError(
+        """Test base FormatHandlerError functionality."""
+        error = FormatHandlerError(
             "Test error", 
             handler_type="TestHandler", 
             data_type="test_data"
@@ -442,8 +442,8 @@ class TestCacheHandlerErrors:
         assert "data_type=test_data" in caplog.text
 
     def test_cache_handler_error_without_optional_params(self, caplog):
-        """Test CacheHandlerError with minimal parameters."""
-        error = CacheHandlerError("Simple error")
+        """Test FormatHandlerError with minimal parameters."""
+        error = FormatHandlerError("Simple error")
         
         assert str(error) == "Simple error"
         assert error.handler_type is None
@@ -461,10 +461,10 @@ class TestCacheHandlerErrors:
         validation_error = CacheValidationError("Validation failed", "Validator", "data")
         
         # Test inheritance
-        assert isinstance(write_error, CacheHandlerError)
-        assert isinstance(read_error, CacheHandlerError)
-        assert isinstance(format_error, CacheHandlerError)
-        assert isinstance(validation_error, CacheHandlerError)
+        assert isinstance(write_error, FormatHandlerError)
+        assert isinstance(read_error, FormatHandlerError)
+        assert isinstance(format_error, FormatHandlerError)
+        assert isinstance(validation_error, FormatHandlerError)
         
         # Test error messages
         assert str(write_error) == "Write failed"
@@ -475,7 +475,7 @@ class TestCacheHandlerErrors:
     def test_error_inheritance_chain(self):
         """Test that all errors inherit from Exception."""
         errors = [
-            CacheHandlerError("test"),
+            FormatHandlerError("test"),
             CacheWriteError("test"),
             CacheReadError("test"),
             CacheFormatError("test"),
@@ -484,7 +484,7 @@ class TestCacheHandlerErrors:
         
         for error in errors:
             assert isinstance(error, Exception)
-            assert isinstance(error, CacheHandlerError)
+            assert isinstance(error, FormatHandlerError)
 
 
 class TestHandlerFactoryInterface:
@@ -500,7 +500,7 @@ class TestHandlerFactoryInterface:
     def test_abstract_method_enforcement(self):
         """Test that abstract methods must be implemented."""
         class IncompleteFactory(HandlerFactory):
-            def create_handler(self, data_type: str, config: Any = None) -> 'CacheHandler':
+            def create_handler(self, data_type: str, config: Any = None) -> 'FormatHandler':
                 pass  # Only implement one method
         
         with pytest.raises(TypeError, match="Can't instantiate abstract class"):
@@ -508,7 +508,7 @@ class TestHandlerFactoryInterface:
 
     def test_concrete_implementation(self):
         """Test that concrete implementation works correctly."""
-        class MockHandler(CacheHandler):
+        class MockHandler(FormatHandler):
             def can_handle(self, data: Any) -> bool:
                 return True
             def put(self, data: Any, file_path: Path, config: Any) -> Dict[str, Any]:
@@ -522,7 +522,7 @@ class TestHandlerFactoryInterface:
                 return "test"
         
         class ConcreteFactory(HandlerFactory):
-            def create_handler(self, data_type: str, config: Any = None) -> 'CacheHandler':
+            def create_handler(self, data_type: str, config: Any = None) -> 'FormatHandler':
                 if data_type == "test":
                     return MockHandler()
                 raise ValueError(f"No handler for {data_type}")
@@ -558,9 +558,9 @@ class TestHandlerRegistryInterface:
     def test_abstract_method_enforcement(self):
         """Test that all abstract methods must be implemented."""
         class IncompleteRegistry(HandlerRegistry):
-            def register_handler(self, handler: 'CacheHandler', priority: int = 0) -> None:
+            def register_handler(self, handler: 'FormatHandler', priority: int = 0) -> None:
                 pass
-            def get_handler(self, data: Any) -> 'CacheHandler':
+            def get_handler(self, data: Any) -> 'FormatHandler':
                 pass
             # Missing other methods
         
@@ -569,7 +569,7 @@ class TestHandlerRegistryInterface:
 
     def test_concrete_implementation(self):
         """Test that concrete implementation works correctly."""
-        class MockHandler(CacheHandler):
+        class MockHandler(FormatHandler):
             def __init__(self, data_type_name: str):
                 self._data_type = data_type_name
                 
@@ -590,23 +590,23 @@ class TestHandlerRegistryInterface:
                 self.handlers = {}
                 self.priorities = {}
             
-            def register_handler(self, handler: 'CacheHandler', priority: int = 0) -> None:
+            def register_handler(self, handler: 'FormatHandler', priority: int = 0) -> None:
                 self.handlers[handler.data_type] = handler
                 self.priorities[handler.data_type] = priority
             
-            def get_handler(self, data: Any) -> 'CacheHandler':
+            def get_handler(self, data: Any) -> 'FormatHandler':
                 # Find handler that can handle the data
                 for handler in self.handlers.values():
                     if handler.can_handle(data):
                         return handler
                 raise ValueError("No suitable handler found")
             
-            def get_handler_by_type(self, data_type: str) -> 'CacheHandler':
+            def get_handler_by_type(self, data_type: str) -> 'FormatHandler':
                 if data_type in self.handlers:
                     return self.handlers[data_type]
                 raise ValueError(f"No handler found for {data_type}")
             
-            def list_handlers(self) -> Dict[str, 'CacheHandler']:
+            def list_handlers(self) -> Dict[str, 'FormatHandler']:
                 return self.handlers.copy()
         
         registry = ConcreteRegistry()
@@ -640,7 +640,7 @@ class TestInterfaceContractCompliance:
 
     def test_method_signature_validation(self):
         """Test that concrete implementations must match interface signatures."""
-        class BadSignatureHandler(CacheHandler):
+        class BadSignatureHandler(FormatHandler):
             def can_handle(self, wrong_param_name: Any) -> bool:  # Wrong parameter name
                 return True
             
@@ -665,7 +665,7 @@ class TestInterfaceContractCompliance:
 
     def test_return_type_expectations(self):
         """Test that implementations return expected types."""
-        class TypeCheckingHandler(CacheHandler):
+        class TypeCheckingHandler(FormatHandler):
             def can_handle(self, data: Any) -> bool:
                 return True
             
@@ -712,7 +712,7 @@ class TestInterfaceContractCompliance:
 
     def test_error_propagation(self):
         """Test that interfaces allow proper error propagation."""
-        class ErrorPropagatingHandler(CacheHandler):
+        class ErrorPropagatingHandler(FormatHandler):
             def can_handle(self, data: Any) -> bool:
                 if data == "error":
                     raise CacheValidationError("Cannot handle error data")
@@ -769,7 +769,7 @@ class TestInterfaceDocumentationCompliance:
             CacheWriter,
             CacheReader,
             FormatProvider,
-            CacheHandler,
+            FormatHandler,
             DataFrameHandler,
             SeriesHandler,
             ArrayHandler,
@@ -800,7 +800,7 @@ class TestInterfaceDocumentationCompliance:
     def test_error_class_documentation(self):
         """Test that error classes are properly documented."""
         error_classes = [
-            CacheHandlerError,
+            FormatHandlerError,
             CacheWriteError,
             CacheReadError,
             CacheFormatError,

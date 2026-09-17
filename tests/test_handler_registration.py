@@ -9,7 +9,9 @@ import pytest
 from cacheness.config import CacheConfig, HandlerConfig
 from cacheness.error_handling import CacheManifestUnsupportedVersionError
 from cacheness.handlers import HandlerRegistry
-from cacheness.interfaces import CacheHandler, PayloadTransformationEdge
+from cacheness.interfaces import FormatHandler, PayloadTransformationEdge
+import cacheness.storage as storage
+import cacheness.storage.handlers as storage_handlers
 
 
 class _MappingHandler:
@@ -104,8 +106,8 @@ class _DuplicateMcapHandler(_McapHandler):
         return (edge, edge)
 
 
-class _DeclaredButRejectingMcapHandler(_MappingHandler, CacheHandler):
-    """Declares an edge while inheriting CacheHandler's rejecting default."""
+class _DeclaredButRejectingMcapHandler(_MappingHandler, FormatHandler):
+    """Declares an edge while inheriting FormatHandler's rejecting default."""
 
     @property
     def data_type(self) -> str:
@@ -160,6 +162,20 @@ def test_custom_handler_registration_controls_selection_priority() -> None:
         "class": "_MappingHandler",
         "is_builtin": False,
     }
+
+
+def test_storage_handler_barrels_expose_only_format_handler_contract() -> None:
+    """Storage consumers import the generic protocol with no retired alias."""
+
+    assert storage.FormatHandler is FormatHandler
+    assert storage_handlers.FormatHandler is FormatHandler
+    assert storage_handlers.FormatHandlerError.__name__ == "FormatHandlerError"
+    assert "FormatHandler" in storage.__all__
+    assert "FormatHandlerError" in storage.__all__
+    assert "FormatHandler" in storage_handlers.__all__
+    assert "FormatHandlerError" in storage_handlers.__all__
+    assert not hasattr(storage, "CacheHandler")
+    assert not hasattr(storage_handlers, "CacheHandler")
 
 
 def test_unregister_reports_truthful_current_registry_state() -> None:
@@ -217,7 +233,7 @@ def test_invalid_transformation_edges_are_rejected_without_global_fallback() -> 
 
 
 def test_registered_handler_rejects_declared_edge_without_concrete_transform() -> None:
-    """An advertised conversion cannot resolve to CacheHandler's rejection stub."""
+    """An advertised conversion cannot resolve to FormatHandler's rejection stub."""
     registry = _registry()
 
     with pytest.raises(ValueError, match="concrete transform"):
