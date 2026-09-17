@@ -8,7 +8,7 @@ description: Implementation blueprint from verified obstore payload-participant 
 
 Evaluate whether `obstore` can replace Cacheness's backend-specific payload
 mechanics behind one unified payload-participant seam while preserving the
-existing path-based handler ecosystem and ADR 0001's single-authority lifecycle.
+existing path-based format-handler ecosystem and ADR 0001's single-authority lifecycle.
 
 Spike session wrapped: 2026-09-10
 </context>
@@ -16,10 +16,15 @@ Spike session wrapped: 2026-09-10
 <requirements>
 ## Requirements
 
-- Preserve `CacheHandler.put(data, Path, config)` and
-  `CacheHandler.get(Path, metadata)` for built-in and user-registered handlers.
+- Preserve `FormatHandler.put(data, Path, config)` and
+  `FormatHandler.get(Path, metadata)` for built-in and user-registered handlers.
+- Keep custom format registration at `store.handlers.register_handler(...)`;
+  do not add a parallel extension or lifecycle surface.
 - Keep handler staging private; handlers never receive managed filesystem or
   object-store locators.
+- Treat dataframe and other optional integrations as request-bound capabilities:
+  base imports remain silent, and an explicit format request receives focused
+  installation guidance when its dependency is absent.
 - Publish payloads at deterministic, immutable generation locators using an
   atomic create-if-absent primitive.
 - Treat payload publication atomicity separately from metadata-plus-payload
@@ -52,4 +57,3 @@ Original spike source files are preserved in `sources/` for complete reference.
 - 004-containment-deletion
 - 005-streaming-replacement
 </metadata>
-

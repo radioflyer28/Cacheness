@@ -151,7 +151,7 @@ availability promises.
 ## Error Handling
 
 - Raise the domain-specific hierarchy from `src/cacheness/error_handling.py` (`CacheError` and its configuration, storage, serialization, handler, integrity, and metadata subclasses) for cross-cutting cache failures.
-- Handler-specific failures use `CacheHandlerError` and its `CacheWriteError`, `CacheReadError`, `CacheFormatError`, and `CacheValidationError` subclasses in `src/cacheness/interfaces.py`.
+- Handler-specific failures use `FormatHandlerError` and its `CacheWriteError`, `CacheReadError`, `CacheFormatError`, and `CacheValidationError` subclasses in `src/cacheness/interfaces.py`.
 - Preserve the original cause with `raise ... from e` when translating `OSError`, import, serialization, or backend failures. `with_error_handling` in `src/cacheness/error_handling.py` adds function/argument context and either reraises or returns a configured fallback.
 - Use `pytest.raises` with a specific exception and, where stable, `match=` in tests; see `tests/test_directory_sharding.py`, `tests/test_handler_registration.py`, and `tests/test_error_handling.py`.
 - Handle optional features explicitly: capability detection is represented by flags such as `SQLALCHEMY_AVAILABLE`, and unavailable optional paths should be skipped or produce a clear install-oriented error.
@@ -221,7 +221,7 @@ availability promises.
 
 ## Pattern Overview
 
-- `UnifiedCache` delegates data-format decisions to ordered `CacheHandler` strategies rather than branching on every type in the coordinator (`src/cacheness/handlers.py`).
+- `UnifiedCache` delegates data-format decisions to ordered `FormatHandler` strategies rather than branching on every type in the coordinator (`src/cacheness/handlers.py`).
 - Metadata and blob backends are selected through factories/registries, while the primary `UnifiedCache` path writes handler-produced files and records their paths in metadata (`src/cacheness/core.py`).
 - Optional dependencies are imported conditionally; handlers are enabled only when their libraries are available (`src/cacheness/handlers.py`, `src/cacheness/__init__.py`).
 - SQL caching uses an adapter contract for schema, query parsing, and external fetches, allowing builder methods to generate simple adapters (`src/cacheness/sql_cache.py`).

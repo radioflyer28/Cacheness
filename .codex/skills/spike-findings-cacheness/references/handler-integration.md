@@ -2,8 +2,10 @@
 
 ## Requirements
 
-- Preserve the existing path-based `CacheHandler.put` and `CacheHandler.get`
+- Preserve the existing path-based `FormatHandler.put` and `FormatHandler.get`
   signatures and store-local custom registration.
+- Keep `store.handlers.register_handler(...)` as the one custom-format
+  extension point; it does not create another storage lifecycle.
 - Never give a handler a managed filesystem path, S3 key, or obstore instance.
 - Validate the handler artifact and its native suffix before publication.
 - Support materializing single-file handlers; reject directory, multi-file, or
@@ -37,7 +39,9 @@
 
 4. Resolve write handlers through the existing `HandlerRegistry`; resolve read
    handlers from the persisted handler type and payload contract. Obstore does
-   not participate in format selection.
+   not participate in format selection. Optional dataframe and other format
+   integrations stay request-bound rather than announcing availability at base
+   import time.
 5. Add contract tests with at least one built-in native format and one separately
    registered third-party handler. Spike 001's MCAP handler is the reference
    example.
@@ -50,7 +54,7 @@
 - Do not pass only the staged path to obstore after validating a descriptor;
   doing so reopens a path race. Pass the retained open source.
 - Do not return lazy objects that still need the private snapshot after
-  `CacheHandler.get` returns.
+  `FormatHandler.get` returns.
 
 ## Constraints
 
@@ -64,4 +68,3 @@
 
 Synthesized from spike: 001
 Source files available in: `sources/001-handler-boundary/`
-

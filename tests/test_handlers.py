@@ -1,7 +1,7 @@
 """
-Unit tests for cache data handlers.
+Unit tests for format handlers.
 
-Tests the handler system including fallback mechanisms and different data types.
+Tests format-handler selection, fallback mechanisms, and different data types.
 """
 
 import pytest
@@ -54,14 +54,14 @@ class PickleableCustomObject:
 
 
 """
-Unit tests for cache data handlers.
+Unit tests for format handlers.
 
-Tests the handler system including fallback mechanisms and different data types.
+Tests format-handler selection, fallback mechanisms, and different data types.
 """
 
 
 class TestHandlerRegistry:
-    """Test the cache handler registry system."""
+    """Test the format-handler registry system."""
 
     @pytest.fixture
     def config(self):
@@ -110,7 +110,7 @@ class TestHandlerRegistry:
 
 
 class TestObjectHandler:
-    """Test the object cache handler."""
+    """Test the object format handler."""
 
     @pytest.fixture
     def handler(self):
@@ -165,7 +165,7 @@ class TestObjectHandler:
 
 
 class TestArrayHandler:
-    """Test the array cache handler for numpy arrays."""
+    """Test the array format handler for NumPy arrays."""
 
     @pytest.fixture
     def handler(self):
