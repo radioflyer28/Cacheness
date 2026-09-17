@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Verify the Phase 4 public-surface cutover without hiding deferred diagnostics.
+"""Verify the Phase 4 public-surface cutover with fixed lifecycle evidence.
 
 The owned release matrix is parsed only from the bounded owned section of
-``04-VALIDATION.md``. A separate SQL-cache list can classify an absent-pandas
-full-tree *collection diagnostic*, but it can never become matrix membership.
+``04-VALIDATION.md``. Historical validation records are not live verifier
+inputs.
 """
 
 from __future__ import annotations
@@ -25,16 +25,6 @@ VALIDATION_PATH = REPOSITORY_ROOT / (
 OWNED_HEADING = "## Phase 4-Owned Matrix Paths"
 OWNED_START = "<!-- phase4-owned-matrix:start -->"
 OWNED_END = "<!-- phase4-owned-matrix:end -->"
-DEFERRED_HEADING = "## Deferred Diagnostic SQL-Cache Paths"
-DEFERRED_START = "<!-- phase4-deferred-sql-cache:start -->"
-DEFERRED_END = "<!-- phase4-deferred-sql-cache:end -->"
-EXPECTED_DEFERRED_PATHS = frozenset(
-    {
-        "tests/test_sql_cache.py",
-        "tests/test_sql_cache_documentation.py",
-        "tests/test_sql_cache_failure_contract.py",
-    }
-)
 REQUIRED_OWNED_PATHS = frozenset(
     {
         "tests/test_blob_backend_registry.py",
@@ -107,7 +97,6 @@ RETIRED_BLOB_SELECTOR_SYMBOLS = frozenset(
     }
 )
 _PATH_BULLET = re.compile(r"^- (tests/test_[A-Za-z0-9_]+\.py)$")
-_COLLECTION_ERROR = re.compile(r"ERROR collecting (tests/test_[^\s]+\.py)")
 
 
 def _normalise_test_path(candidate: str) -> str:
@@ -158,35 +147,22 @@ def _parse_bounded_paths(
     return tuple(paths)
 
 
-def load_validation_sets() -> tuple[tuple[str, ...], tuple[str, ...]]:
-    """Load only the two bounded lists and enforce their release invariants."""
+def load_owned_matrix() -> tuple[str, ...]:
+    """Load the retained bounded matrix and enforce its release invariants."""
     text = VALIDATION_PATH.read_text(encoding="utf-8")
     owned = _parse_bounded_paths(
         text, heading=OWNED_HEADING, start=OWNED_START, end=OWNED_END
     )
-    deferred = _parse_bounded_paths(
-        text, heading=DEFERRED_HEADING, start=DEFERRED_START, end=DEFERRED_END
-    )
     owned_set = set(owned)
-    deferred_set = set(deferred)
-    if owned_set & deferred_set:
-        raise ValueError(f"owned and deferred path sets overlap: {sorted(owned_set & deferred_set)}")
-    if deferred_set != EXPECTED_DEFERRED_PATHS:
-        raise ValueError(
-            "deferred SQL-cache paths must be exactly "
-            f"{sorted(EXPECTED_DEFERRED_PATHS)}, found {sorted(deferred_set)}"
-        )
     missing = REQUIRED_OWNED_PATHS - owned_set
     if missing:
         raise ValueError(f"owned Phase 4 matrix is missing required paths: {sorted(missing)}")
-    if EXPECTED_DEFERRED_PATHS & owned_set:
-        raise ValueError("deferred SQL-cache paths must be absent from PHASE4_MATRIX")
-    return owned, deferred
+    return owned
 
 
 # This is the only source of matrix membership. Do not broaden it by scraping
 # arbitrary test references from this document or the repository.
-PHASE4_MATRIX, DEFERRED_SQL_CACHE_PATHS = load_validation_sets()
+PHASE4_MATRIX = load_owned_matrix()
 
 
 def _dotted_name(node: ast.AST) -> str | None:
@@ -389,7 +365,7 @@ def run_owned_matrix() -> int:
 
 
 def run_collection_diagnostic() -> int:
-    """Classify only the bounded absent-pandas collection diagnostic."""
+    """Require full-tree collection to remain free of collection errors."""
     result = subprocess.run(
         [sys.executable, "-m", "pytest", "--collect-only", "-q", "-o", "log_cli=false"],
         cwd=REPOSITORY_ROOT,
@@ -404,18 +380,7 @@ def run_collection_diagnostic() -> int:
             "this is not a full-suite execution claim."
         )
         return 0
-    errored_paths = set(_COLLECTION_ERROR.findall(output))
-    if (
-        errored_paths
-        and errored_paths <= set(DEFERRED_SQL_CACHE_PATHS)
-        and output.count("No module named 'pandas'") >= len(errored_paths)
-    ):
-        print(
-            "Deferred diagnostic: full-tree collection is not green because absent "
-            f"pandas affects {sorted(errored_paths)}. This is not a full-suite pass."
-        )
-        return 0
-    print("Full-tree collection diagnostic failed outside the deferred pandas boundary:", file=sys.stderr)
+    print("Full-tree collection diagnostic failed:", file=sys.stderr)
     print(output, file=sys.stderr)
     return result.returncode or 1
 
