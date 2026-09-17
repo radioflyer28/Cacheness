@@ -160,6 +160,9 @@ def test_base_probe_freezes_the_alias_free_storage_surface_and_quiet_import():
         "cacheness/sql_cache/__init__.py",
         "cacheness/sql_cache/__pycache__/__init__.cpython-313.pyc",
         "cacheness\\sql_cache.pyi",
+        "cacheness-0.3.14.data/purelib/cacheness/sql_cache.pyi",
+        "cacheness-0.3.14.data/platlib/cacheness/sql_cache.cpython-313-x86_64-linux-gnu.so",
+        "cacheness-0.3.14.data/purelib/cacheness/sql_cache/__pycache__/__init__.cpython-313.pyc",
     ),
 )
 def test_base_probe_rejects_a_retired_wheel_member_before_installation(
@@ -178,6 +181,21 @@ def test_base_probe_rejects_a_retired_wheel_member_before_installation(
         runner.run_base_probe(artifact, workspace=tmp_path / "probe", run=fake_run)
 
     assert calls == []
+
+
+@pytest.mark.parametrize(
+    "member",
+    (
+        "cacheness-0.3.14.data/data/cacheness/sql_cache.py",
+        "cacheness-0.3.14.data/purelib/other/cacheness/sql_cache.py",
+        "metadata/cacheness/sql_cache.pyi",
+    ),
+)
+def test_retired_wheel_member_check_ignores_non_installable_archive_data(member: str) -> None:
+    """Only import-root Cacheness paths participate in the retired-module check."""
+    runner = _load_runner()
+
+    assert not runner._is_retired_wheel_member(member)
 
 
 @pytest.mark.parametrize(

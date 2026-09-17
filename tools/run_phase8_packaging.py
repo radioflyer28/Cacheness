@@ -175,6 +175,7 @@ RETIRED_PUBLIC_EXPORTS: dict[str, tuple[str, ...]] = {
 }
 RETIRED_IMPORT_MODULES = ("cacheness.sql_cache",)
 RETIRED_WHEEL_MODULE_STEMS = frozenset({"cacheness/sql_cache"})
+INSTALLABLE_WHEEL_LIB_DIRECTORIES = frozenset({"purelib", "platlib"})
 BASE_PROBE_NAMES = (
     "public_exports",
     "blobstore_generic",
@@ -239,9 +240,27 @@ def _normalized_wheel_member(member: str) -> str:
     return "/".join(parts)
 
 
-def _is_retired_wheel_member(member: str) -> bool:
-    """Return whether one normalized wheel member occupies a retired module path."""
+def _installation_relative_wheel_member(member: str) -> str | None:
+    """Return one import-root path without treating arbitrary archive data as code."""
     normalized = _normalized_wheel_member(member).rstrip("/")
+    parts = normalized.split("/")
+    if parts[0] == "cacheness":
+        return normalized
+    if (
+        len(parts) >= 3
+        and parts[0].endswith(".data")
+        and parts[1] in INSTALLABLE_WHEEL_LIB_DIRECTORIES
+        and parts[2] == "cacheness"
+    ):
+        return "/".join(parts[2:])
+    return None
+
+
+def _is_retired_wheel_member(member: str) -> bool:
+    """Return whether an installable module path occupies a retired namespace."""
+    normalized = _installation_relative_wheel_member(member)
+    if normalized is None:
+        return False
     for module_stem in RETIRED_WHEEL_MODULE_STEMS:
         if normalized == module_stem or normalized.startswith(f"{module_stem}/"):
             return True

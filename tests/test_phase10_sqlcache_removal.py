@@ -89,7 +89,7 @@ ALLOWED_NON_DOCUMENT_MARKER_COUNTS = {
         "SqlCache": 4,
         "SqlCacheAdapter": 1,
         "cacheness.sql_cache": 2,
-        "sql_cache": 11,
+        "sql_cache": 17,
         "duckdb": 3,
         "duckdb-engine": 1,
     },
