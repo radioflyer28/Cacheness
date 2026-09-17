@@ -123,6 +123,16 @@ def test_task_guides_own_their_current_capabilities() -> None:
     assert "switch" in migration.lower()
     assert "rebuild" in migration.lower()
 
+    # This runbook routes mutable qualification status to the sole detailed
+    # owner.  It deliberately does not recreate that evidence matrix here.
+    assert "[Release qualification](RELEASE_QUALIFICATION.md)" in migration
+    assert "SEED-006" in migration
+    assert "SEED-007" in migration
+    assert "Phase 999.1" in migration
+    assert "Phase 8 alone owns" not in migration
+    assert "remote payload effects remain verifiable external effects" in migration
+    assert "This guide makes no promise of automatic or seamless migration" in migration
+
     for source in (blob_store, cache_policy, initialization, migration):
         assert "SqlCache" not in source
         assert "SQL pull-through" not in source
