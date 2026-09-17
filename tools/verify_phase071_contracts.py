@@ -663,35 +663,32 @@ def audit_runtime_source(root: Path = REPOSITORY_ROOT) -> tuple[str, ...]:
 
 
 def audit_documentation(root: Path = REPOSITORY_ROOT) -> tuple[str, ...]:
-    """Require the public D-16 and Phase 8 boundary to be stated consistently."""
+    """Require each D-16/Phase 8 contract at its current documentation owner.
+
+    Phase 9 deliberately stopped duplicating remote qualification, integrity,
+    and extension details across every public page.  This gate therefore checks
+    the task-first pages for their own boundary and the reference owners for the
+    detailed claims instead of requiring the README to restate everything.
+    """
     requirements = {
         "README.md": (
             "128 MiB",
-            "explicit bucket and region",
-            "SHA-256",
             "opaque transport evidence",
             "Phase 8",
-            "store.handlers.register_handler",
         ),
         "docs/API_REFERENCE.md": (
-            "128 MiB",
-            "explicit bucket and region",
-            "owner pinning",
-            "SHA-256",
-            "Phase 8",
+            "FormatHandler",
+            "data_type",
+            "payload_format_version",
             "store.handlers.register_handler",
         ),
         "docs/PLUGIN_DEVELOPMENT.md": (
-            "128 MiB",
-            "explicit bucket and region",
-            "custom endpoint",
-            "SHA-256",
-            "Phase 8",
+            "safe suffix",
+            "contained regular file",
+            "persisted payload identities",
             "store.handlers.register_handler",
         ),
         "docs/SECURITY.md": (
-            "128 MiB",
-            "explicit bucket and region",
             "ExpectedBucketOwner",
             "stable bucket",
             "name whose ownership",
@@ -699,6 +696,17 @@ def audit_documentation(root: Path = REPOSITORY_ROOT) -> tuple[str, ...]:
             "bucket policy",
             "custom endpoint",
             "SHA-256",
+            "Phase 8",
+        ),
+        "docs/CATALOG_AND_TOPOLOGY.md": (
+            "explicit PostgreSQL initialization before shared workers",
+            "real Amazon S3 bucket",
+            "shared external manifest signing key",
+        ),
+        "docs/RELEASE_QUALIFICATION.md": (
+            "128 MiB",
+            "canonical SHA-256 plus size",
+            "opaque corroborating transport evidence",
             "Phase 8",
         ),
     }
