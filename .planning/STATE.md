@@ -4,11 +4,11 @@ milestone: v1.0
 current_phase: 09
 current_phase_name: Adoption and Release Surface Closure
 status: executing
-stopped_at: Completed 09-07-PLAN.md
-last_updated: "2026-09-17T03:48:20.582Z"
-last_activity: 2026-09-16
-last_activity_desc: Phase 09 execution started
-state_head: d1ebce76006fbd1432b9862d864c78d639a2b03b
+stopped_at: Completed 09-08-PLAN.md
+last_updated: "2026-09-17T04:07:57Z"
+last_activity: 2026-09-17
+last_activity_desc: Phase 09 Plan 08 qualification documentation completed
+state_head: d3d0be57f92427d0e1be80165d6632bf195f6d3c
 progress:
   total_phases: 11
   completed_phases: 8
@@ -29,9 +29,9 @@ See: .planning/PROJECT.md (updated 2026-09-15)
 ## Current Position
 
 Phase: 09 (Adoption and Release Surface Closure) — EXECUTING
-Plan: 8 of 10
+Plan: 9 of 10
 Status: Ready to execute
-Last activity: 2026-09-16 — Phase 09 execution started
+Last activity: 2026-09-17 — Phase 09 Plan 08 qualification documentation completed
 
 Current execution chain: **08-18 complete → 08-19 complete → 08-16 complete → independent Phase 08 verification**. No older Phase 8 ordering statement overrides this chain.
 
@@ -556,6 +556,8 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - [Phase 09]: The Phase 9 examples index promotes only four qualified local journeys; SqlCache assets remain Phase 10-owned.
 - [Phase 09]: Phase 09 Plan 07: README is a concise local-ready BlobStore-first gateway with exactly two explicit quick starts; detailed qualification remains linked rather than duplicated.
 - [Phase 09]: Phase 09 Plan 07: SQLite plus filesystem guidance promises crash consistency through immutable generations and reconciliation, not cross-resource ACID.
+- [Phase 09]: Phase 09 Plan 08: RELEASE_QUALIFICATION.md is the sole detailed evidence matrix; local readiness leaves S3/PostgreSQL, Windows, controlled Linux performance, and immutable publication explicitly nonpassing.
+- [Phase 09]: Phase 09 Plan 08: SHA-256 plus size remains canonical integrity while ETag/version is opaque corroboration; format handlers use contained private staging and fail-closed parsing boundaries.
 
 ### Pending Todos
 
