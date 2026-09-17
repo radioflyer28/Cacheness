@@ -53,6 +53,16 @@ def test_fixed_manifest_covers_all_phase_plans_decisions_and_non_claims() -> Non
     assert set(verifier.DECISION_NODES) == EXPECTED_DECISIONS
     assert verifier.PHASE8_NON_CLAIMS == EXPECTED_PHASE8_NON_CLAIMS
     assert verifier.validate_fixed_manifest(REPOSITORY_ROOT) == ()
+    assert (
+        "tests/test_phase10_sqlcache_removal.py::"
+        "test_public_names_and_module_are_naturally_absent"
+        in verifier.PHASE071_ALL_NODES
+    )
+    assert (
+        "tests/test_public_api_contract.py::"
+        "test_optional_sqlcache_surface_remains_separate_when_dependency_is_blocked"
+        not in verifier.PHASE071_ALL_NODES
+    )
     assert not hasattr(verifier, "discover_tests")
     assert not hasattr(verifier, "git_diff")
 
