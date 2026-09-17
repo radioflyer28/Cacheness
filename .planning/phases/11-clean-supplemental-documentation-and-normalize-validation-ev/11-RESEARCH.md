@@ -362,12 +362,11 @@ This scan is intentionally bounded to current product surfaces and the fulfilled
 |---|---|---|---|
 | — | None. Recommendations are derived from locked decisions, opened repository sources, executed local probes, GSD schema sources, or official uv/Python Packaging documentation. | — | — |
 
-## Open Questions
+## Resolved Questions
 
-1. **What is the final milestone verdict?**
-   - What we know: the current audit is `tech_debt`, and Phase 11 is designed to close its supplemental-documentation and validation-format debt while preserving explicit deferrals. [VERIFIED: `.planning/v1.0-v1.0-MILESTONE-AUDIT.md:1-35,142-200`]
-   - What's unclear: the current verdict cannot be known until the final layered gate completes.
-   - Recommendation: derive and record the verdict in the audit-refresh task only after every Phase 11 acceptance gate is green; do not preselect it in the plan. [VERIFIED: `.planning/phases/11-clean-supplemental-documentation-and-normalize-validation-ev/11-CONTEXT.md:76-84`]
+1. **RESOLVED — What is the final milestone verdict?**
+   - Process decision: Plan 11-10 derives and records the verdict only after Plan 11-09 completes the layered acceptance and canonical Phase 11 validation record. The plan deliberately does not preselect whether the result is `passed`, `gaps_found`, or `tech_debt`. [VERIFIED: `.planning/phases/11-clean-supplemental-documentation-and-normalize-validation-ev/11-CONTEXT.md:76-84`]
+   - Evidence boundary: the current audit's `tech_debt` value is historical input, not the answer; the refreshed verdict must be supported by the final Phase 11 gates while preserving every explicit deferral. [VERIFIED: `.planning/v1.0-v1.0-MILESTONE-AUDIT.md:1-35,142-200`]
 
 ## Environment Availability
 
