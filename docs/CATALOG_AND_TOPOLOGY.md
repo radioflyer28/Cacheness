@@ -1,10 +1,16 @@
 # Catalog and topology contracts
 
 `BlobStore` is the sole owner of payload lifecycle and committed catalog
-membership. The selected `LifecycleAuthority` is the only component that can
-promote a generation, establish canonical catalog membership, or authorize a
-complete catalog query. A payload file, JSON export, ORM row, or PostgreSQL
-projection is never lifecycle authority.
+membership. The selected `LifecycleAuthority` alone promotes a generation,
+establishes canonical catalog membership, and authorizes a complete catalog
+query. A payload file, JSON export, ORM row, or PostgreSQL projection is never
+lifecycle authority.
+
+This reference declares composition requirements, not observed release status.
+For the single current matrix of local, platform, payload, performance,
+remote-service, and publication claims, see [Release qualification](RELEASE_QUALIFICATION.md).
+Constructibility, local tests, fakes, mocks, and compatible endpoints do not
+substitute for a named topology's required evidence.
 
 ## Composition roles
 
@@ -12,23 +18,20 @@ projection is never lifecycle authority.
 path:
 
 - **payload** stores immutable generation bytes;
-- **authority** owns the local transactional lifecycle and canonical catalog;
+- **authority** owns the transactional lifecycle and canonical catalog;
 - **projection** consumes committed catalog pages as a derived view.
 
 Role and capability validation happen before a named participant is created or
 used. An injected participant retains its identity and is caller-owned unless
-ownership is explicitly transferred. A projection has no promote, cleanup,
+ownership is explicitly transferred. A projection has no promotion, cleanup,
 delete, reconciliation, or canonical-query-completeness permission.
 
-## Declared topology profiles and qualification
+## Declared topology profiles
 
-Construction or registration of a participant proves only that it can be
-constructed. Eligibility is the narrower contract in the matrix below: exactly
-one authority/payload pair must match one row before `BlobStore` performs
+Exactly one authority/payload pair must match a row before `BlobStore` performs
 payload or authority I/O. A row is an immutable contract declaration, not a
-mutable observation that its external evidence has passed. JSON is available
-only as a derived projection in every profile; it cannot become authority or a
-fallback authority.
+mutable observation. JSON is available only as a derived projection in every
+profile; it cannot become authority or a fallback authority.
 
 <!-- phase5-topology-matrix:start -->
 | profile | authority | payload | coordination | durability / atomicity boundary | progress outcomes | required service configuration | derived JSON projection | evidence requirement ID | evidence schema ID |
@@ -38,30 +41,17 @@ fallback authority.
 | configured remote deployment | postgresql | s3 | multiple_hosts | PostgreSQL transaction is authoritative; immutable Amazon S3 objects reconcile outside cross-resource ACID | conflict, retryable_connection_timeout, retryable_deadlock, retryable_lock_timeout, retryable_serialization, retryable_statement_timeout, success | explicit PostgreSQL initialization before shared workers; real PostgreSQL service; real Amazon S3 bucket and test-owned prefix; shared external manifest signing key | true | live-postgresql-amazon-s3 | phase5-live-service-evidence-v1 |
 <!-- phase5-topology-matrix:end -->
 
-The memory/memory and SQLite/filesystem rows are Phase 5-qualified. The remote
-row is a declared, constructible candidate and is **not release-qualified**
-until Phase 8 satisfies its immutable `live-postgresql-amazon-s3` requirement.
-The sanitized release-evidence artifact is the exclusive record of a service
-run; the runtime catalog and this guide deliberately contain requirements
-rather than a mutable observation. Local tests, fakes, mocks, and compatible
-endpoints prove adapter contracts only. They do not substitute for the exact
-real PostgreSQL and Amazon S3 evidence requirement. Amazon S3-compatible
-services need their own named qualification before they can be added as a
-release-supported profile.
-
 Every pair outside the matrix is rejected before staging, including
 memory/filesystem, memory/S3, SQLite/memory, SQLite/S3, PostgreSQL/memory, and
 PostgreSQL/filesystem. The absence of a pair is intentional: this is not a
 Cartesian backend-parity declaration.
 
-For all durable rows, authority promotion is visibility. External immutable
-payload creation and destructive cleanup are outside the database transaction;
-durable intent and cleanup debt make interruption attributable and
-reconcilable. This does not claim cross-resource ACID, universal contender
-success, or a filesystem/S3 listing as catalog authority. Declared retryable
-outcomes are safe progress results, while integrity and recovery remain
-mandatory. Performance evidence is a separate measured distribution; Phase 8
-owns final budget and platform-matrix acceptance.
+For durable rows, authority promotion is visibility. Immutable payload creation
+and destructive cleanup sit outside the database transaction; durable intent
+and cleanup debt make interruption attributable and reconcilable. This does
+not claim cross-resource ACID, universal contender success, or a
+filesystem/S3 listing as catalog authority. Declared retryable outcomes are
+safe progress results while integrity and recovery remain mandatory.
 
 ## Canonical catalog and projections
 
@@ -73,18 +63,16 @@ index.
 
 `ProjectionController` copies these pages into a `ProjectionSink`. The first
 page fixes the source/checkpoint identity and later pages must remain at that
-revision. A sink applies an idempotently identified page before it advances its
-checkpoint, so an interruption can safely replay the same page. Projection
-state is derived work: it is not consulted for BlobStore reads, cleanup, or
-lifecycle recovery.
+revision. A sink applies an idempotently identified page before advancing its
+checkpoint, so interruption can safely replay the same page. Projection state
+is derived work; it is not consulted for BlobStore reads, cleanup, or lifecycle
+recovery.
 
-The Phase 4 built-in projection inventory contains only **JSON**. Its
-`JsonProjection` is derived-only and supports caller-invoked bounded
-refresh/checkpoint delivery through `ProjectionSink`; it does not advertise
-isolated rebuild publication. PostgreSQL remains classified as a derived
-projection family, but has no constructible registration until Phase 5
-qualifies an actual sink. Neither JSON nor PostgreSQL can authorize canonical
-membership, reads, deletes, cleanup, repair, or query completeness.
+The built-in projection inventory contains JSON only. `JsonProjection` is
+derived-only and supports caller-invoked bounded refresh/checkpoint delivery
+through `ProjectionSink`; it does not advertise isolated rebuild publication.
+Neither JSON nor any future projection can authorize canonical membership,
+reads, deletes, cleanup, repair, or query completeness.
 
 ## Declared catalog values
 
@@ -122,13 +110,13 @@ page = store.query_catalog(
 )
 ```
 
-`update_catalog()` is an exact-record catalog patch: it keeps the committed
-payload generation and integrity fields, promotes a new authenticated catalog
-revision through the existing authority transaction, and returns a new
-`BlobReceipt`. A stale `expected` receipt raises the typed lifecycle conflict.
-Stored absence, an explicit `None`, and a materialized default remain distinct.
-Use `replace=True` only when the supplied mapping is the complete new stored
-mapping; ordinary calls patch existing stored fields.
+`update_catalog()` is an exact-record catalog patch: it keeps committed payload
+integrity fields, promotes a new authenticated catalog revision through the
+existing authority transaction, and returns a new `BlobReceipt`. A stale
+`expected` receipt raises the typed lifecycle conflict. Stored absence, an
+explicit `None`, and a materialized default remain distinct. Use `replace=True`
+only when the supplied mapping is the complete new stored mapping; ordinary
+calls patch existing stored fields.
 
 Schema identity and revision are part of the signed descriptor. Normal opens
 and writes never migrate schemas or historical layouts. An unsupported schema
@@ -148,13 +136,3 @@ the copy completes under an explicitly advertised online/offline capability.
 SQLite projection publication is offline/stopped-worker maintenance. Normal
 opens and writes never run schema or historical-layout migration; unsupported
 layouts report migration/rebuild-required evidence without conversion.
-
-## Phase boundaries
-
-- **Phase 4** defines the native catalog, topology roles, bounded projection
-  pulls, and explicit derived refresh/rebuild contracts.
-- **Phase 5** qualifies additional backend pairs. It does not retroactively
-  claim live PostgreSQL or S3 behavior from a projection declaration.
-- **Phase 6** owns `UnifiedCache` policy delegation and cache-facing outcomes.
-- **Phase 7** owns offline migration and rebuild execution for released
-  formats; Phase 4 intentionally does not execute historical migrations.

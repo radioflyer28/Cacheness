@@ -104,7 +104,7 @@ invalidation.
 
 ## Security and Integrity
 
-Application payloads are trusted input only: pickle and dill are never safe to
+Application payloads are trusted application payloads only: pickle and dill are never safe to
 deserialize from a hostile source. Integrity signatures detect modification but
 do not sandbox executable serializers. Read the
 [Security Guide](docs/SECURITY.md) for the canonical boundary.
