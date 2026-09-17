@@ -1,118 +1,67 @@
+<!-- refreshed: 2026-09-17 -->
 # Coding Conventions
 
-**Analysis Date:** 2026-08-29
+**Analysis date:** 2026-09-17
 
-**Independent Review:** 2026-08-29 — conventions below distinguish intended style from what current tooling actually enforces
+## Naming and module design
 
-## Naming Patterns
+- Use lowercase `snake_case.py` modules, `snake_case` functions/variables, and
+  PascalCase classes/exceptions. Private implementation state starts with `_`.
+- Name tests `test_<subject>.py` under `tests/`; use descriptive test names that
+  state the observable contract.
+- Public exports are deliberate package-barrel decisions. Keep canonical
+  implementation imports internal and avoid expanding compatibility paths.
+- Model grouped configuration with dataclasses and use focused abstract
+  contracts for handlers, lifecycle authorities, and payload participants.
 
-**Files:**
-- Use lowercase `snake_case.py` for library modules, for example `src/cacheness/error_handling.py` and `src/cacheness/file_hashing.py`.
-- Name tests `test_<subject>.py` under `tests/`, such as `tests/test_config_validation.py` and `tests/test_s3_blob_backend.py`.
-- Keep package API re-exports in `__init__.py` files, especially `src/cacheness/__init__.py` and `src/cacheness/storage/backends/__init__.py`.
+## Python style and imports
 
-**Functions:**
-- Use lowercase `snake_case` for public and private functions and methods, with a leading underscore for implementation helpers such as `_normalize_function_args` in `src/cacheness/core.py` and `_hash_single_file` in `src/cacheness/file_hashing.py`.
-- Use verbs for operations (`create_metadata_backend`, `validate_config`, `register_handler`) and `is_`/`has_`/`can_` predicates (`is_custom_metadata_available`, `can_handle`).
-- Preserve `__dunder__` names for protocol methods and use `@property` for read-only identifiers such as handler `data_type`.
+- Use four-space indentation, PEP 8 spacing, focused functions, and module or
+  public-API docstrings where context is not obvious.
+- Group imports as standard library, third party, then local package imports.
+  Guard optional imports at the feature boundary.
+- Ruff targets Python 3.11 with an 88-character line length. The repository has
+  historical baseline findings, so new/edited Python must pass scoped
+  `ruff check` without adding suppressions lacking a local reason.
+- Prefer f-strings and clear structured logging context. Avoid broad exception
+  catches at new boundaries.
 
-**Variables:**
-- Use descriptive lowercase `snake_case` names (`cache_dir`, `metadata_backend`, `error_context`).
-- Use uppercase names for module constants and capability flags (`SQLALCHEMY_AVAILABLE`, `PSYCOPG_AVAILABLE`, `BLOSC2_AVAILABLE`, `DEFAULT_TTL`-style sentinels).
-- Prefix intentionally private module state with `_`, for example `_default_registry` in `src/cacheness/__init__.py` and `_metadata_backend_registry` in `src/cacheness/storage/backends/__init__.py`.
+## Errors, logging, and security
 
-**Types:**
-- Use PascalCase for classes and exception types (`UnifiedCache`, `CacheConfig`, `CacheStorageError`, `PostgresBackend`).
-- Model grouped configuration as `@dataclass` classes in `src/cacheness/config.py`.
-- Use abstract base classes and focused interfaces in `src/cacheness/interfaces.py` and `src/cacheness/storage/backends/base.py`; concrete implementations inherit the relevant interface.
-- Type hints mix Python 3.11+ built-in generics (`list`, `dict`) with `typing.Optional`, `List`, `Dict`, `Tuple`, and `Union`. Match the surrounding module when extending it and type public boundaries where practical.
+- Raise the domain hierarchy in `error_handling.py` or handler-specific errors
+  in `interfaces.py`. Translate a narrow operational exception with
+  `raise ... from exc` when the public boundary needs a domain error.
+- Use `debug` for detail, `info` for successful lifecycle events, `warning` for
+  explicit fallbacks/partial outcomes, and `error` for domain failures.
+- Treat application payload bytes as trusted, but treat persisted metadata,
+  paths, descriptors, and transport evidence as untrusted inputs. Preserve
+  containment, safe parsing, signing, and fail-closed integrity checks.
 
-## Code Style
+## Storage and handler conventions
 
-**Formatting:**
-- Use four-space indentation and conventional PEP 8 spacing. The configured target line length is 88 in `pyproject.toml` (`[tool.ruff]`), although existing source and tests contain longer lines and trailing whitespace.
-- Start modules with a descriptive module docstring; multi-line public APIs generally use Google-style `Args`, `Returns`, and `Raises` sections. Examples include `src/cacheness/core.py`, `src/cacheness/error_handling.py`, and `src/cacheness/interfaces.py`.
-- Use section banner comments (`# =============================================================================`) in larger modules and test files to separate registries, fixtures, and behavior groups; follow the pattern in `src/cacheness/handlers.py` and `tests/test_blob_backend_registry.py`.
-- Use f-strings for structured messages, paths, and log records. Preserve comments explaining optional dependency behavior, compatibility aliases, and platform-specific workarounds.
+- `BlobStore` is the only lifecycle coordinator. A handler writes/reads a
+  private staged or snapshot artifact; it does not pick visible generations or
+  create managed paths.
+- Register a custom format through `store.handlers.register_handler(...)` and
+  keep its serialization/deserialization contract independent of cache policy.
+- `UnifiedCache` layers keys, TTL, outcomes, invalidation, and maintenance over
+  one store. Do not add a second metadata authority to policy code.
+- Read ADR 0001 before modifying lifecycle, topology, concurrency, recovery,
+  or timeouts. A new lock, queue, startup protocol, projection gate, or
+  cross-resource transaction proposal is an architectural stop condition.
 
-**Linting:**
-- Run `uv run ruff check src tests`; Ruff is declared at `>=0.12.8` in the `dev` dependency group.
-- `pyproject.toml` sets Ruff `target-version = "py312"` and ignores `B008` and `C901`. The intended lint groups are documented in comments (`E`, `W`, `F`, `I`, `B`, `C4`, `UP`), but the `lint.select` setting is commented out, so do not assume import sorting or all optional rule groups are enforced.
-- The current source/test tree produces 123 findings under the active Ruff defaults; the complete repository produces 137 findings because examples, benchmarks, and `verify_platform.py` add another 14. Findings include unused imports/locals, redefinitions, late imports, bare `except`, and lambda assignment. New code should avoid adding to this baseline and should not use `# noqa` without a local reason.
+## Tests and packaging
 
-**Enforcement reality:**
-- Ruff is configured but no CI workflow runs it, and the active default rules already fail. Treat the style guidance as a target, not as a verified invariant of existing files.
-- `lint.select` is commented out in `pyproject.toml`; only Ruff's default rule set plus the two ignores is active. The comments listing `I`, `B`, `C4`, and `UP` do not enable those groups.
-- Formatting is not configured separately (`ruff format`, Black, or Prettier equivalent); line length 88 informs Ruff rules but does not prove the tree is formatter-clean.
-
-## Import Organization
-
-**Order:**
-1. Standard-library imports (`logging`, `pathlib`, `typing`, `dataclasses`, and similar).
-2. Third-party imports (`pytest`, `numpy`, `sqlalchemy`, `xxhash`, and optional libraries).
-3. Local package imports (`from .config ...`, `from cacheness ...`).
-
-The grouping is visible in `src/cacheness/core.py` and most tests, but it is not mechanically enforced and some files place `pytest` or `Path` in a different order. Keep imports grouped and remove unused imports when touching a module.
-
-**Path Aliases:**
-- No configured import path aliases were detected. Use package-relative imports inside `src/cacheness` and `cacheness.<module>` imports in tests, as shown in `tests/test_core.py` and `tests/test_error_handling.py`.
-- Import optional dependencies lazily or behind `try/except ImportError` when the feature is optional. Examples include `src/cacheness/__init__.py`, `src/cacheness/handlers.py`, and `src/cacheness/storage/backends/s3_backend.py`.
-
-## Error Handling
-
-**Patterns:**
-- Raise the domain-specific hierarchy from `src/cacheness/error_handling.py` (`CacheError` and its configuration, storage, serialization, handler, integrity, and metadata subclasses) for cross-cutting cache failures.
-- Handler-specific failures use `CacheHandlerError` and its `CacheWriteError`, `CacheReadError`, `CacheFormatError`, and `CacheValidationError` subclasses in `src/cacheness/interfaces.py`.
-- Preserve the original cause with `raise ... from e` when translating `OSError`, import, serialization, or backend failures. `with_error_handling` in `src/cacheness/error_handling.py` adds function/argument context and either reraises or returns a configured fallback.
-- Use `pytest.raises` with a specific exception and, where stable, `match=` in tests; see `tests/test_directory_sharding.py`, `tests/test_handler_registration.py`, and `tests/test_error_handling.py`.
-- Handle optional features explicitly: capability detection is represented by flags such as `SQLALCHEMY_AVAILABLE`, and unavailable optional paths should be skipped or produce a clear install-oriented error.
-- Do not copy the current broad-exception pattern into new boundaries. `src/cacheness/core.py`, `src/cacheness/handlers.py`, `src/cacheness/metadata.py`, and `src/cacheness/sql_cache.py` frequently catch `Exception`; several paths convert failures into misses, empty results, warnings, or partial data. New code should catch the narrow operational exception, preserve its cause, and make partial-success policy explicit.
-
-## Logging
-
-**Framework:** Python standard-library `logging`, with `logger = logging.getLogger(__name__)` in library modules such as `src/cacheness/config.py`, `src/cacheness/core.py`, and `src/cacheness/metadata.py`.
-
-**Patterns:**
-- Use `debug` for configuration and operation details, `info` for backend selection/lifecycle and successful cache operations, `warning` for fallbacks or suppressed failures, and `error` for domain failures.
-- Include operation context in messages or with `extra=...`; `src/cacheness/error_handling.py` demonstrates both structured context and duration logging.
-- Tests that assert logs should use `caplog.at_level(...)` and inspect `caplog.text`, as in `tests/test_error_handling.py` and `tests/test_interfaces.py`.
-- Preserve the existing user-facing log style, including backend/lifecycle messages and the existing emoji status prefixes in `src/cacheness/core.py`, when modifying adjacent operations.
-
-## Comments
-
-**When to Comment:**
-- Add module/class/function docstrings for public APIs and explain non-obvious serialization, backend, concurrency, or compatibility decisions.
-- Use short inline comments for algorithm steps and resource cleanup; larger phase/feature sections in `src/cacheness/config.py` and `tests/test_config_validation.py` use banner comments.
-- Document why imports are lazy, why a fallback is selected, or why a test is skipped. Avoid comments that merely restate a simple line.
-
-**JSDoc/TSDoc:**
-- Not applicable. This is a Python project; docstrings are the API documentation mechanism.
-- Google-style docstrings are common for library interfaces, with examples in `src/cacheness/interfaces.py` and `src/cacheness/error_handling.py`. Tests generally use one-line docstrings on classes and test methods.
-
-## Function Design
-
-**Size:**
-- Keep new functions focused around one cache, serialization, backend, or validation responsibility. Existing large modules (`src/cacheness/sql_cache.py`, `src/cacheness/metadata.py`, `src/cacheness/handlers.py`, and `src/cacheness/core.py`) contain long orchestration methods, so extract helpers rather than growing those methods further.
-
-**Parameters:**
-- Type public parameters when stable; use `Optional[...]` for optional configuration and `**kwargs` for backend-specific options or cache-key parameters, matching `src/cacheness/core.py` and `src/cacheness/storage/backends/blob_backends.py`.
-- Pass grouped behavior through configuration objects (`CacheConfig` and its sub-configurations in `src/cacheness/config.py`) instead of adding unrelated flags to every handler method.
-
-**Return Values:**
-- Return concrete values that callers can inspect: handlers return metadata dictionaries, backends return storage paths/bytes/bools, and validators return lists of errors or raise in strict mode.
-- Use `None` for an absent optional object and explicit booleans for predicates. Keep metadata keys stable because tests and signing code inspect them directly (for example, `tests/test_handlers.py` and `tests/test_cache_integrity.py`).
-
-## Module Design
-
-**Exports:**
-- Expose the supported convenience API through `__all__` in `src/cacheness/__init__.py`; optional exports are added only when their dependencies/imports are available.
-- Keep registry functions and backend classes together with their registry implementation (`src/cacheness/storage/backends/__init__.py` and `src/cacheness/storage/backends/blob_backends.py`).
-- When an export is conditional, test the dependency itself rather than merely importing a helper function. `src/cacheness/__init__.py` currently reports YAML helpers as available even though PyYAML is only imported when the helper is called.
-
-**Barrel Files:**
-- Package `__init__.py` files act as deliberate barrels for public convenience imports: `src/cacheness/__init__.py` and `src/cacheness/storage/__init__.py` re-export core classes, handlers, metadata backends, and storage APIs.
-- Prefer direct module imports for internal implementation dependencies to avoid expanding the public surface or creating circular imports; optional imports in `src/cacheness/core.py` are kept inside methods for this reason.
+- Prefer real temporary local stores and small fake collaborators. Mock only
+  unavailable optional services, time, permissions, or SDK boundaries.
+- Restore global registry state in tests and close stores/backends constructed
+  by fixtures. Keep live service tests behind explicit markers.
+- For package/dependency changes, run `uv lock --check` and the existing
+  isolated-wheel probe. Artifact evidence must inspect the built wheel and its
+  installed metadata, not only the source checkout.
+- Preserve dated audit/planning records when current maps are refreshed. Update
+  current claims surgically rather than erasing historical evidence.
 
 ---
 
-*Convention analysis: 2026-08-29*
+*Current conventions map refreshed for the post-cut product boundary on 2026-09-17.*
