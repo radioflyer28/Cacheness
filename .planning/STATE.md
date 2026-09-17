@@ -3,17 +3,17 @@ gsd_state_version: 1.0
 milestone: v1.0
 current_phase: 09
 current_phase_name: Adoption and Release Surface Closure
-status: executing
-stopped_at: Completed 09-09-PLAN.md
-last_updated: "2026-09-17T04:20:47.441Z"
+status: verifying
+stopped_at: Completed 09-10-PLAN.md
+last_updated: "2026-09-17T04:41:32.060Z"
 last_activity: 2026-09-17
-last_activity_desc: Phase 09 Plan 09 public API and format extension documentation completed
-state_head: cb801e01e5b32ff23e0b4997fc9dff548cda3a0e
+last_activity_desc: Phase 09 Plan 10 evidence metadata and dormant Narwhals seed completed
+state_head: 64e6eda84017fc2d1c2b73fc73dc6bad36cecd97
 progress:
   total_phases: 11
   completed_phases: 8
   total_plans: 143
-  completed_plans: 141
+  completed_plans: 142
 milestone_name: milestone
 ---
 
@@ -28,10 +28,10 @@ See: .planning/PROJECT.md (updated 2026-09-15)
 
 ## Current Position
 
-Phase: 09 (Adoption and Release Surface Closure) — EXECUTING
+Phase: 09 (Adoption and Release Surface Closure) — VERIFYING
 Plan: 10 of 10
-Status: Ready to execute
-Last activity: 2026-09-17 — Phase 09 Plan 09 public API and format extension documentation completed
+Status: Phase complete — ready for verification
+Last activity: 2026-09-17 — Phase 09 Plan 10 evidence metadata and dormant Narwhals seed completed
 
 Current execution chain: **08-18 complete → 08-19 complete → 08-16 complete → independent Phase 08 verification**. No older Phase 8 ordering statement overrides this chain.
 
@@ -235,6 +235,7 @@ Raw file counts include superseded plans and therefore are not completion claims
 | Phase 09 P06 | 2min | 2 tasks | 7 files |
 | Phase 09 P07 | 420 | 2 tasks | 7 files |
 | Phase 09 P09 | 2m | 2 tasks | 8 files |
+| Phase 09 P10 | 15m | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -561,6 +562,9 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - [Phase 09]: Phase 09 Plan 08: SHA-256 plus size remains canonical integrity while ETag/version is opaque corroboration; format handlers use contained private staging and fail-closed parsing boundaries.
 - [Phase 09]: Phase 09 Plan 09: public API reference is limited to current barrels and delegates qualification claims to their single owner.
 - [Phase 09]: Phase 09 Plan 09: generic format extensions use persisted payload identities and store-local FormatHandler registration, not a global lifecycle API.
+- [Phase 09]: Phase 3 historical verifier gaps are superseded by named scoped-local closure evidence; do not reopen lifecycle coordination.
+- [Phase 09]: Phase 8 LOCAL_READY completes only local Wave 0/Nyquist evidence; remote, platform, performance, and publication nonclaims remain explicit.
+- [Phase 09]: Narwhals remains a dormant future dataframe compatibility investigation; native handlers retain Parquet and persisted format identities.
 
 ### Pending Todos
 
@@ -599,6 +603,6 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 
 ## Session Continuity
 
-Last session: 2026-09-17T04:20:47.233Z
-Stopped at: Completed 09-09-PLAN.md
+Last session: 2026-09-17T04:41:31.827Z
+Stopped at: Completed 09-10-PLAN.md
 Resume file: None
