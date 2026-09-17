@@ -21,6 +21,8 @@ from cacheness.storage.composition import qualified_topology_profiles
 REPOSITORY_ROOT = Path(__file__).parents[1]
 CATALOG_PATH = REPOSITORY_ROOT / "docs" / "CATALOG_AND_TOPOLOGY.md"
 INITIALIZATION_PATH = REPOSITORY_ROOT / "docs" / "STORAGE_INITIALIZATION.md"
+MIGRATION_PATH = REPOSITORY_ROOT / "docs" / "STORAGE_MIGRATION.md"
+QUALIFICATION_PATH = REPOSITORY_ROOT / "docs" / "RELEASE_QUALIFICATION.md"
 COVERAGE_PATH = REPOSITORY_ROOT / (
     ".planning/phases/05-payload-backends-and-supported-topology-qualification/"
     "05-COVERAGE.md"
@@ -30,8 +32,6 @@ TOPOLOGY_START = "<!-- phase5-topology-matrix:start -->"
 TOPOLOGY_END = "<!-- phase5-topology-matrix:end -->"
 COVERAGE_START = "<!-- phase5-api-coverage:start -->"
 COVERAGE_END = "<!-- phase5-api-coverage:end -->"
-INITIALIZATION_START = "<!-- phase5-initialization-contract:start -->"
-INITIALIZATION_END = "<!-- phase5-initialization-contract:end -->"
 
 TOPOLOGY_HEADERS = (
     "profile",
@@ -178,19 +178,26 @@ def test_published_topology_matrix_matches_immutable_runtime_profiles() -> None:
 
 def test_documentation_declares_requirements_not_an_observed_remote_status() -> None:
     """Docs cannot mirror mutable live evidence or turn local green into BACK-05."""
-    for path in (CATALOG_PATH, INITIALIZATION_PATH, COVERAGE_PATH):
+    # Mutable evidence status belongs only to RELEASE_QUALIFICATION.md.  The
+    # static topology/catalog and historical API-coverage contracts must not
+    # mirror an observation.
+    for path in (CATALOG_PATH, COVERAGE_PATH):
         text = path.read_text(encoding="utf-8")
         assert not re.search(r"\b(?:QUALIFIED|UNAVAILABLE|NOT_QUALIFIED)\b", text)
         assert "latest observed status" not in text.lower()
 
-    initialization = _marker_text(
-        INITIALIZATION_PATH, INITIALIZATION_START, INITIALIZATION_END
-    )
-    assert "explicit PostgreSQL initialization before shared workers" in initialization
-    assert "read-only version validation" in initialization
-    assert re.search(r"stopped-worker\s+Phase 7 migration", initialization)
-    assert "Amazon S3" in initialization
-    assert "shared external manifest signing key" in initialization
+    topology = CATALOG_PATH.read_text(encoding="utf-8")
+    initialization = INITIALIZATION_PATH.read_text(encoding="utf-8")
+    migration = MIGRATION_PATH.read_text(encoding="utf-8")
+    qualification = QUALIFICATION_PATH.read_text(encoding="utf-8")
+
+    assert "explicit PostgreSQL initialization before shared workers" in topology
+    assert "Amazon S3" in topology
+    assert "shared external manifest signing key" in topology
+    assert "Ordinary opens then validate" in initialization
+    assert "read-only" in migration
+    assert "stopped-worker" in migration
+    assert "S3 and PostgreSQL remain `NOT_QUALIFIED`" in qualification
 
 
 def test_api_coverage_is_complete_and_every_opt_out_is_reasoned() -> None:
@@ -214,7 +221,6 @@ def test_api_coverage_is_complete_and_every_opt_out_is_reasoned() -> None:
     [
         (CATALOG_PATH, TOPOLOGY_START, TOPOLOGY_END),
         (COVERAGE_PATH, COVERAGE_START, COVERAGE_END),
-        (INITIALIZATION_PATH, INITIALIZATION_START, INITIALIZATION_END),
     ],
 )
 def test_contract_markers_are_unique(path: Path, start: str, end: str) -> None:

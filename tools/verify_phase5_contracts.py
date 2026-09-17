@@ -28,6 +28,8 @@ PHASE_DIRECTORY = REPOSITORY_ROOT / (
 )
 CATALOG_PATH = REPOSITORY_ROOT / "docs/CATALOG_AND_TOPOLOGY.md"
 INITIALIZATION_PATH = REPOSITORY_ROOT / "docs/STORAGE_INITIALIZATION.md"
+MIGRATION_PATH = REPOSITORY_ROOT / "docs/STORAGE_MIGRATION.md"
+QUALIFICATION_PATH = REPOSITORY_ROOT / "docs/RELEASE_QUALIFICATION.md"
 COVERAGE_PATH = PHASE_DIRECTORY / "05-COVERAGE.md"
 DEFAULT_EVIDENCE_PATH = PHASE_DIRECTORY / "05-LIVE-QUALIFICATION.json"
 PYTEST_TIMEOUT_SECONDS = 300
@@ -36,8 +38,6 @@ TOPOLOGY_START = "<!-- phase5-topology-matrix:start -->"
 TOPOLOGY_END = "<!-- phase5-topology-matrix:end -->"
 COVERAGE_START = "<!-- phase5-api-coverage:start -->"
 COVERAGE_END = "<!-- phase5-api-coverage:end -->"
-INITIALIZATION_START = "<!-- phase5-initialization-contract:start -->"
-INITIALIZATION_END = "<!-- phase5-initialization-contract:end -->"
 
 TOPOLOGY_HEADERS = (
     "profile",
@@ -191,20 +191,36 @@ def verify_document_contract() -> tuple[str, ...]:
             if row["decision"] not in {"INTEGRATE", "OPT-OUT"} or not row["reason"]:
                 errors.append(f"unreasoned API coverage row: {row['capability']}")
 
-        initialization = _read_marker_text(
-            INITIALIZATION_PATH, INITIALIZATION_START, INITIALIZATION_END
-        )
-        for required in (
-            "explicit PostgreSQL initialization before shared workers",
-            "read-only version validation",
-            "Phase 7 migration",
-            "Amazon S3",
-            "shared external manifest signing key",
-        ):
-            if required not in initialization:
-                errors.append(f"initialization contract omits: {required}")
+        topology = CATALOG_PATH.read_text(encoding="utf-8")
+        initialization = INITIALIZATION_PATH.read_text(encoding="utf-8")
+        migration = MIGRATION_PATH.read_text(encoding="utf-8")
+        qualification = QUALIFICATION_PATH.read_text(encoding="utf-8")
+        required_by_owner = {
+            "topology contract": (
+                topology,
+                (
+                    "explicit PostgreSQL initialization before shared workers",
+                    "Amazon S3",
+                    "shared external manifest signing key",
+                ),
+            ),
+            "local initialization guide": (
+                initialization,
+                ("Ordinary opens then validate",),
+            ),
+            "migration guide": (migration, ("read-only", "stopped-worker")),
+            "qualification owner": (
+                qualification,
+                ("S3 and PostgreSQL remain `NOT_QUALIFIED`",),
+            ),
+        }
+        for owner, (text, required_terms) in required_by_owner.items():
+            for required in required_terms:
+                if required not in text:
+                    errors.append(f"{owner} omits: {required}")
 
-        for path in (CATALOG_PATH, INITIALIZATION_PATH, COVERAGE_PATH):
+        # Mutable evidence status is permitted only in the qualification owner.
+        for path in (CATALOG_PATH, COVERAGE_PATH):
             text = path.read_text(encoding="utf-8")
             if re.search(r"\b(?:QUALIFIED|UNAVAILABLE|NOT_QUALIFIED)\b", text):
                 errors.append(
