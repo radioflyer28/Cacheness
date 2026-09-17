@@ -748,11 +748,29 @@ Plans:
 
 ### Phase 11: Clean supplemental documentation and normalize validation evidence
 
-**Goal:** [To be planned]
+**Goal:** Close the milestone audit's supplemental-documentation and validation-evidence debt, directly remove dormant TensorFlow support across runtime/package/CI/docs/current maps, and derive a refreshed milestone verdict from bounded local acceptance without reopening lifecycle or concurrency implementation.
 **Requirements**: TBD
+**Decision contract:** No newly mapped requirement IDs; D-01 through D-20 in `11-CONTEXT.md` are the phase contract.
 **Depends on:** Phase 10
-**Plans:** 0 plans
+**Success Criteria** (what must be TRUE):
+
+1. TensorFlow is naturally unreachable from runtime, configuration, exports, package metadata/lock state, CI/qualification tooling, current documentation, and current codebase maps; retained handlers and local installed BlobStore/UnifiedCache journeys remain green.
+2. Verified supplemental value is consolidated into canonical API/release-qualification owners, redundant or misleading guides are deleted, and exactly four canonical executable examples remain current.
+3. Phase 3's finite integrity/recovery gate passes once and its compact validation record preserves direct-primary-agent provenance, approved local scope, ADR 0001 stop conditions, and all nonclaims; a genuine integrity/recovery defect halts the phase without lifecycle edits.
+4. Phase 1, 3, 5, 6, 7, 8, 9, and 11 validation records discover canonically with green or explicitly superseded evidence, while BACK-05, QUAL-06, native Windows, and immutable publication remain nonpassing deferrals.
+5. Focused contracts, scoped Ruff, lock freshness, a fresh source-free wheel, and one frozen non-live suite pass before the milestone audit derives and records its current verdict.
+
+**Plans:** 10 plans
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 11 to break down)
+- [ ] 11-01-PLAN.md — Encode the end-to-end negative wheel/document cutover contract.
+- [ ] 11-02-PLAN.md — Encode retained CI/profile, seed, validation-discovery, and audit-boundary contracts.
+- [ ] 11-03-PLAN.md — Remove TensorFlow runtime/config/export/package/lock/packaging surfaces.
+- [ ] 11-04-PLAN.md — Remove TensorFlow-only qualification profiles and CI jobs.
+- [ ] 11-05-PLAN.md — Consolidate verified supplemental guidance and delete stale guides.
+- [ ] 11-06-PLAN.md — Run the Phase 3 ADR stop gate and write its compact canonical validation record.
+- [ ] 11-07-PLAN.md — Refresh current agent/codebase maps and fulfill SEED-005.
+- [ ] 11-08-PLAN.md — Normalize Phase 1/5/6/7/8/9 validation records in place.
+- [ ] 11-09-PLAN.md — Run layered final acceptance and finalize Phase 11 Nyquist evidence.
+- [ ] 11-10-PLAN.md — Refresh the milestone audit last with an evidence-derived verdict.
