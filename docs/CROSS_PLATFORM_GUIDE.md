@@ -2,28 +2,33 @@
 
 ## Overview
 
-Cacheness is a **pure Python library** that works identically across all major platforms:
-- ✅ **Windows** (Windows 10+, tested on Windows 11)
-- ✅ **Linux** (Ubuntu, Debian, RHEL, etc.)
-- ✅ **macOS** (Intel and Apple Silicon)
+Cacheness supports Python 3.11 and newer, but platform qualification is
+deliberately tiered. The current development checkout has these evidence
+boundaries:
 
-The library uses platform-agnostic code and standard Python libraries, requiring **no platform-specific compilation or binary dependencies**.
+- **Linux** is the full stable-matrix qualification target.
+- **macOS** has only public-topology boundary-smoke coverage.
+- **Native Windows** is `UNAVAILABLE` / `NOT_QUALIFIED`.
+
+The package source uses portable Python interfaces where practical, while its
+installed dependency set can resolve platform-specific binary wheels. Refer to
+[Release qualification](RELEASE_QUALIFICATION.md) for the sole detailed owner
+of platform evidence and nonclaims.
 
 ## Wheel Distribution
 
 ### Universal Wheel
 
-Cacheness builds as a **universal wheel** (`py3-none-any`):
+Cacheness builds a project wheel tagged `py3-none-any`:
 ```bash
 uv build --wheel
 # Produces: cacheness-x.x.x-py3-none-any.whl
 ```
 
-This single wheel works on **all platforms** and Python 3.11+ interpreters because:
-- Pure Python implementation (no C extensions)
-- Platform-agnostic path handling using `pathlib`
-- Cross-platform dependencies (SQLAlchemy, NumPy, etc.)
-- No platform-specific code paths
+The tag describes the Cacheness project wheel only. Installation still resolves
+the declared dependency set for the target platform; those dependencies can
+include native or platform-specific wheels. A successful installation or
+portable wheel tag is not evidence of platform qualification.
 
 ### Building Distributions
 
@@ -188,19 +193,19 @@ except (OSError, NotImplementedError):
 
 ### Expected Test Results
 
-| Platform | Passed | Failed | Skipped | Notes |
-|----------|--------|--------|---------|-------|
-| Windows  | 475    | 0      | 8       | Symlinks (6), TensorFlow (2) |
-| Linux    | 475    | 0      | 2       | TensorFlow only |
-| macOS    | 475    | 0      | 2       | TensorFlow only |
-
-**Skipped tests on Windows:**
-- `test_symlink_handling` (6 tests) - Requires admin privileges
-- `test_tensorflow_*` (2 tests) - TensorFlow mutex issues (all platforms)
+Do not treat a historical count, a local test result, or an exploratory CI row
+as a support claim. The current qualified boundaries are Linux full-matrix
+coverage and macOS boundary smoke only. Native Windows has no qualification.
+The supported commands and the evidence they can establish are maintained in
+[Release qualification](RELEASE_QUALIFICATION.md).
 
 ## Continuous Integration
 
-### GitHub Actions Example
+### Exploratory GitHub Actions Example
+
+An exploratory operating-system matrix can find portability regressions. It is
+not the qualification matrix and does not make a native Windows or full macOS
+support claim.
 
 ```yaml
 name: Cross-Platform Tests
@@ -241,13 +246,11 @@ jobs:
 
 ### Windows
 
-**Advantages:**
-- Excellent SQLite WAL mode performance
-- Native path handling with `pathlib`
-- Full feature parity with Unix
+Native Windows is currently `UNAVAILABLE` / `NOT_QUALIFIED`. The following
+notes are development guidance for an exploratory environment, not evidence of
+supported behavior:
 
-**Considerations:**
-- Stricter file locking (requires explicit `close()`)
+- File locking is stricter and requires explicit `close()` calls.
 - MAX_PATH limitation (260 characters) - use short cache paths
 - Symbolic links require administrator privileges
 - Case-insensitive filesystem (usually)
@@ -263,15 +266,9 @@ else:
 
 ### Linux
 
-**Advantages:**
-- Permissive file locking
-- Unlimited path lengths
-- Native symbolic link support
-- Case-sensitive filesystem
-
-**Considerations:**
-- File permissions may restrict cache directory access
-- Different temp directory locations (`/tmp`, `/var/tmp`)
+Linux is the full stable-matrix qualification target. Qualification evidence
+is tied to its recorded revision and command; it does not establish universal
+performance or behavior equivalence.
 
 **Recommendations:**
 ```python
@@ -283,15 +280,8 @@ cache_dir = Path(os.environ.get('XDG_CACHE_HOME',
 
 ### macOS
 
-**Advantages:**
-- Similar to Linux for most operations
-- Native symbolic link support
-- Excellent SQLite performance
-
-**Considerations:**
-- Case-insensitive by default (but case-preserving)
-- Apple Silicon (ARM64) vs Intel (x86_64) compatibility
-- Gatekeeper may require notarization for distribution
+macOS is limited to Python 3.11/3.14 public-topology boundary smoke. A local
+Darwin result does not establish Linux equivalence or a full macOS matrix.
 
 **Recommendations:**
 ```python
@@ -301,29 +291,17 @@ cache_dir = Path.home() / 'Library' / 'Caches' / 'myapp'
 
 ## Performance Characteristics
 
-### SQLite Performance
-
-All platforms benefit from WAL mode:
-- **Concurrent reads**: Unlimited
-- **Concurrent writes**: Single writer, multiple readers
-- **Performance**: Similar across platforms on SSD storage
-
-### File I/O Performance
-
-| Operation | Windows | Linux | macOS |
-|-----------|---------|-------|-------|
-| Sequential read | ✅ Excellent | ✅ Excellent | ✅ Excellent |
-| Random read | ✅ Good | ✅ Excellent | ✅ Excellent |
-| Sequential write | ✅ Good | ✅ Excellent | ✅ Excellent |
-| Directory listing | ⚠️ Slower | ✅ Fast | ✅ Fast |
-
-**Optimization tip**: On Windows, minimize directory scanning by using specific cache queries instead of `list_entries()` on large caches.
+Performance evidence is separate from functional qualification. Controlled
+Linux performance remains deferred, and macOS timings are diagnostic only.
+See [Release qualification](RELEASE_QUALIFICATION.md) rather than inferring
+comparative I/O or concurrency performance from this guide.
 
 ## Distribution and Installation
 
 ### PyPI Publishing
 
-The universal wheel works on all platforms:
+Build and install the Cacheness project wheel using the normal packaging
+commands. Installation does not qualify the target platform:
 
 ```bash
 # Build distributions
@@ -429,14 +407,10 @@ path = Path("cache") / "data" / "file.json"
 
 ## Conclusion
 
-Cacheness is **fully cross-platform** with:
-- ✅ Single universal wheel for all platforms
-- ✅ No platform-specific code or compilation
-- ✅ Identical API and behavior everywhere
-- ✅ 475/475 tests passing on Windows, Linux, macOS
-- ✅ No need for platform-specific builds
-
-The library follows Python best practices for cross-platform compatibility and leverages the standard library's platform abstraction layers.
+Cacheness has a Linux full-matrix target and macOS boundary-smoke evidence for
+this checkout. Native Windows remains `UNAVAILABLE` / `NOT_QUALIFIED`.
+Consult [Release qualification](RELEASE_QUALIFICATION.md) before treating any
+test, wheel, or benchmark result as broader platform support.
 
 ## Related Documentation
 
