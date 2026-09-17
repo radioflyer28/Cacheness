@@ -184,3 +184,29 @@ def test_mcap_extension_tutorial_uses_one_store_local_safe_format_path() -> None
         "conformance kit",
     ):
         assert retired_or_out_of_scope not in source
+
+
+def test_navigation_has_no_pre_cutover_configuration_or_backend_branches() -> None:
+    """Only current task guides remain on the supported documentation path."""
+
+    for obsolete in (
+        "docs/BACKEND_SELECTION.md",
+        "docs/CONFIGURATION.md",
+        "docs/DEVELOPMENT_PLANNING.md",
+    ):
+        assert not (PROJECT_ROOT / obsolete).exists()
+
+    navigation = DOCS_INDEX.read_text(encoding="utf-8")
+    for retired_guide in (
+        "BACKEND_SELECTION.md",
+        "CONFIGURATION.md",
+        "DEVELOPMENT_PLANNING.md",
+    ):
+        assert retired_guide not in navigation
+
+    for current_guide in (
+        "BLOB_STORE.md",
+        "CACHE_POLICY.md",
+        "RELEASE_QUALIFICATION.md",
+    ):
+        assert current_guide in navigation

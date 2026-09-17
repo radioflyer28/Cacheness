@@ -32,5 +32,10 @@ organized by the work you want to do; each uses the current explicit API.
 - [Release qualification](RELEASE_QUALIFICATION.md) — the sole detailed owner
   of topology, platform, payload-bound, performance, and publication claims.
 
+Configuration follows the job it affects: construct a direct store from the
+topology in [Direct BlobStore and catalog metadata](BLOB_STORE.md), or add
+cache policy with [UnifiedCache policy](CACHE_POLICY.md). Use the qualification
+guide to determine which topology claims have evidence for this checkout.
+
 The [example directory](../examples/README.md) contains the exact executable
 local journeys used by the quality workflow.
