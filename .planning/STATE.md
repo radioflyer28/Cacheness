@@ -2,18 +2,18 @@
 gsd_state_version: 1.0
 milestone: v1.0
 current_phase: 09
-current_phase_name: adoption-and-release-surface-closure
-status: ready_to_plan
-stopped_at: Phase 09 context gathered
-last_updated: "2026-09-17T00:59:07.383Z"
-last_activity: 2026-09-15
-last_activity_desc: Phase 09 added from the v1.0 milestone audit
-state_head: 63b05ed26b5f7a34feadf0f3f3fc4f9efb82319d
+current_phase_name: Adoption and Release Surface Closure
+status: executing
+stopped_at: Completed 09-01-PLAN.md
+last_updated: "2026-09-17T02:50:48.328Z"
+last_activity: 2026-09-16
+last_activity_desc: Phase 09 execution started
+state_head: b1281f3d16a4a243f72386a7ad6a4d84809fabb7
 progress:
   total_phases: 11
   completed_phases: 8
   total_plans: 143
-  completed_plans: 132
+  completed_plans: 133
 milestone_name: milestone
 ---
 
@@ -28,10 +28,10 @@ See: .planning/PROJECT.md (updated 2026-09-15)
 
 ## Current Position
 
-Phase: 09 (adoption-and-release-surface-closure) — READY TO EXECUTE
-Plan: Not started
-Status: Ready for discussion and planning
-Last activity: 2026-09-15 — Phase 09 added from the v1.0 milestone audit
+Phase: 09 (Adoption and Release Surface Closure) — EXECUTING
+Plan: 2 of 10
+Status: Ready to execute
+Last activity: 2026-09-16 — Phase 09 execution started
 
 Current execution chain: **08-18 complete → 08-19 complete → 08-16 complete → independent Phase 08 verification**. No older Phase 8 ordering statement overrides this chain.
 
@@ -227,6 +227,7 @@ Raw file counts include superseded plans and therefore are not completion claims
 | Phase 08 P18 | 8min | 1 tasks | 1 files |
 | Phase 08 P19 | 9m | 2 tasks | 1 files |
 | Phase 08 P16 | 2h 57m | 2 tasks | 8 files |
+| Phase 09 P01 | 5min | 2 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -538,6 +539,7 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - [Phase 08]: The post-08-18 coverage deficit is a tests-only validation gap: Plan 08-19 exercises exact SQLite configuration, deadline, error-translation, identity, and schema rejection paths without lowering the baseline or changing lifecycle code.
 - [Phase 08]: Phase 08 Plan 19 restores QUAL-05 only through meaningful SQLite validation and fail-closed corruption tests; no lifecycle, baseline, or concurrency semantics changed.
 - [Phase 08]: Canonical JSON local-readiness evidence validates against the exact key set and cardinality, not mapping iteration order.
+- [Phase 09]: Alias-free FormatHandler cutover preserves durable handler/payload identities and the existing store-local registry seam.
 
 ### Pending Todos
 
@@ -576,6 +578,6 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 
 ## Session Continuity
 
-Last session: 2026-09-16T22:34:16.840Z
-Stopped at: Phase 09 context gathered
-Resume file: .planning/phases/09-adoption-and-release-surface-closure/09-CONTEXT.md
+Last session: 2026-09-17T02:50:48.135Z
+Stopped at: Completed 09-01-PLAN.md
+Resume file: None
