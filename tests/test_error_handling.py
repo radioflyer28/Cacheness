@@ -26,7 +26,7 @@ from cacheness.error_handling import (
     CacheConfigurationError,
     CacheStorageError,
     CacheSerializationError,
-    CacheHandlerError,
+    FormatHandlerError,
     CacheIntegrityError,
     CacheMetadataError,
     with_error_handling,
@@ -72,7 +72,7 @@ class TestCacheErrorHierarchy:
             CacheConfigurationError,
             CacheStorageError,
             CacheSerializationError,
-            CacheHandlerError,
+            FormatHandlerError,
             CacheIntegrityError,
             CacheMetadataError,
         ]
@@ -101,11 +101,11 @@ class TestWithErrorHandlingDecorator:
 
     def test_decorator_converts_other_exceptions(self):
         """Test that decorator converts non-cache exceptions."""
-        @with_error_handling(error_type=CacheHandlerError)
+        @with_error_handling(error_type=FormatHandlerError)
         def failing_function():
             raise ValueError("Original error")
 
-        with pytest.raises(CacheHandlerError) as exc_info:
+        with pytest.raises(FormatHandlerError) as exc_info:
             failing_function()
         
         assert "Error in failing_function: Original error" in str(exc_info.value)
