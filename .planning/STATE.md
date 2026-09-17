@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 09
 current_phase_name: Adoption and Release Surface Closure
 status: executing
-stopped_at: Completed 09-08-PLAN.md
-last_updated: "2026-09-17T04:07:57Z"
+stopped_at: Completed 09-09-PLAN.md
+last_updated: "2026-09-17T04:20:47.441Z"
 last_activity: 2026-09-17
-last_activity_desc: Phase 09 Plan 08 qualification documentation completed
-state_head: d3d0be57f92427d0e1be80165d6632bf195f6d3c
+last_activity_desc: Phase 09 Plan 09 public API and format extension documentation completed
+state_head: cb801e01e5b32ff23e0b4997fc9dff548cda3a0e
 progress:
   total_phases: 11
   completed_phases: 8
   total_plans: 143
-  completed_plans: 139
+  completed_plans: 141
 milestone_name: milestone
 ---
 
@@ -29,9 +29,9 @@ See: .planning/PROJECT.md (updated 2026-09-15)
 ## Current Position
 
 Phase: 09 (Adoption and Release Surface Closure) — EXECUTING
-Plan: 9 of 10
+Plan: 10 of 10
 Status: Ready to execute
-Last activity: 2026-09-17 — Phase 09 Plan 08 qualification documentation completed
+Last activity: 2026-09-17 — Phase 09 Plan 09 public API and format extension documentation completed
 
 Current execution chain: **08-18 complete → 08-19 complete → 08-16 complete → independent Phase 08 verification**. No older Phase 8 ordering statement overrides this chain.
 
@@ -234,6 +234,7 @@ Raw file counts include superseded plans and therefore are not completion claims
 | Phase 09 P05 | 4min | 1 tasks | 5 files |
 | Phase 09 P06 | 2min | 2 tasks | 7 files |
 | Phase 09 P07 | 420 | 2 tasks | 7 files |
+| Phase 09 P09 | 2m | 2 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -558,6 +559,8 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - [Phase 09]: Phase 09 Plan 07: SQLite plus filesystem guidance promises crash consistency through immutable generations and reconciliation, not cross-resource ACID.
 - [Phase 09]: Phase 09 Plan 08: RELEASE_QUALIFICATION.md is the sole detailed evidence matrix; local readiness leaves S3/PostgreSQL, Windows, controlled Linux performance, and immutable publication explicitly nonpassing.
 - [Phase 09]: Phase 09 Plan 08: SHA-256 plus size remains canonical integrity while ETag/version is opaque corroboration; format handlers use contained private staging and fail-closed parsing boundaries.
+- [Phase 09]: Phase 09 Plan 09: public API reference is limited to current barrels and delegates qualification claims to their single owner.
+- [Phase 09]: Phase 09 Plan 09: generic format extensions use persisted payload identities and store-local FormatHandler registration, not a global lifecycle API.
 
 ### Pending Todos
 
@@ -596,6 +599,6 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 
 ## Session Continuity
 
-Last session: 2026-09-17T03:48:20.387Z
-Stopped at: Completed 09-07-PLAN.md
+Last session: 2026-09-17T04:20:47.233Z
+Stopped at: Completed 09-09-PLAN.md
 Resume file: None
