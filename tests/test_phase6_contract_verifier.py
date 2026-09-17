@@ -46,7 +46,14 @@ def test_manifest_is_fixed_and_contains_the_strict_projection_node() -> None:
         "tests/contracts/test_phase6_topology_policy.py",
         "tests/test_catalog_projection.py::"
         "test_json_projection_rejects_incompatible_derived_documents",
-        "tests/test_sql_cache.py",
+    )
+    assert tuple(verifier.CACH_REQUIREMENT_NODES) == (
+        "CACH-01",
+        "CACH-02",
+        "CACH-03",
+        "CACH-04",
+        "CACH-05",
+        "CACH-06",
     )
     assert set(verifier.RETAINED_LIFECYCLE_NODES) == {
         "tests/test_phase3_local_workflows.py",
@@ -58,12 +65,14 @@ def test_manifest_is_fixed_and_contains_the_strict_projection_node() -> None:
         "tests/test_supported_topologies.py",
     }
     assert verifier.FIXED_REGRESSION_NODES == {
-        "CACH-07 SqlCache regression": ("tests/test_sql_cache.py",),
         "Canonical decorator and key regressions": (
             "tests/test_decorators.py",
             "tests/test_cache_key_consistency.py",
         ),
     }
+    assert verifier._CUTOVER_REQUIREMENT_LABELS == tuple(
+        verifier.CACH_REQUIREMENT_NODES
+    )
     assert verifier.CANONICAL_CUTOVER_NODES == (
         "tests/test_blob_manifest.py",
         "tests/test_filesystem_containment.py",
