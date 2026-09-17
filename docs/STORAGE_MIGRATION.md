@@ -7,6 +7,10 @@
 store. This guide exposes the single supported maintenance surface: the
 Python-library `cacheness.storage.OfflineMigrationService` API.
 
+> **SqlCache cutover:** Cacheness no longer ships SqlCache or a range-aware SQL pull-through cache. `UnifiedCache` provides object/function caching over
+> `BlobStore`, and `BlobStore` provides direct object persistence. There is no in-package replacement.
+> caller-owned SQL tables are untouched and unsupported; they are outside migration/rebuild tooling.
+
 The stopped-worker maintenance sequence is explicit: inventory the source,
 stage a copy into the selected destination, verify every candidate, then switch
 the authority selection through activation. If the source is incompatible or

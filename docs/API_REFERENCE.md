@@ -5,6 +5,10 @@ names imports from the two supported barrels, then points to the task guides
 for complete workflows. `BlobStore` owns storage lifecycle; `UnifiedCache`
 adds cache policy above a store selected by the application.
 
+> **SqlCache cutover:** Cacheness no longer ships SqlCache or a range-aware SQL pull-through cache. `UnifiedCache` provides object/function caching over
+> `BlobStore`, and `BlobStore` provides direct object persistence. There is no in-package replacement.
+> caller-owned SQL tables are untouched and unsupported; they are outside migration/rebuild tooling.
+
 ## Current public imports
 
 Cache policy and its typed results are available from `cacheness`:
