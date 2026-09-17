@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import importlib.util
 import os
 import subprocess
 import sys
@@ -23,8 +24,6 @@ from cacheness import (
     CacheRemovalReport,
     CacheStatistics,
     RoleRegistry,
-    SqlCache,
-    SqlCacheAdapter,
     StoreTopology,
     UnifiedCache,
     cached,
@@ -58,8 +57,6 @@ CANONICAL_PUBLIC_NAMES = (
     "BlobStore",
     "RoleRegistry",
     "StoreTopology",
-    "SqlCache",
-    "SqlCacheAdapter",
 )
 
 
@@ -230,12 +227,13 @@ def test_ordering_does_not_change_public_surface_or_store_identity(
     assert completed.returncode == 0, completed.stderr
 
 
-def test_sqlcache_remains_a_separate_supported_surface() -> None:
-    """SQL pull-through remains separately importable, never a UnifiedCache route."""
+def test_retired_sqlcache_surface_is_naturally_absent() -> None:
+    """SQL pull-through is not retained as a separate or cache-backed product."""
 
-    assert SqlCache.__module__ == "cacheness.sql_cache"
-    assert SqlCacheAdapter.__module__ == "cacheness.sql_cache"
-    assert not issubclass(SqlCache, UnifiedCache)
+    for retired_name in ("SqlCache", "SqlCacheAdapter"):
+        assert retired_name not in cacheness.__all__
+        assert not hasattr(cacheness, retired_name)
+    assert importlib.util.find_spec("cacheness.sql_cache") is None
     assert cached.__module__ == "cacheness.decorators"
     assert BlobStore.__module__ == "cacheness.storage.blob_store"
     assert RoleRegistry.__module__ == "cacheness.storage.composition"

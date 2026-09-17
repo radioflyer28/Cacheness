@@ -151,23 +151,19 @@ ORDER_ISOLATION_NODE_ORDERS = (
     (
         "tests/test_public_api_contract.py",
         "tests/test_phase6_public_api_contract.py",
-        "tests/test_sql_cache.py",
     ),
     (
-        "tests/test_sql_cache.py",
         "tests/test_phase6_public_api_contract.py",
         "tests/test_public_api_contract.py",
     ),
 )
 
 
-def test_canonical_public_and_sqlcache_pairs_run_in_both_orders() -> None:
-    """Every public/SqlCache pair is exercised in each relative order."""
+def test_canonical_public_pairs_run_in_both_orders() -> None:
+    """The two surviving public contracts are exercised in both relative orders."""
 
     for first, second in (
         ("tests/test_public_api_contract.py", "tests/test_phase6_public_api_contract.py"),
-        ("tests/test_public_api_contract.py", "tests/test_sql_cache.py"),
-        ("tests/test_phase6_public_api_contract.py", "tests/test_sql_cache.py"),
     ):
         relative_orders = {
             nodes.index(first) < nodes.index(second)
@@ -177,10 +173,10 @@ def test_canonical_public_and_sqlcache_pairs_run_in_both_orders() -> None:
 
 
 @pytest.mark.parametrize("nodes", ORDER_ISOLATION_NODE_ORDERS)
-def test_canonical_public_and_sqlcache_nodes_are_order_isolated(
+def test_canonical_public_nodes_are_order_isolated(
     nodes: tuple[str, ...],
 ) -> None:
-    """Public optional-import checks cannot pollute Phase 6 or SqlCache nodes."""
+    """Public optional-import checks cannot pollute the surviving contract nodes."""
     completed = subprocess.run(
         [sys.executable, "-m", "pytest", "-q", *nodes, "-o", "log_cli=false"],
         cwd=REPOSITORY_ROOT,

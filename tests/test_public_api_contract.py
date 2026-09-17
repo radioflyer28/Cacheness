@@ -145,10 +145,6 @@ class TestPublicExports:
             "unsupported_legacy_layout",
             "read_only_legacy_store",
             "invalid_legacy_signature",
-            "sql_cache_fetch_failed",
-            "sql_cache_gap_detection_failed",
-            "sql_cache_upsert_failed",
-            "missing_optional_dependency",
             "manifest_invalid",
             "manifest_bounds",
             "manifest_unsupported_version",
@@ -191,8 +187,8 @@ class TestPublicExports:
         )
 
 
-def test_optional_sqlcache_surface_remains_separate_when_dependency_is_blocked():
-    """Optional SQL support fails at construction without changing cache exports."""
+def test_retired_sqlcache_surface_is_naturally_absent_when_dependency_is_blocked():
+    """Optional imports stay isolated without retaining the retired product."""
 
     script = textwrap.dedent(
         """
@@ -207,16 +203,24 @@ def test_optional_sqlcache_surface_remains_separate_when_dependency_is_blocked()
 
         builtins.__import__ = blocked_import
         import cacheness
-        from cacheness import SqlCache, SqlCacheAdapter
+        import importlib
 
-        assert SqlCache is cacheness.SqlCache
-        assert SqlCacheAdapter is cacheness.SqlCacheAdapter
+        assert "SqlCache" not in cacheness.__all__
+        assert "SqlCacheAdapter" not in cacheness.__all__
+        assert not hasattr(cacheness, "SqlCache")
+        assert not hasattr(cacheness, "SqlCacheAdapter")
         try:
-            SqlCache("sqlite:///:memory:", None, None)
-        except Exception as error:
-            assert "install" in str(error).lower()
+            exec("from cacheness import SqlCache", {})
+        except ImportError:
+            pass
         else:
-            raise AssertionError("SQL cache construction unexpectedly succeeded")
+            raise AssertionError("SqlCache import remained available")
+        try:
+            importlib.import_module("cacheness.sql_cache")
+        except ModuleNotFoundError:
+            pass
+        else:
+            raise AssertionError("cacheness.sql_cache module remained available")
         """
     )
     environment = os.environ.copy()
@@ -318,5 +322,8 @@ def test_api_reference_imports_are_current_barrel_exports() -> None:
     assert all(hasattr(cacheness, name) for name in top_level)
     assert all(hasattr(storage_module, name) for name in storage)
     assert all(name in source for name in (*top_level, *storage))
-    assert "SqlCache" not in source
+    assert (
+        "Cacheness no longer ships SqlCache or a range-aware SQL pull-through cache."
+        in source
+    )
     assert "CacheHandler" not in source
