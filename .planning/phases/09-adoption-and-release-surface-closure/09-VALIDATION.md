@@ -1,80 +1,81 @@
 ---
 phase: 09
 slug: adoption-and-release-surface-closure
-# status lifecycle: draft (seeded by plan-phase) → validated (set by validate-phase §6)
-# audit-milestone §5.5 distinguishes NOT-VALIDATED (draft) from PARTIAL (validated + nyquist_compliant: false)
 status: draft
 nyquist_compliant: false
-wave_0_complete: false
+wave_0_complete: true
 created: 2026-09-16
+updated: 2026-09-16
 ---
 
 # Phase 09 — Validation Strategy
 
-> Per-phase validation contract for feedback sampling during execution.
-
----
+> Per-task feedback contract. Phase 09 has no separate Wave 0 plan: every new
+> test is created red and executed in the same owning TDD task that implements
+> the behavior. `wave_0_complete: true` therefore means “no detached scaffold
+> remains,” not that Phase 09 implementation has already executed.
 
 ## Test Infrastructure
 
 | Property | Value |
-|----------|-------|
-| **Framework** | pytest 8.4.1 |
-| **Config file** | `pyproject.toml` |
-| **Quick run command** | `uv run pytest -q -o log_cli=false tests/test_phase9_examples.py tests/test_interfaces.py tests/test_handler_registration.py tests/test_guarded_handler_io.py tests/test_public_api_contract.py tests/test_security_documentation.py -x` |
-| **Full suite command** | `uv run pytest -q -o log_cli=false -m "not (live_postgresql or live_aws_s3 or live_remote)" -x` |
-| **Estimated runtime** | Quick suite under 60 seconds; full non-live runtime measured during execution |
-
----
+|---|---|
+| Framework | pytest 8.4.1 |
+| Config | `pyproject.toml` |
+| Quick run | `uv run pytest -q -o log_cli=false tests/test_phase9_examples.py tests/test_phase9_documentation.py tests/test_phase9_quality_workflow.py tests/test_phase9_evidence_metadata.py tests/test_interfaces.py tests/test_handler_registration.py tests/test_public_api_contract.py tests/test_security_documentation.py -x` |
+| Full suite | `uv run pytest -q -o log_cli=false -m "not (live_postgresql or live_aws_s3 or live_remote)" -x` |
+| Feedback target | Focused task commands under 60 seconds; packaging/full-suite gates at plan or phase boundaries |
 
 ## Sampling Rate
 
-- **After every task commit:** Run the focused command named in that task's `<verify>` block.
-- **After every plan wave:** Run the quick suite above plus the affected wheel, documentation, or example contract tests.
-- **Before `$gsd-verify-work`:** The full non-live suite, targeted Ruff scope, source-free wheel matrix, and exact four-example harness must be green.
-- **Max feedback latency:** 60 seconds for task-level focused tests; longer packaging and full-suite gates run at wave/phase boundaries.
-
----
+- After every task commit: run the exact `<automated>` command in that task.
+- After each wave: run the quick suite plus affected wheel/document/workflow contracts.
+- Before verification: run the complete targeted suite, targeted Ruff, source-free wheel matrix, and full non-live suite.
+- No watch-mode command and no manual-only acceptance criterion is allowed.
 
 ## Per-Task Verification Map
 
-| Task ID | Plan | Wave | Requirement | Threat Ref | Secure Behavior | Test Type | Automated Command | File Exists | Status |
-|---------|------|------|-------------|------------|-----------------|-----------|-------------------|-------------|--------|
-| 09-01-01 | 01 | 1 | CACH-06 | T-09-01 | Public cutover exposes only `FormatHandler` while stored identities remain unchanged | unit + integration | `uv run pytest -q tests/test_interfaces.py tests/test_handler_registration.py tests/test_guarded_handler_io.py tests/test_stored_compatibility.py -x` | ✅ existing; edits required | ⬜ pending |
-| 09-01-02 | 01 | 1 | CACH-06 | T-09-02 | Minimal source-free import is quiet and optional dataframe behavior remains request-bound | packaging | `uv run pytest -q tests/packaging/test_wheel_matrix.py -x` | ✅ existing; edits required | ⬜ pending |
-| 09-02-01 | 02 | 2 | CACH-06 | T-09-03 | Published examples are network-free, path-contained, disposable, and self-verifying | subprocess integration | `uv run pytest -q tests/test_phase9_examples.py -x` | ❌ Wave 0 | ⬜ pending |
-| 09-02-02 | 02 | 2 | CACH-06 | — | CI invokes the exact canonical example-file harness | workflow contract | `uv run pytest -q tests/test_phase9_quality_workflow.py -x` | ❌ Wave 0 | ⬜ pending |
-| 09-03-01 | 03 | 3 | CACH-06 | T-09-04 | Supported docs retain trusted-payload and fail-closed integrity boundaries without overstating topology qualification | documentation contract | `uv run pytest -q tests/test_phase9_documentation.py tests/test_public_api_contract.py tests/test_security_documentation.py -x` | ❌ Wave 0 plus existing tests | ⬜ pending |
-| 09-04-01 | 04 | 4 | CACH-06 | T-09-05 | Evidence refresh preserves recorded nonclaims and does not fabricate qualification | artifact contract | `uv run pytest -q tests/test_phase9_evidence_metadata.py -x` | ❌ Wave 0 | ⬜ pending |
+| Task ID | Plan | Wave | Requirement | Threat refs | Secure behavior | Test type | Automated command | Test ownership | Status |
+|---|---:|---:|---|---|---|---|---|---|---|
+| 09-01-01 | 01 | 1 | CACH-06 | T-09-04 | Independent cross-cutting FormatHandlerError rename preserves translation/context without alias | unit | `uv run pytest -q -o log_cli=false tests/test_error_handling.py -x` | existing test edited in task | pending |
+| 09-01-02 | 01 | 1 | CACH-06 | T-09-01–03 | Atomic core protocol/barrel/interface-error cutover; no committed import break or alias | unit + integration | `uv run pytest -q -o log_cli=false tests/test_interfaces.py tests/test_handler_registration.py -x` plus dual-barrel import probe | existing tests edited in task | pending |
+| 09-02-01 | 02 | 2 | CACH-06 | T-09-05–07 | Source-free quiet import, alias absence, exact durable identity/reopen | packaging + integration | `uv run pytest -q -o log_cli=false tests/packaging/test_wheel_matrix.py tests/test_stored_compatibility.py tests/test_public_api_contract.py tests/test_guarded_handler_io.py -x` | existing tests edited in task | pending |
+| 09-02-02 | 02 | 2 | CACH-06 | T-09-08 | Current guidance retains private handler I/O and one authority | static contract | `uv run python -c "...current guidance assertions..."` | inline task assertion | pending |
+| 09-03-01 | 03 | 2 | CACH-06 | T-09-09–12 | Four exact network-free disposable journeys and safe MCAP round trip | subprocess integration | `uv run pytest -q -o log_cli=false tests/test_phase9_examples.py -x` | `tests/test_phase9_examples.py` created in task | pending |
+| 09-04-01 | 04 | 3 | CACH-06 | T-09-09A/B | First deletion batch preserves canonical behavior and Phase 10 boundary | integration + file contract | Phase 9 example pytest plus five exact absence checks | existing harness from 09-03 | pending |
+| 09-05-01 | 05 | 3 | CACH-06 | T-09-10A/B | Second deletion batch removes S3 promotion without remote/SqlCache changes | integration + file contract | Phase 9 example pytest plus five exact absence checks | existing harness from 09-03 | pending |
+| 09-06-01 | 06 | 4 | CACH-06 | T-09-13/14 | Blocking non-live CI invokes exact harness; examples/README.md links exactly four canonical files without obsolete paths or SqlCache promotion | workflow + index contract | `uv run pytest -q -o log_cli=false tests/test_phase9_quality_workflow.py tests/test_phase9_examples.py tests/qualification/test_phase8_quality_workflow.py -x` | `tests/test_phase9_quality_workflow.py` created and `examples/README.md` edited in task | pending |
+| 09-06-02 | 06 | 4 | CACH-06 | T-09-15/16 | Superseded harness/scripts absent while the canonical index/example contract remains green and Phase 10 files remain untouched | integration + file contract | Phase 9 workflow/example pytest plus four exact absence checks | existing Phase 9 tests | pending |
+| 09-07-01 | 07 | 4 | CACH-06 | T-09-17/18/20 | README current APIs, exact base-only checkout command, task-local extras, task navigation, bounded claims | documentation contract | `uv run pytest -q -o log_cli=false tests/test_phase9_documentation.py tests/test_phase9_examples.py tests/test_public_api_contract.py -x` | `tests/test_phase9_documentation.py` created in task and asserts `uv sync --frozen --no-default-groups` | pending |
+| 09-07-02 | 07 | 4 | CACH-06 | T-09-19 | Storage/cache/operator guides preserve initialization and offline maintenance | documentation + executable examples | same focused documentation/example/public command | owning documentation test extended | pending |
+| 09-08-01 | 08 | 5 | CACH-06 | T-09-21–24 | One truthful matrix, trusted-payload boundary, bounds, and exact nonclaims | documentation + security | `uv run pytest -q -o log_cli=false tests/test_phase9_documentation.py tests/test_security_documentation.py tests/qualification/test_phase8_quality_workflow.py -x` | existing/new documentation contracts edited in task | pending |
+| 09-09-01 | 09 | 6 | CACH-06 | T-09-25/26 | API imports match barrels; tutorial retains contained path I/O and stable identities | public API + integration | `uv run pytest -q -o log_cli=false tests/test_public_api_contract.py tests/test_phase9_documentation.py tests/test_handler_registration.py tests/test_guarded_handler_io.py -x` | existing tests edited in task | pending |
+| 09-09-02 | 09 | 6 | CACH-06 | T-09-27 | Obsolete docs absent and navigation has no dead/legacy branch | documentation + file contract | documentation/public/security pytest plus three exact absence checks | existing Phase 9 documentation test | pending |
+| 09-10-01 | 10 | 7 | CACH-06 | T-09-28–30 | Evidence refresh cites existing scope and preserves all nonclaims | artifact contract | `uv run pytest -q -o log_cli=false tests/test_phase9_evidence_metadata.py -x` | `tests/test_phase9_evidence_metadata.py` created in task | pending |
+| 09-10-02 | 10 | 7 | CACH-06 | T-09-31 | Exactly one dormant Narwhals seed and no dependency addition | artifact + dependency contract | evidence pytest plus exact seed/dependency probe | owning evidence test extended | pending |
 
-*Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
+## Owning-Task Test Creation
 
----
+The following missing tests are deliberately created and run in their owning
+TDD tasks, so there is no detached Wave 0 plan:
 
-## Wave 0 Requirements
-
-- [ ] `tests/test_phase9_examples.py` — replace the Phase 6 harness with a literal four-file execution and residue checks.
-- [ ] `tests/test_phase9_documentation.py` — enforce current imports, task navigation, one guarantees owner, checkout-first installation, and bounded claims.
-- [ ] `tests/test_phase9_quality_workflow.py` — prove CI invokes the exact Phase 9 example harness.
-- [ ] `tests/test_phase9_evidence_metadata.py` — constrain Phase 3/8 metadata refresh to existing evidence and preserved nonclaims.
-- [ ] Extend `tests/packaging/test_wheel_matrix.py` — assert new/old public names and silent minimal import.
-- [ ] Extend `tests/test_stored_compatibility.py` — assert identity-preserving durable reopen across the source rename.
-
----
+- `09-03-01` creates `tests/test_phase9_examples.py` before the four examples.
+- `09-06-01` creates `tests/test_phase9_quality_workflow.py` before workflow edits.
+- `09-07-01` creates `tests/test_phase9_documentation.py` before README/docs edits.
+- `09-10-01` creates `tests/test_phase9_evidence_metadata.py` before metadata refresh.
+- `09-02-01` extends the existing wheel and stored-compatibility tests before package/evidence edits.
 
 ## Manual-Only Verifications
 
-All Phase 9 acceptance behaviors have automated verification. Human review may assess prose quality, but no requirement depends only on that review.
-
----
+None. Human prose review is useful but no acceptance behavior depends only on it.
 
 ## Validation Sign-Off
 
-- [ ] All tasks have `<automated>` verify or Wave 0 dependencies
-- [ ] Sampling continuity: no 3 consecutive tasks without automated verify
-- [ ] Wave 0 covers all MISSING references
-- [ ] No watch-mode flags
-- [ ] Task-level feedback latency remains under 60 seconds
-- [ ] `nyquist_compliant: true` set in frontmatter
+- [x] Every planned task has an owning automated command.
+- [x] Every new test is created and executed in its owning TDD task.
+- [x] No three consecutive tasks lack automated verification.
+- [x] No watch-mode flags or external-service requirements exist.
+- [ ] All task commands green after execution.
+- [ ] Targeted Ruff, source-free wheel matrix, and full non-live suite green.
+- [ ] `nyquist_compliant: true` set after execution evidence exists.
 
-**Approval:** pending
+No external API integration is introduced. PostgreSQL and S3 remain reference-only and `NOT_QUALIFIED`.

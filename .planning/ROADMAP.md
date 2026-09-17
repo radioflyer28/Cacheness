@@ -626,11 +626,40 @@ Plans:
   5. The missing Narwhals investigation is captured as a future seed, and Phase 3/Phase 8 verification metadata is refreshed from existing post-replan evidence without changing production lifecycle behavior.
   6. Existing bounded local package, documentation-example, and regression gates pass. Phase 9 introduces no new lifecycle authority, lock, queue, retry coordinator, compatibility shim, backend family, or stronger guarantee than ADR 0001 permits.
 
-**Plans:** 0 plans
+**Plans:** 10 plans
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 9 to break down)
+**Wave 1**
+
+- [ ] 09-01-PLAN.md — Atomically cut the protocol, both storage barrels, error hierarchy, and importing tests to FormatHandler.
+
+**Wave 2** *(blocked on Wave 1)*
+
+- [ ] 09-02-PLAN.md — Prove the source-free wheel, quiet optional behavior, persisted identity continuity, and current agent guidance.
+- [ ] 09-03-PLAN.md — Publish the exact four disposable canonical example journeys and executable harness.
+
+**Wave 3** *(blocked on canonical examples)*
+
+- [ ] 09-04-PLAN.md — Delete the first bounded obsolete non-SqlCache example batch.
+- [ ] 09-05-PLAN.md — Delete the second bounded obsolete/remote-promoting example batch.
+
+**Wave 4** *(blocked on package/examples and cleanup)*
+
+- [ ] 09-06-PLAN.md — Bind exact published examples to CI and remove the superseded harness/final duplicates.
+- [ ] 09-07-PLAN.md — Replace stale onboarding with a concise gateway and task-first current workflow guides.
+
+**Wave 5** *(blocked on current onboarding)*
+
+- [ ] 09-08-PLAN.md — Consolidate security, bounds, topology, and qualification claims into one tested owner.
+
+**Wave 6** *(blocked on qualification/security claims)*
+
+- [ ] 09-09-PLAN.md — Publish the current API/FormatHandler tutorial and delete obsolete document branches.
+
+**Wave 7** *(blocked on CI and complete docs)*
+
+- [ ] 09-10-PLAN.md — Refresh Phase 3/8 evidence metadata, capture the Narwhals seed, and run final bounded gates.
 
 ### Phase 10: Remove SqlCache Pull-Through Subsystem
 
@@ -664,7 +693,7 @@ Plans:
 | 7. Explicit Migration and Rebuild Cutover | 24/24 | Complete    | 2026-09-11 |
 | 07.1. Obstore Payload Participant Unification | 11/11 | Complete | 2026-09-13 |
 | 8. Production Gates and Performance Stabilization | 17/17 | Complete    | 2026-09-15 |
-| 9. Adoption and Release Surface Closure | 0/0 | Not planned | — |
+| 9. Adoption and Release Surface Closure | 0/10 | Planned | — |
 | 10. Remove SqlCache Pull-Through Subsystem | 0/0 | Not planned | — |
 
 ## Backlog

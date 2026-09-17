@@ -457,12 +457,12 @@ Source pattern after applying the locked rename: current path-based methods and 
 |---|-------|---------|---------------|
 | — | None. Recommendations are derived from locked Phase 9 decisions, opened source, tests, workflows, and checked-in evidence. | — | — |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
-None blocking. The two apparent scope ambiguities are resolved by existing decisions:
+None blocking. The two apparent scope ambiguities are explicitly resolved by existing decisions:
 
-1. `FormatHandler` should remain public from the storage-oriented barrels where `CacheHandler` is currently public; Phase 9 should not broaden the top-level `cacheness` barrel merely because stale docs incorrectly imported from it. [VERIFIED: `src/cacheness/__init__.py:12-49`; `src/cacheness/storage/__init__.py:26-50,257-261`]
-2. SqlCache-dedicated implementation/assets remain physically owned by Phase 10; Phase 9 removes them from the promoted story and canonical example allowlist. [VERIFIED: `.planning/ROADMAP.md:635-646`; `09-CONTEXT.md:125-130`]
+1. **RESOLVED:** `FormatHandler` remains public from the storage-oriented barrels where the prior protocol is currently public; Phase 9 does not broaden the top-level `cacheness` barrel merely because stale docs imported from it. [VERIFIED: `src/cacheness/__init__.py:12-49`; `src/cacheness/storage/__init__.py:26-50,257-261`]
+2. **RESOLVED:** SqlCache-dedicated implementation/assets remain physically owned by Phase 10; Phase 9 removes them from the promoted story and canonical example allowlist. [VERIFIED: `.planning/ROADMAP.md:635-646`; `09-CONTEXT.md:125-130`]
 
 ## Environment Availability
 

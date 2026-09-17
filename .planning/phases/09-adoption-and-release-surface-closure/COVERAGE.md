@@ -1,0 +1,1 @@
+No external API integration: Phase 9 updates Cacheness's local Python public surface, packaging, executable examples, documentation, and planning evidence; PostgreSQL and S3 remain documentation-only and NOT_QUALIFIED.
