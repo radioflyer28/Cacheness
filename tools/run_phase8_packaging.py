@@ -16,6 +16,7 @@ import sys
 import tempfile
 import tomllib
 from typing import Literal, Sequence
+from zipfile import BadZipFile, ZipFile
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -63,8 +64,6 @@ BASE_PUBLIC_EXPORTS: dict[str, tuple[str, ...]] = {
         "BlobStore",
         "RoleRegistry",
         "StoreTopology",
-        "SqlCache",
-        "SqlCacheAdapter",
     ),
     "cacheness.storage": (
         "BlobStore",
@@ -171,8 +170,11 @@ BASE_PUBLIC_EXPORTS: dict[str, tuple[str, ...]] = {
     ),
 }
 RETIRED_PUBLIC_EXPORTS: dict[str, tuple[str, ...]] = {
+    "cacheness": ("SqlCache", "SqlCacheAdapter"),
     "cacheness.storage": ("CacheHandler", "CacheHandlerError"),
 }
+RETIRED_IMPORT_MODULES = ("cacheness.sql_cache",)
+RETIRED_WHEEL_MEMBERS = frozenset({"cacheness/sql_cache.py"})
 BASE_PROBE_NAMES = (
     "public_exports",
     "blobstore_generic",
@@ -212,6 +214,30 @@ def _wheel_sha256(path: Path) -> str:
         for chunk in iter(lambda: wheel_file.read(64 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _require_current_wheel_artifact(artifact: WheelArtifact) -> None:
+    """Reject a missing or changed wheel before qualifying its contents."""
+    if not artifact.path.is_file() or len(artifact.sha256) != 64:
+        raise PackagingQualificationError("wheel artifact is unavailable")
+    actual_sha256 = _wheel_sha256(artifact.path)
+    if actual_sha256 != artifact.sha256:
+        raise PackagingQualificationError("wheel artifact changed after its digest was recorded")
+
+
+def _assert_retired_wheel_members_are_absent(artifact: WheelArtifact) -> None:
+    """Reject the exact wheel when it still packages a retired source module."""
+    _require_current_wheel_artifact(artifact)
+    try:
+        with ZipFile(artifact.path) as wheel:
+            members = frozenset(wheel.namelist())
+    except (BadZipFile, OSError) as error:
+        raise PackagingQualificationError("wheel members are unavailable") from error
+    retired_members = sorted(RETIRED_WHEEL_MEMBERS & members)
+    if retired_members:
+        raise PackagingQualificationError(
+            f"wheel contains retired members: {', '.join(retired_members)}"
+        )
 
 
 def build_wheel(
@@ -254,7 +280,8 @@ def _base_probe_source() -> str:
     """Render the literal base-surface and public-composition qualification probe."""
     return f'''
 from contextlib import redirect_stderr, redirect_stdout
-from importlib import import_module
+from importlib import import_module, metadata
+from importlib.util import find_spec
 from io import StringIO
 import os
 from pathlib import Path
@@ -289,6 +316,31 @@ for module_name, exports in {BASE_PUBLIC_EXPORTS!r}.items():
         assert hasattr(module, export), f"missing public export: {{module_name}}.{{export}}"
     for retired in {RETIRED_PUBLIC_EXPORTS!r}.get(module_name, ()):
         assert not hasattr(module, retired), f"retired public export: {{module_name}}.{{retired}}"
+
+for module_name in {RETIRED_IMPORT_MODULES!r}:
+    assert find_spec(module_name) is None, f"retired import remains discoverable: {{module_name}}"
+    try:
+        import_module(module_name)
+    except ModuleNotFoundError:
+        pass
+    else:
+        raise AssertionError(f"retired import remains available: {{module_name}}")
+
+for retired in {RETIRED_PUBLIC_EXPORTS["cacheness"]!r}:
+    try:
+        exec(f"from cacheness import {{retired}}", {{}})
+    except ImportError:
+        pass
+    else:
+        raise AssertionError(f"retired top-level import remains available: {{retired}}")
+
+distribution = metadata.distribution({PACKAGE_NAME!r})
+requirements = tuple(distribution.requires or ())
+assert all("duckdb" not in requirement.casefold() for requirement in requirements), (
+    "installed metadata retains a DuckDB requirement"
+)
+extras = {{extra.casefold() for extra in distribution.metadata.get_all("Provides-Extra", [])}}
+assert "sql" not in extras, "installed metadata retains the sql extra"
 
 topology = StoreTopology(
     payload=BackendRef(name="memory"),
@@ -338,8 +390,7 @@ def run_base_probe(
     environment: Mapping[str, str] | None = None,
 ) -> ProbeResult:
     """Run all required base behavior against one wheel outside the checkout."""
-    if not artifact.path.is_file() or len(artifact.sha256) != 64:
-        raise PackagingQualificationError("wheel artifact is unavailable")
+    _assert_retired_wheel_members_are_absent(artifact)
     workspace.mkdir(parents=True, exist_ok=True)
     child_environment = _isolated_environment(environment)
     child_environment["CACHENESS_PHASE8_SOURCE_ROOT"] = str(REPOSITORY_ROOT)
@@ -543,8 +594,7 @@ def run_optional_probes(
 ) -> tuple[ProbeResult, ...]:
     """Qualify every exact extra in a new source-free wheel environment."""
     optional_groups_from_pyproject(REPOSITORY_ROOT / "pyproject.toml")
-    if not artifact.path.is_file() or len(artifact.sha256) != 64:
-        raise PackagingQualificationError("wheel artifact is unavailable")
+    _require_current_wheel_artifact(artifact)
     compatible = tensorflow_is_compatible() if tensorflow_compatible is None else tensorflow_compatible
     results: list[ProbeResult] = []
     for group in OPTIONAL_GROUPS:
