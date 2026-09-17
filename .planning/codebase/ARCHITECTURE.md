@@ -1,53 +1,36 @@
-<!-- refreshed: 2026-08-29 -->
+<!-- refreshed: 2026-09-17 -->
 # Architecture
 
-**Analysis Date:** 2026-08-29
+**Analysis Date:** 2026-09-17
 
-**Independent Review:** 2026-08-29 — call paths and lifecycle boundaries were re-traced from source and runtime probes
+**Independent Review:** 2026-09-17 — Phase 9 public paths and lifecycle composition were re-traced from current source
 
 ## System Overview
 
 ```text
-┌─────────────────────────────────────────────────────────────┐
-│                    Public package API                       │
-│ `src/cacheness/__init__.py`, `src/cacheness/decorators.py`,  │
-│ `src/cacheness/sql_cache.py`                                │
-└───────────────┬──────────────────────┬──────────────────────┘
-                │                      │
-                ▼                      ▼
-┌──────────────────────────┐  ┌──────────────────────────────┐
-│ UnifiedCache coordinator  │  │ SqlCache pull-through layer   │
-│ `src/cacheness/core.py`   │  │ `src/cacheness/sql_cache.py`  │
-└───────────┬──────────────┘  └───────────────┬──────────────┘
-            │                                  │
-            ▼                                  ▼
-┌──────────────────────────┐  ┌──────────────────────────────┐
-│ HandlerRegistry           │  │ SQLAlchemy engine/session     │
-│ `src/cacheness/handlers.py`│ │ + adapter + gap detection    │
-└───────────┬──────────────┘  └───────────────┬──────────────┘
-            │                                  │
-            ▼                                  ▼
-┌──────────────────────────┐  ┌──────────────────────────────┐
-│ Format handlers           │  │ User data fetcher             │
-│ parquet / b2nd / npz /    │  │ returns pandas DataFrame      │
-│ compressed pickle files   │  │                               │
-└───────────┬──────────────┘  └──────────────────────────────┘
-            │
-            ▼
-┌─────────────────────────────────────────────────────────────┐
-│ Metadata backends: SQLite / JSON / memory / PostgreSQL       │
-│ `src/cacheness/metadata.py`, `storage/backends/`              │
-└─────────────────────────────────────────────────────────────┘
+Application -> UnifiedCache policy (optional) -> BlobStore lifecycle
+                                              -> HandlerRegistry / FormatHandler
+                                              -> one LifecycleAuthority
+                                              -> one immutable payload participant
+
+Application ---------------------------------> BlobStore lifecycle
+
+SqlCache remains a separate pull-through subsystem pending its planned removal.
 ```
 
-`UnifiedCache` is the primary key/value cache. It coordinates key generation, type-specific serialization, metadata, TTL, integrity checks, signing, and eviction. `BlobStore` in `src/cacheness/storage/blob_store.py` is a separate lower-level object store that reuses handlers and metadata but deliberately omits TTL and eviction. `SqlCache` in `src/cacheness/sql_cache.py` is a separate row/table cache for DataFrame results and does not use `UnifiedCache`.
+`BlobStore` is the single storage lifecycle engine. It owns handler staging,
+immutable payload publication, authoritative catalog promotion, reads, exact
+deletion, cleanup debt, and recovery. `UnifiedCache` adds key derivation, TTL,
+outcomes, invalidation, and bounded maintenance policy over one caller-selected
+or privately owned `BlobStore`. A store instance is configured for persistence
+or used under cache policy; it does not need to serve both roles simultaneously.
 
 ## Component Responsibilities
 
 | Component | Responsibility | File |
 |-----------|----------------|------|
 | Public API and optional exports | Re-export cache classes, configuration, handlers, registries, and optional integrations | `src/cacheness/__init__.py` |
-| Unified cache coordinator | Own cache lifecycle, key/value operations, TTL, metadata, integrity, signing, custom metadata, and size enforcement | `src/cacheness/core.py` |
+| Unified cache policy | Own cache keys, TTL, typed outcomes, invalidation, and bounded maintenance over one `BlobStore` | `src/cacheness/core.py` |
 | Configuration model | Compose storage, metadata, blob, compression, serialization, handler, and security settings; validate combinations | `src/cacheness/config.py` |
 | Function cache facade | Normalize function arguments, add function identity to keys, and call `UnifiedCache` through `@cached` | `src/cacheness/decorators.py` |
 | Handler registry | Select a handler by `can_handle`, resolve persisted `data_type`, and manage priorities/registration | `src/cacheness/handlers.py` |
@@ -55,8 +38,8 @@
 | Format handlers | Persist/reconstruct pandas/polars objects, NumPy arrays, TensorFlow tensors, and arbitrary objects | `src/cacheness/handlers.py` |
 | Cache-key serializer | Deterministically serialize parameters and hash them with XXH3_64 | `src/cacheness/serialization.py` |
 | Metadata abstraction | Persist entry records and hit/miss statistics through interchangeable backends | `src/cacheness/metadata.py` |
-| Backend registries | Register and construct metadata and blob backend classes | `src/cacheness/storage/backends/__init__.py`, `src/cacheness/storage/backends/blob_backends.py` |
-| BlobStore | Store arbitrary handler-backed objects with explicit keys/content hashes and metadata | `src/cacheness/storage/blob_store.py` |
+| Role-aware composition | Validate and resolve one topology's authority, payload participant, and optional projections | `src/cacheness/storage/composition.py` |
+| BlobStore | Own the backend-neutral object lifecycle and canonical catalog | `src/cacheness/storage/blob_store.py` |
 | SQL pull-through cache | Query cached rows, detect missing ranges, fetch gaps, upsert, and return DataFrames | `src/cacheness/sql_cache.py` |
 | Custom metadata | Register SQLAlchemy metadata models and link them to cache entries | `src/cacheness/custom_metadata.py` |
 | Cross-cutting utilities | Compression, file hashing, HMAC signing, JSON compatibility, and error wrappers | `src/cacheness/compress_pickle.py`, `src/cacheness/file_hashing.py`, `src/cacheness/security.py`, `src/cacheness/json_utils.py`, `src/cacheness/error_handling.py` |
@@ -66,37 +49,32 @@
 **Overall:** Strategy/registry architecture with a coordinator facade and adapter-based SQL subsystem.
 
 **Key Characteristics:**
-- `UnifiedCache` delegates data-format decisions to ordered `CacheHandler` strategies rather than branching on every type in the coordinator (`src/cacheness/handlers.py`).
-- Metadata and blob backends are selected through factories/registries, while the primary `UnifiedCache` path writes handler-produced files and records their paths in metadata (`src/cacheness/core.py`).
+- `BlobStore` delegates native-format staging and reading to ordered `FormatHandler` strategies while retaining publication and lifecycle authority (`src/cacheness/handlers.py`, `src/cacheness/storage/blob_store.py`).
+- `StoreTopology` selects a declared authority/payload pair through the role registry; `UnifiedCache` either accepts that topology or a caller-owned `BlobStore` (`src/cacheness/storage/composition.py`, `src/cacheness/core.py`).
 - Optional dependencies are imported conditionally; handlers are enabled only when their libraries are available (`src/cacheness/handlers.py`, `src/cacheness/__init__.py`).
 - SQL caching uses an adapter contract for schema, query parsing, and external fetches, allowing builder methods to generate simple adapters (`src/cacheness/sql_cache.py`).
 - Compatibility re-exports preserve older import paths through `src/cacheness/storage/handlers/__init__.py` and `src/cacheness/storage/backends/__init__.py`.
 
 ## Lifecycle Boundaries
 
-The repository exposes three adjacent products rather than one fully unified storage stack:
+Storage and cache policy now have one directional composition boundary:
 
 ```text
-UnifiedCache                 BlobStore                    SqlCache
-`core.py`                    `storage/blob_store.py`      `sql_cache.py`
-    │                              │                           │
-    ├─ HandlerRegistry            ├─ HandlerRegistry          ├─ SQLAlchemy Table
-    ├─ direct payload files       ├─ direct payload files     ├─ caller adapter
-    └─ metadata backend           └─ metadata backend          └─ database rows
-
-BlobBackend registry (`filesystem`, `memory`, optional `s3`)
-    └─ currently independent of both handler-backed payload paths
+UnifiedCache policy ──uses──> BlobStore lifecycle
+                                ├─ HandlerRegistry / guarded staging
+                                ├─ LifecycleAuthority (memory/SQLite/PostgreSQL)
+                                └─ immutable payload participant (memory/filesystem/S3)
 ```
 
 **Transaction boundary:**
-- `UnifiedCache.put()` writes a handler payload first, computes metadata/signature information, and then writes the metadata entry (`src/cacheness/core.py:811-922`). There is no rollback if metadata persistence fails, so payload and metadata are not one atomic transaction.
-- Reads perform the inverse lookup through metadata and then the recorded `actual_path`; integrity/signature failures can remove metadata without consistently removing the payload (`src/cacheness/core.py:924-1053`).
-- `BlobStore` repeats a similar two-step payload/metadata lifecycle independently (`src/cacheness/storage/blob_store.py:128-241`). It merges nested metadata during reads, but deletion/existence do not use the same normalization.
+- `UnifiedCache.put()` delegates the storage mutation to `BlobStore.put_entry()` and applies cache maintenance only after a committed receipt exists.
+- `BlobStore` uses one authority to select the visible immutable generation. Payload creation and cleanup remain outside the authority transaction and converge through attributable intent/cleanup debt; ADR 0001 does not claim cross-resource ACID.
+- Reads consult authoritative descriptors, verify canonical SHA-256 plus size, and only then give a private snapshot path to the selected handler.
 
 **Dependency-injection boundary:**
-- Handler instances are genuinely selected through `HandlerRegistry`.
-- Metadata backend classes can be constructed through a registry, but `UnifiedCache` does not consult that registry. Even an explicitly injected backend instance is overwritten by the subsequent config-selection branch (`src/cacheness/core.py:109-212`).
-- Blob backends have a registry and implementations, but no high-level coordinator injects them into handler persistence. Treat these as incomplete composition seams, not interchangeable production strategies.
+- `HandlerRegistry` is store-local and selected by persisted format identity.
+- `StoreTopology` and the role registry are the only supported participant-selection surface.
+- An injected `BlobStore` remains caller-owned; a topology passed to `UnifiedCache` creates one private owned store.
 
 ## Layers
 
@@ -107,11 +85,11 @@ BlobBackend registry (`filesystem`, `memory`, optional `s3`)
 - Depends on: `core.py`, configuration, handlers, metadata, and optional storage/SQL modules.
 - Used by: Applications, examples, and tests.
 
-**Unified cache coordination:**
-- Purpose: Implement key/value caching semantics and orchestrate handlers plus metadata.
+**Unified cache policy:**
+- Purpose: Implement key/value cache semantics above the storage lifecycle.
 - Location: `src/cacheness/core.py`.
 - Contains: `UnifiedCache.put`, `UnifiedCache.get`, invalidation, cleanup, stats, custom metadata, and global-cache factories.
-- Depends on: `CacheConfig`, `HandlerRegistry`, key serialization, metadata factory, file hashing, and signing.
+- Depends on: `CacheConfig`, key serialization, catalog queries, and one `BlobStore`.
 - Used by: Public API and decorators.
 
 **Type-aware serialization:**
@@ -128,12 +106,12 @@ BlobBackend registry (`filesystem`, `memory`, optional `s3`)
 - Depends on: JSON utilities; SQLAlchemy for relational backends; psycopg for PostgreSQL.
 - Used by: `UnifiedCache`, `BlobStore`, and custom metadata support.
 
-**Low-level blob storage:**
-- Purpose: Provide reusable object/blob storage independent of cache TTL and eviction semantics.
-- Location: `src/cacheness/storage/blob_store.py`, `src/cacheness/storage/backends/blob_backends.py`, `src/cacheness/storage/backends/s3_backend.py`.
-- Contains: `BlobStore`, filesystem/in-memory blob contracts, and optional S3 implementation.
-- Depends on: Handler registry, metadata backend, compression, and boto3 for S3.
-- Used by: Consumers importing the storage API directly. `UnifiedCache` does not instantiate `BlobStore`.
+**Blob storage lifecycle:**
+- Purpose: Provide reusable object storage independent of cache TTL and eviction semantics.
+- Location: `src/cacheness/storage/blob_store.py`, `src/cacheness/storage/composition.py`, and lifecycle/payload participant modules under `src/cacheness/storage/`.
+- Contains: `BlobStore`, lifecycle authorities, obstore-backed immutable payload I/O, catalog/projection contracts, and recovery.
+- Depends on: Store-local handlers, one declared lifecycle authority, and one payload participant.
+- Used by: Direct storage consumers and every `UnifiedCache` instance.
 
 **SQL pull-through caching:**
 - Purpose: Cache tabular query results in a SQL table and fetch only missing data.
@@ -146,13 +124,12 @@ BlobBackend registry (`filesystem`, `memory`, optional `s3`)
 
 ### Primary Request Path
 
-1. A caller creates `UnifiedCache`/`cacheness`, optionally passing `CacheConfig` or a metadata backend (`src/cacheness/core.py:68`).
-2. Initialization creates the cache directory, ordered handler registry, metadata backend, optional custom metadata support, and optional HMAC signer (`src/cacheness/core.py:68-285`).
-3. `put(data, **kwargs)` selects the first handler whose `can_handle` succeeds and creates a 16-character XXH3_64 key from sorted serialized parameters (`src/cacheness/core.py:811`, `src/cacheness/handlers.py:1192`, `src/cacheness/serialization.py:381`).
-4. The handler writes a format-specific file and returns `storage_format`, `file_size`, `actual_path`, and handler metadata (`src/cacheness/handlers.py:426-1055`).
-5. The coordinator optionally hashes the file, builds the metadata entry, signs selected fields, persists it through `metadata_backend.put_entry`, stores custom metadata, and enforces the size limit (`src/cacheness/core.py:811-923`).
-6. `get(...)` resolves the key, reads metadata, checks TTL, verifies file hash/signature when enabled, resolves the handler by persisted `data_type`, and calls `handler.get` on `actual_path` (`src/cacheness/core.py:924-1054`).
-7. Successful reads update access time and hit statistics; missing, expired, corrupt, or unreadable entries increment misses and are removed from metadata (`src/cacheness/core.py:924-1054`).
+1. A caller constructs `UnifiedCache(CacheConfig(...), store=...)` with either a qualified `StoreTopology` or a caller-owned `BlobStore`.
+2. `initialize()` initializes only a cache-owned store; an injected store retains its caller-owned lifecycle boundary.
+3. `put(...)` derives the policy key and catalog fields, then calls `BlobStore.put_entry()`.
+4. `BlobStore` chooses a `FormatHandler`, validates its private staged artifact, publishes an immutable payload generation, and promotes the authenticated descriptor through the sole lifecycle authority.
+5. The committed `BlobReceipt` is returned inside `CachePutResult`; size maintenance is a later bounded policy step and cannot invalidate that storage commit.
+6. `lookup(...)` reads through `BlobStore`, classifies storage failures into typed cache outcomes, applies TTL policy, and returns `CacheLookupResult` without making paths or payload presence authoritative.
 
 ### Decorated Function Flow
 
@@ -168,27 +145,22 @@ BlobBackend registry (`filesystem`, `memory`, optional `s3`)
 4. The complete matching dataset is queried back as a pandas DataFrame. Invalidation, expiration cleanup, statistics, and engine disposal remain within `SqlCache` (`src/cacheness/sql_cache.py:1339-1455`).
 
 **State Management:**
-- `UnifiedCache` holds a per-instance `HandlerRegistry`, metadata backend, optional signer, and a `threading.Lock`; the module also exposes a lazily initialized global cache (`src/cacheness/core.py:68-108`, `src/cacheness/core.py:1204-1238`).
-- Persistent metadata is authoritative for cache entries; cache files contain payloads and metadata stores `actual_path`, type, format, timestamps, and size.
-- `CachedMetadataBackend` can add a `cachetools` in-memory entry layer over JSON/SQLite metadata (`src/cacheness/metadata.py:253-457`).
+- `UnifiedCache` holds one store reference, policy configuration, typed outcome counters, and bounded signed maintenance continuations.
+- The selected lifecycle authority is canonical for committed membership and descriptors; payload listings, filesystem paths, and projections are not authority.
+- `BlobStore` owns exact mutation/recovery state, while derived JSON projections consume bounded authenticated catalog pages.
 - SQL cache state lives in caller-defined tables with `cached_at` and optional `expires_at` columns (`src/cacheness/sql_cache.py:301-383`).
 
 ## Key Abstractions
 
-**`CacheHandler`:**
+**`FormatHandler`:**
 - Purpose: Contract for data detection, write/read operations, file format, and persisted type identifier.
 - Examples: `ArrayHandler`, `PandasDataFrameHandler`, `PolarsDataFrameHandler`, `ObjectHandler` in `src/cacheness/handlers.py`.
-- Pattern: Strategy objects selected in registry order; register new handlers through `HandlerRegistry.register_handler` or the module-level API.
+- Pattern: Strategy objects selected in store-local registry order; register through `store.handlers.register_handler(...)`.
 
-**`MetadataBackend`:**
-- Purpose: Abstract entry CRUD, statistics, TTL cleanup, and lifecycle operations.
-- Examples: `JsonBackend`, `SqliteBackend`, `InMemoryBackend` in `src/cacheness/metadata.py`; `PostgresBackend` in `src/cacheness/storage/backends/postgresql_backend.py`.
-- Pattern: Factory/registry selection through `create_metadata_backend` and `get_metadata_backend`; custom backends implement the backend contract.
-
-**`BlobBackend`:**
-- Purpose: Abstract binary blob read/write/delete/stream operations independently of metadata semantics.
-- Examples: `FilesystemBlobBackend`, `InMemoryBlobBackend`, `S3BlobBackend` in `src/cacheness/storage/backends/`.
-- Pattern: Registry lookup via `get_blob_backend`; S3 is optional and must be available/registered before use.
+**`LifecycleAuthority` and payload participant:**
+- Purpose: Separate canonical visibility/descriptor transitions from immutable payload byte I/O without inventing cross-resource ACID.
+- Examples: memory/SQLite/PostgreSQL authorities and obstore memory/filesystem/S3 payload participants.
+- Pattern: `StoreTopology` resolves one qualified pair; `BlobStore` is the only coordinator.
 
 **`SqlCacheAdapter`:**
 - Purpose: Bind a SQL table schema and external data source to pull-through caching.
@@ -209,8 +181,8 @@ BlobBackend registry (`filesystem`, `memory`, optional `s3`)
 
 **Unified cache:**
 - Location: `src/cacheness/core.py:60` (`UnifiedCache`), `src/cacheness/core.py:1219` (`get_cache`).
-- Triggers: Direct construction, `cacheness(...)`, `get_cache()`, or `cached()`.
-- Responsibilities: Key/value cache lifecycle and persistence coordination.
+- Triggers: Direct construction or `cached(cache=...)`.
+- Responsibilities: Key/value cache policy over one explicit store.
 
 **Decorator API:**
 - Location: `src/cacheness/decorators.py:80` (`cached`).
@@ -229,20 +201,20 @@ BlobBackend registry (`filesystem`, `memory`, optional `s3`)
 
 ## Architectural Constraints
 
-- **Threading:** `UnifiedCache` creates `self._lock` but does not acquire it in `put()`, `get()`, invalidation, or cleanup. JSON/in-memory metadata backends use their own locks, and SQLite/PostgreSQL rely on SQLAlchemy sessions/pools, so metadata operations have some local coordination while the payload-plus-metadata lifecycle is not serialized (`src/cacheness/core.py:82-103`, `src/cacheness/metadata.py`, `src/cacheness/storage/backends/postgresql_backend.py`).
-- **Global state:** `_global_cache` in `src/cacheness/core.py`, the decorator weak-reference list in `src/cacheness/decorators.py`, and handler/backend registries in `src/cacheness/handlers.py` and `src/cacheness/storage/backends/` are module-level mutable state.
+- **Concurrency:** The selected authority serializes canonical lifecycle transitions for its declared topology. Safe typed conflicts/timeouts are valid progress outcomes; process-local locks do not extend authority across processes or resources.
+- **Global state:** Decorator-created cache instances are weakly tracked for close-at-exit; store handlers and participant composition remain instance-local.
 - **Circular imports:** Compatibility modules intentionally re-export parent implementations: `src/cacheness/storage/handlers/__init__.py` imports `cacheness.handlers`, while `src/cacheness/storage/backends/__init__.py` imports implementations from `cacheness.metadata`.
 - **Optional dependencies:** pandas, polars, SQLAlchemy, Blosc2, dill, TensorFlow, boto3, and database drivers are declared as optional and mostly guarded at runtime. NumPy is the exception: it is declared only in optional groups but imported eagerly by package-import paths, making it an effective undeclared base requirement (`pyproject.toml`, `src/cacheness/handlers.py`, `src/cacheness/compress_pickle.py`, `src/cacheness/__init__.py`).
-- **Filesystem payloads:** The primary `UnifiedCache` handler path writes directly under `CacheStorageConfig.cache_dir`; persisted metadata must retain `actual_path` because handler extensions can be dynamic (`src/cacheness/core.py`, `src/cacheness/handlers.py`).
+- **Payload staging:** A format handler sees only a private contained staging/snapshot path. Managed locators and obstore participants remain behind `BlobStore`.
 - **SQL schema ownership:** `SqlCache` mutates the supplied SQLAlchemy `Table` by appending cache columns before creating it (`src/cacheness/sql_cache.py:459-483`); callers must provide compatible primary keys and column definitions.
 
 ## Anti-Patterns
 
-### Bypassing the handler and metadata contracts
+### Bypassing BlobStore lifecycle authority
 
-**What happens:** Cache payloads are written or read directly without `HandlerRegistry` and without persisting matching metadata.
-**Why it's wrong:** `UnifiedCache.get` resolves the handler and payload path from metadata, so direct files become undiscoverable or unreadable (`src/cacheness/core.py:924-1054`).
-**Do this instead:** Implement/register a `CacheHandler` and let `UnifiedCache.put/get` own the file and metadata transaction (`src/cacheness/interfaces.py`, `src/cacheness/handlers.py`).
+**What happens:** Policy or format code treats a path, object listing, or projection as canonical lifecycle state.
+**Why it's wrong:** Only the selected authority can establish committed membership and authorize exact mutation/recovery.
+**Do this instead:** Implement/register a `FormatHandler` for serialization and route every storage mutation through `BlobStore`.
 
 ### Treating `BlobStore` as a TTL cache
 
