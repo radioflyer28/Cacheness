@@ -12,9 +12,9 @@ provides:
   - Explicit local storage, cache-policy, initialization, and maintenance boundaries
 affects: [09-08, 09-09, 09-10, phase-10]
 actuals:
-  tokens: 22565
+  tokens: 22566
   tasks: 2
-  commits: 4
+  commits: 5
 tech-stack:
   added: []
   patterns:
@@ -95,10 +95,13 @@ status: complete
 2. **Task 2: Rewrite store, cache, initialization, and migration guides**
    - `89a3f71` — `test(09-07): add failing task-guide documentation contract`
    - `d1ebce7` — `docs(09-07): align store and cache task guides`
+3. **Post-merge regression correction: retain the SQLite authority boundary**
+   - `1ddae9a` — `fix(09-07): retain SQLite authority schema boundary`
 
 ## Verification
 
 - `uv run pytest -q -o log_cli=false tests/test_phase9_documentation.py tests/test_phase9_examples.py tests/test_public_api_contract.py -x` — passed (16 tests).
+- `uv run pytest -q -o log_cli=false tests/test_migration_public_contract.py::test_ordinary_construction_exposes_no_migration_switch_or_cli tests/test_phase9_documentation.py -x` — passed (5 tests) after the post-merge guide correction.
 - `git diff --check` — passed.
 - Confirmed that the README and task guides do not promote `SqlCache` or an unqualified remote workflow.
 
@@ -110,11 +113,22 @@ status: complete
 
 ## Deviations from Plan
 
-None - plan executed exactly as written. The initial broad red documentation contract was split into one red commit per planned task before the tracer green commit, preserving the plan's atomic TDD boundary.
+### Auto-fixed Issues
+
+**1. [Rule 1 - Documentation regression] Restored the SQLite authority schema boundary**
+- **Found during:** Post-merge Wave 4 verification
+- **Issue:** The initialization-guide rewrite removed the documented `user_version = 8` validation boundary required by the explicit-maintenance public contract.
+- **Fix:** Restored the bounded authority identity text while retaining no implicit migration switch or CLI.
+- **Files modified:** `docs/STORAGE_INITIALIZATION.md`
+- **Verification:** `tests/test_migration_public_contract.py::test_ordinary_construction_exposes_no_migration_switch_or_cli` and `tests/test_phase9_documentation.py`
+- **Committed in:** `1ddae9a`
+
+The initial broad red documentation contract was split into one red commit per planned task before the tracer green commit, preserving the plan's atomic TDD boundary.
 
 ## Issues Encountered
 
 - The final test rerun initially could not open the shared uv cache in the filesystem sandbox. Re-running the unchanged command with authorized cache access passed.
+- Wave 4 post-merge verification caught the omitted public schema-boundary sentence before downstream work proceeded.
 
 ## Known Stubs
 
@@ -131,8 +145,8 @@ None - no external service configuration is required.
 
 ## Self-Check: PASSED
 
-- All seven documentation/test artifacts exist and Task commits `cab6ec0`,
-  `38b78f3`, `89a3f71`, and `d1ebce7` are present in Git history.
+- All seven documentation/test artifacts exist and commits `cab6ec0`, `38b78f3`,
+  `89a3f71`, `d1ebce7`, and `1ddae9a` are present in Git history.
 
 *Phase: 09-adoption-and-release-surface-closure*
 *Completed: 2026-09-17*
