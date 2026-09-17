@@ -678,7 +678,7 @@ Plans:
   4. Public import, package, and documentation gates prove that the supported product surface contains BlobStore, UnifiedCache, and their shared format-handler ecosystem without dangling SqlCache references.
   5. Removal does not redesign BlobStore, UnifiedCache, lifecycle authority, backend topology, or handler persistence contracts.
 
-**Plans:** 2/9 plans executed
+**Plans:** 9/9 plans executed
 
 Plans:
 
@@ -686,25 +686,25 @@ Plans:
 
 - [x] 10-01-PLAN.md — Establish the fail-closed removal, retained public API, and suite-isolation contracts.
 - [x] 10-03-PLAN.md — Extend the one-artifact wheel harness with retired member and metadata assertions.
-- [ ] 10-04-PLAN.md — Repair static quality, full-suite environment, and canonical documentation ownership gates.
+- [x] 10-04-PLAN.md — Repair static quality, full-suite environment, and canonical documentation ownership gates.
 
 **Wave 2 — dependent verifier and published-surface removal**
 
-- [ ] 10-02-PLAN.md — Invert Phase 4, Phase 6, and Phase 07.1 fixed verifier manifests before deletion.
-- [ ] 10-07-PLAN.md — Delete the three dedicated guides and six obsolete examples.
-- [ ] 10-08-PLAN.md — Publish concise canonical cutover notes and surgically clean mixed current docs.
+- [x] 10-02-PLAN.md — Invert Phase 4, Phase 6, and Phase 07.1 fixed verifier manifests before deletion.
+- [x] 10-07-PLAN.md — Delete the three dedicated guides and six obsolete examples.
+- [x] 10-08-PLAN.md — Publish concise canonical cutover notes and surgically clean mixed current docs.
 
 **Wave 3 — direct runtime product cut**
 
-- [ ] 10-05-PLAN.md — Delete the runtime, exports, orphan reasons, and three dedicated test modules.
+- [x] 10-05-PLAN.md — Delete the runtime, exports, orphan reasons, and three dedicated test modules.
 
 **Wave 4 — dependency and artifact cutover**
 
-- [ ] 10-06-PLAN.md — Prune DuckDB/sql-group metadata, converge the lock, and prove the fresh wheel.
+- [x] 10-06-PLAN.md — Prune DuckDB/sql-group metadata, converge the lock, and prove the fresh wheel.
 
 **Wave 5 — current maps and final acceptance**
 
-- [ ] 10-09-PLAN.md — Refresh agent/codebase maps and run the complete bounded Phase 10 acceptance chain.
+- [x] 10-09-PLAN.md — Refresh agent/codebase maps and run the complete bounded Phase 10 acceptance chain.
 
 ## Progress
 
@@ -720,7 +720,7 @@ Plans:
 | 07.1. Obstore Payload Participant Unification | 11/11 | Complete | 2026-09-13 |
 | 8. Production Gates and Performance Stabilization | 17/17 | Complete    | 2026-09-15 |
 | 9. Adoption and Release Surface Closure | 11/11 | Complete    | 2026-09-17 |
-| 10. Remove SqlCache Pull-Through Subsystem | 2/9 | In Progress|  |
+| 10. Remove SqlCache Pull-Through Subsystem | 9/9 | In Progress|  |
 
 ## Backlog
 
