@@ -341,6 +341,8 @@ assert all("duckdb" not in requirement.casefold() for requirement in requirement
 )
 extras = {{extra.casefold() for extra in distribution.metadata.get_all("Provides-Extra", [])}}
 assert "sql" not in extras, "installed metadata retains the sql extra"
+expected_extras = set({OPTIONAL_GROUPS!r})
+assert extras == expected_extras, "installed metadata optional extras do not match review"
 
 topology = StoreTopology(
     payload=BackendRef(name="memory"),
