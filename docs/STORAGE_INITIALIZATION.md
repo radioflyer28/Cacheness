@@ -54,7 +54,7 @@ next.
 
 The current supported SQLite authority boundary is
 `.cacheness/lifecycle-authority-v2.sqlite3` with application ID `0x43414348`
-and SQLite `user_version = 8`. This database schema identifier is separate from
+and SQLite `user_version = 9`. This database schema identifier is separate from
 the public store and payload-format versions: validation does not turn it into
 an ordinary-open migration switch.
 

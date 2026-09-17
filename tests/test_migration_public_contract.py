@@ -291,7 +291,7 @@ def test_ordinary_construction_exposes_no_migration_switch_or_cli() -> None:
     initialization_guide = Path("docs/STORAGE_INITIALIZATION.md").read_text(
         encoding="utf-8"
     )
-    assert "user_version = 8" in initialization_guide
+    assert "user_version = 9" in initialization_guide
     assert "wait for the Phase 7 migration tooling" not in initialization_guide
     assert "STORAGE_MIGRATION.md" in initialization_guide
 
