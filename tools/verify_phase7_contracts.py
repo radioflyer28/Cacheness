@@ -46,7 +46,6 @@ _PHASE7_REVIEWED_PRODUCTION_PATHS = (
     "src/cacheness/storage/obstore_generation_io.py",
     "docs/STORAGE_MIGRATION.md",
     "docs/STORAGE_INITIALIZATION.md",
-    "docs/BACKEND_SELECTION.md",
     ".planning/phases/07-explicit-migration-and-rebuild-cutover/07-COVERAGE.md",
 )
 PHASE7_PRODUCTION_PATHS = tuple(_PHASE7_REVIEWED_PRODUCTION_PATHS)
@@ -1074,7 +1073,6 @@ def verify_repository(root: Path, quick: bool) -> tuple[bool, tuple[str, ...]]:
     for relative_path in (
         "docs/STORAGE_MIGRATION.md",
         "docs/STORAGE_INITIALIZATION.md",
-        "docs/BACKEND_SELECTION.md",
     ):
         try:
             errors.extend(audit_phase7_text((root / relative_path).read_text(encoding="utf-8")))

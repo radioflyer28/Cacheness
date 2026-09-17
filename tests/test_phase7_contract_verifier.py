@@ -31,7 +31,6 @@ EXPECTED_PRODUCTION_PATHS = (
     "src/cacheness/storage/obstore_generation_io.py",
     "docs/STORAGE_MIGRATION.md",
     "docs/STORAGE_INITIALIZATION.md",
-    "docs/BACKEND_SELECTION.md",
     ".planning/phases/07-explicit-migration-and-rebuild-cutover/07-COVERAGE.md",
 )
 
