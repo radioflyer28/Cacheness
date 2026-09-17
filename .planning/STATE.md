@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 09
 current_phase_name: Adoption and Release Surface Closure
 status: executing
-stopped_at: Completed 09-04-PLAN.md
-last_updated: "2026-09-17T03:25:16.143Z"
+stopped_at: Completed 09-05-PLAN.md
+last_updated: "2026-09-17T03:28:50.836Z"
 last_activity: 2026-09-16
 last_activity_desc: Phase 09 execution started
-state_head: ae9520962ae726c0c0dca7d0b7bee6cb0d6b22ac
+state_head: 7b7f8aa8cd7503c13eb64b79893f0d211aa95318
 progress:
   total_phases: 11
   completed_phases: 8
   total_plans: 143
-  completed_plans: 136
+  completed_plans: 137
 milestone_name: milestone
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-09-15)
 ## Current Position
 
 Phase: 09 (Adoption and Release Surface Closure) — EXECUTING
-Plan: 5 of 10
+Plan: 6 of 10
 Status: Ready to execute
 Last activity: 2026-09-16 — Phase 09 execution started
 
@@ -231,6 +231,7 @@ Raw file counts include superseded plans and therefore are not completion claims
 | Phase 09 P02 | 13min | 2 tasks | 9 files |
 | Phase 09 P03 | 18min | 1 tasks | 5 files |
 | Phase 09 P04 | 6min | 1 tasks | 6 files |
+| Phase 09 P05 | 4min | 1 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -548,6 +549,7 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - [Phase 09]: Phase 09 canonical examples are literal published files exercised twice with child-only socket blocking and no residue.
 - [Phase 09]: The MCAP example demonstrates stable handler and payload identities through store-local FormatHandler registration without exposing managed paths.
 - [Phase 09]: Phase 09 Plan 04 deleted the first obsolete non-SqlCache example batch once canonical executable journeys covered the supported workflows.
+- [Phase 09]: Phase 9 removed five obsolete non-SqlCache examples, including runnable S3 promotion; canonical local examples remain the supported executable surface and Phase 10 retains SqlCache ownership.
 
 ### Pending Todos
 
@@ -586,6 +588,6 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 
 ## Session Continuity
 
-Last session: 2026-09-17T03:25:15.944Z
-Stopped at: Completed 09-04-PLAN.md
+Last session: 2026-09-17T03:28:50.645Z
+Stopped at: Completed 09-05-PLAN.md
 Resume file: None
