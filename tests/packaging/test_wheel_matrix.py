@@ -62,6 +62,26 @@ def test_base_wheel_qualification_uses_one_artifact_and_public_round_trips(
     )
 
 
+def test_base_probe_freezes_the_alias_free_storage_surface_and_quiet_import():
+    """The isolated wheel contract rejects retired handler names and import noise."""
+    runner = _load_runner()
+
+    storage_exports = runner.BASE_PUBLIC_EXPORTS["cacheness.storage"]
+    assert "FormatHandler" in storage_exports
+    assert "FormatHandlerError" in storage_exports
+    assert "CacheHandler" not in storage_exports
+    assert "CacheHandlerError" not in storage_exports
+    assert runner.RETIRED_PUBLIC_EXPORTS == {
+        "cacheness.storage": ("CacheHandler", "CacheHandlerError")
+    }
+
+    source = runner._base_probe_source()
+    assert "redirect_stdout" in source
+    assert "redirect_stderr" in source
+    assert "package-generated stdout" in source
+    assert "package-generated stderr" in source
+
+
 def test_base_probe_command_cannot_import_the_checkout_or_inherited_packages(
     tmp_path: Path,
 ) -> None:

@@ -131,6 +131,39 @@ def test_current_format_two_store_reopens_with_catalog_values_and_payload(tmp_pa
     ]
 
 
+def test_current_store_reopen_preserves_handler_and_version_identity(tmp_path: Path) -> None:
+    """A protocol rename cannot rewrite a committed local store's identity."""
+    root = tmp_path / "identity-reopen"
+    value = {"answer": 42, "labels": ["persisted", True]}
+
+    with BlobStore(_local_topology(root), cache_dir=root) as store:
+        store.initialize()
+        receipt = store.put_entry(value, key="identity-entry")
+        entry = store.get_entry_info(receipt.key)
+        assert entry is not None
+        before = (
+            entry.manifest.handler_type,
+            entry.manifest.payload_format,
+            entry.manifest.payload_format_version,
+            entry.manifest.versions.to_mapping(),
+        )
+        before_tree = _tree_snapshot(root)
+
+    with BlobStore(_local_topology(root), cache_dir=root) as reopened:
+        reopened.initialize()
+        entry = reopened.get_entry_info(receipt.key)
+        assert entry is not None
+        after = (
+            entry.manifest.handler_type,
+            entry.manifest.payload_format,
+            entry.manifest.payload_format_version,
+            entry.manifest.versions.to_mapping(),
+        )
+        assert reopened.get(receipt.key) == value
+        assert after == before
+        assert _tree_snapshot(root) == before_tree
+
+
 @pytest.mark.parametrize(
     ("marker_name", "marker_bytes"),
     (

@@ -74,6 +74,16 @@ class TestPublicExports:
         assert cacheness.StoreTopology is storage.StoreTopology
         assert storage.BackendRef(name="memory").name == "memory"
 
+    def test_storage_handler_protocol_is_alias_free(self):
+        """The generic extension protocol is storage-oriented and unambiguous."""
+        import cacheness.storage as storage
+
+        assert {"FormatHandler", "FormatHandlerError"}.issubset(storage.__all__)
+        assert hasattr(storage, "FormatHandler")
+        assert hasattr(storage, "FormatHandlerError")
+        assert not hasattr(storage, "CacheHandler")
+        assert not hasattr(storage, "CacheHandlerError")
+
     def test_explicit_constructor_returns_typed_results(self, tmp_path):
         """The package surface exposes one explicit cache lifecycle."""
 
