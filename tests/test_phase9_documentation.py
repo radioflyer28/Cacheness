@@ -124,12 +124,62 @@ def test_task_guides_own_their_current_capabilities() -> None:
     assert "rebuild" in migration.lower()
 
     # This runbook routes mutable qualification status to the sole detailed
-    # owner.  It deliberately does not recreate that evidence matrix here.
-    assert "[Release qualification](RELEASE_QUALIFICATION.md)" in migration
-    assert "SEED-006" in migration
-    assert "SEED-007" in migration
-    assert "Phase 999.1" in migration
-    assert "Phase 8 alone owns" not in migration
+    # owner. It deliberately does not recreate that evidence matrix here.
+    migration_qualification = re.sub(
+        r"\s+", " ", _section(migration, "## Topology guarantees and non-claims")
+    ).strip()
+    assert (
+        "its mutable status and details live in "
+        "[Release qualification](RELEASE_QUALIFICATION.md)"
+    ) in migration_qualification
+    assert (
+        "[SEED-006](../.planning/seeds/"
+        "SEED-006-qualify-controlled-linux-performance.md) "
+        "owns controlled-Linux performance"
+    ) in migration_qualification
+    assert (
+        "[SEED-007](../.planning/seeds/"
+        "SEED-007-qualify-real-postgresql-s3-and-publish-release.md) "
+        "owns real PostgreSQL/Amazon-S3 qualification and immutable publication"
+    ) in migration_qualification
+    assert (
+        "[Phase 999.1](../.planning/ROADMAP.md#"
+        "phase-9991-qualify-native-windows-lifecycle-authority-backlog) "
+        "owns native Windows qualification"
+    ) in migration_qualification
+
+    phase_8_future_ownership = re.compile(
+        r"""
+        \bphase\s*8\b[^.]{0,180}\b
+        (?:alone|sole(?:ly)?|only)?\s*
+        (?:owns?|is\s+(?:the\s+)?(?:sole\s+)?owner\s+of|
+        is\s+responsible\s+for|controls?|is\s+tasked\s+with)\b
+        [^.]{0,180}\b(?:future\s+)?
+        (?:qualification|remote|windows|performance|publication)\b
+        |
+        \b(?:future\s+)?(?:qualification|remote|windows|performance|publication)\b
+        [^.]{0,180}\b(?:belongs\s+to|is\s+owned\s+by|
+        is\s+the\s+responsibility\s+of|is\s+controlled\s+by)\b
+        [^.]{0,180}\bphase\s*8\b
+        """,
+        re.IGNORECASE | re.VERBOSE,
+    )
+    for stale_claim in (
+        "Phase 8 owns future qualification",
+        "Phase 8 alone owns Windows qualification",
+        "Future remote qualification belongs to Phase 8",
+    ):
+        assert phase_8_future_ownership.search(stale_claim)
+    assert not phase_8_future_ownership.search(migration_qualification)
+    assert "## Evidence matrix" not in migration
+    for status_token in (
+        "PASS",
+        "NOT_QUALIFIED",
+        "NOT_PUBLISHED",
+        "UNAVAILABLE",
+        "DEFERRED",
+    ):
+        assert re.search(rf"\b{status_token}\b", migration) is None
     assert "remote payload effects remain verifiable external effects" in migration
     assert "This guide makes no promise of automatic or seamless migration" in migration
 
