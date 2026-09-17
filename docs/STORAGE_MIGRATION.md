@@ -265,9 +265,13 @@ maintenance-evidence effects are external to that authority transaction.
 - PostgreSQL authority with filesystem or S3 participants has deterministic
   offline adapter contracts in this phase. PostgreSQL transactions end at
   authority state; remote payload effects remain verifiable external effects.
-  Real PostgreSQL and AWS S3 are not qualified in Phase 7. Phase 8 alone owns
-  their live-service qualification, compatible-service scope, Windows evidence,
-  and performance qualification.
+  The completed Phase 8 record remains local-readiness evidence only. This
+  runbook does not determine whether future work is qualified or not qualified;
+  its mutable status and details live in [Release qualification](RELEASE_QUALIFICATION.md): [SEED-006](../.planning/seeds/SEED-006-qualify-controlled-linux-performance.md)
+  owns controlled-Linux performance, [SEED-007](../.planning/seeds/SEED-007-qualify-real-postgresql-s3-and-publish-release.md)
+  owns real PostgreSQL/Amazon-S3 qualification and immutable publication, and
+  [Phase 999.1](../.planning/ROADMAP.md#phase-9991-qualify-native-windows-lifecycle-authority-backlog)
+  owns native Windows qualification.
 
 This guide makes no promise of automatic or seamless migration, online-writer
 coordination, cross-resource ACID, universal payload conversion, live remote
