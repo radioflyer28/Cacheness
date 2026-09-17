@@ -197,6 +197,22 @@ def test_base_probe_rejects_retired_installed_metadata_and_exports(
         )
 
 
+def test_base_probe_rejects_installed_optional_extra_drift(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The installed wheel declares exactly the reviewed optional extras."""
+    runner = _load_runner()
+
+    with pytest.raises(AssertionError, match="optional extras do not match"):
+        _execute_base_probe_prelude(
+            runner,
+            monkeypatch,
+            tmp_path,
+            extras=[*runner.OPTIONAL_GROUPS, "unexpected"],
+        )
+
+
 def test_base_probe_command_cannot_import_the_checkout_or_inherited_packages(
     tmp_path: Path,
 ) -> None:
