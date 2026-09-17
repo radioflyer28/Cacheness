@@ -36,7 +36,7 @@ Phase 3 completion below is scoped to the qualified initialized local SQLite/fil
 - [x] **CACH-04**: A cached `None` value remains distinguishable from a cache miss.
 - [x] **CACH-05**: Cache statistics distinguish absent, expired, corrupt, conflict, and backend-error outcomes through one documented aggregate/result model; legacy counter shapes need not be preserved.
 - [x] **CACH-06**: The milestone publishes one coherent cache import, constructor, configuration, decorator, and result surface over `BlobStore`. Pre-production aliases and overlapping constructors may be removed instead of routed through compatibility adapters; explicit initialization, optional-export warnings, and requested-external-metadata committed-partial errors remain required semantic contracts.
-- [ ] **CACH-07**: The unrelated table/range-oriented `SqlCache` pull-through subsystem is removed before the first supported release, including its public exports, dedicated implementation, tests, examples, documentation, and dependencies that become unused; BlobStore, UnifiedCache, SQL-backed lifecycle authorities, catalog metadata, and dataframe format handlers remain intact.
+- [x] **CACH-07**: The unrelated table/range-oriented `SqlCache` pull-through subsystem is removed before the first supported release, including its public exports, dedicated implementation, tests, examples, documentation, and dependencies that become unused; BlobStore, UnifiedCache, SQL-backed lifecycle authorities, catalog metadata, and dataframe format handlers remain intact.
 
 ### Security and Integrity
 
@@ -126,7 +126,7 @@ advertised until SEED-007 produces the original real-service evidence.
 | CACH-04 | Phase 6 | Complete |
 | CACH-05 | Phase 6 | Complete |
 | CACH-06 | Phase 6 + Phase 9 | Complete |
-| CACH-07 | Phase 10 | Pending — direct pre-production removal approved |
+| CACH-07 | Phase 10 | Complete |
 | SECU-01 | Phase 1 | Complete |
 | SECU-02 | Phase 1 | Complete |
 | SECU-03 | Phase 2 | Complete |
@@ -153,12 +153,12 @@ advertised until SEED-007 produces the original real-service evidence.
 **Coverage:**
 
 - v1 requirements recorded: 44 total
-- Completed requirements mapped to milestone phases: 41
-- Pending current-phase requirements: 1 (`CACH-07` SqlCache removal → Phase 10)
+- Completed requirements mapped to milestone phases: 42
+- Pending current-phase requirements: 0
 - Explicitly deferred: 2 (`QUAL-06` → `SEED-006`; `BACK-05` → `SEED-007`)
 - Total requirements accounted for: 44
 - Unmapped: 0 ✓
 
 ---
 *Requirements defined: 2026-08-29*
-*Last updated: 2026-09-17 after Phase 9 completed the coherent published adoption surface for CACH-06*
+*Last updated: 2026-09-17 after Phase 10 completed CACH-07 and removed SqlCache*

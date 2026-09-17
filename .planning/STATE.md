@@ -2,18 +2,17 @@
 gsd_state_version: 1.0
 milestone: v1.0
 current_phase: 10
-current_phase_name: Remove SqlCache Pull-Through Subsystem
-status: executing
-stopped_at: Completed 10-03-PLAN.md
-last_updated: "2026-09-17T16:59:51.564Z"
+status: completed
+stopped_at: Phase 10 complete — all phases complete
+last_updated: "2026-09-17T19:05:45.669Z"
 last_activity: 2026-09-17
-last_activity_desc: Phase 10 execution started
-state_head: 3ca6e116ce7ea04102016b889c05711e278c035d
+last_activity_desc: Phase 10 complete
+state_head: bf9de4b0b231218f0d2f9a2aceaf6dbbeaa4f8ea
 progress:
   total_phases: 11
-  completed_phases: 9
+  completed_phases: 11
   total_plans: 153
-  completed_plans: 145
+  completed_plans: 152
 milestone_name: milestone
 ---
 
@@ -21,17 +20,17 @@ milestone_name: milestone
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-09-15)
+See: .planning/PROJECT.md (updated 2026-09-17)
 
 **Core value:** Applications can store and retrieve data reliably through one backend-neutral lifecycle, with caching policy layered above storage without compromising integrity or cleanup correctness.
-**Current focus:** Phase 10 — Remove SqlCache Pull-Through Subsystem
+**Current focus:** v1.0 milestone audit and closeout
 
 ## Current Position
 
-Phase: 10 (Remove SqlCache Pull-Through Subsystem) — EXECUTING
-Plan: 3 of 9
-Status: Ready to execute
-Last activity: 2026-09-17 — Phase 10 execution started
+Phase: 10 (Remove SqlCache Pull-Through Subsystem) — COMPLETE
+Plan: 9 of 9 complete
+Status: Milestone ready to audit
+Last activity: 2026-09-17 — Phase 10 complete
 
 Current execution chain: **08-18 complete → 08-19 complete → 08-16 complete → independent Phase 08 verification**. No older Phase 8 ordering statement overrides this chain.
 
@@ -49,9 +48,10 @@ retained; controlled-Linux performance qualification is deferred to SEED-006 by
 D-23, while real PostgreSQL/Amazon-S3 qualification and immutable publication are
 deferred to SEED-007 by D-24.
 
-Roadmap progress: [████████░░░] 9 of 11 phases complete. Phase 9 closed the bounded
-adoption surface; the separately scoped Phase 10 directly removes SqlCache.
-Neither phase reopens storage lifecycle design. The generated disk plan
+Roadmap progress: [███████████] 11 of 11 phases complete. Phase 9 closed the bounded
+adoption surface; Phase 10 directly removed SqlCache while retaining BlobStore,
+UnifiedCache, SQL lifecycle authorities, and dataframe handlers. Neither phase
+reopened storage lifecycle design. The generated disk plan
 counter still includes the deliberately superseded Phase 03 plan; do not reopen
 that closed phase merely to repair the counter.
 
@@ -571,11 +571,13 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - [Phase 09]: Migration guidance routes mutable qualification status to Release qualification; Phase 8 remains local-readiness evidence while SEED-006, SEED-007, and Phase 999.1 own deferred work.
 - [Phase 10]: Phase 10 removal contracts require natural Python absence and preserve only the BlobStore/UnifiedCache public boundary.
 - [Phase 10]: Use one digest-bound WheelArtifact for ZIP inspection, source-free installation, metadata checks, and retained local round trips. — A single artifact prevents checkout-only or parallel-harness evidence from masking stale shipped surface.
+- [Phase 10]: Direct deletion, not a tombstone or compatibility alias, is the supported SqlCache cutover; ordinary Python import failure is intentional.
+- [Phase 10]: SqlCache-only DuckDB and `sql` extras are removed while SQLAlchemy/PostgreSQL lifecycle authorities and dataframe/Parquet dependencies remain supported.
+- [Phase 10]: The cutover did not alter lifecycle, concurrency, recovery, topology, or handler-persistence contracts; ADR 0001 remains the guardrail.
 
 ### Pending Todos
 
-- Apply ADR 0001 and the Phase 7 maintenance boundaries during Phase 8 qualification; a failing contention probe does not authorize another coordination mechanism.
-- Run independent Phase 08 verification over the completed deterministic local, base-package, coverage/Ruff, structural, and integrity/recovery evidence. Preserve the unrun remote/platform claims: BACK-05/publication remain deferred to SEED-007, controlled performance remains deferred to SEED-006, and native Windows remains unqualified.
+- Run the v1.0 milestone audit before archiving; preserve the explicit SEED-006, SEED-007, and native-Windows nonclaims.
 
 ### Blockers/Concerns
 
@@ -609,6 +611,6 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 
 ## Session Continuity
 
-Last session: 2026-09-17T16:59:51.295Z
-Stopped at: Completed 10-03-PLAN.md
+Last session: 2026-09-17T19:05:45.669Z
+Stopped at: Phase 10 complete — all phases complete
 Resume file: None

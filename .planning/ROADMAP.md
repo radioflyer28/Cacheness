@@ -2,7 +2,7 @@
 
 ## Overview
 
-Cacheness will move from overlapping cache and storage paths to one storage engine in eight phases. After compatibility/security characterization and canonical storage contracts, Phase 3 proves one initialized SQLite/filesystem lifecycle and a thin cache-over-BlobStore slice before backend expansion. Phase 4 makes catalog customization first-class and replaces overlapping backend selection with one composition contract; Phase 5 qualifies explicitly supported payload/catalog pairings. Phase 6 publishes one coherent cache policy surface rather than preserving pre-production aliases. Migration and release gates establish future version-to-version tooling without absorbing `SqlCache` or requiring a dual-role live store. ADR 0001 governs topology-specific integrity, recovery, progress and performance; a common interface does not promise cross-resource ACID or identical availability.
+Cacheness moved from overlapping cache and storage paths to one storage engine across eleven roadmap phases, including the inserted Phase 07.1. After compatibility/security characterization and canonical storage contracts, Phase 3 proved one initialized SQLite/filesystem lifecycle and a thin cache-over-BlobStore slice before backend expansion. Phase 4 made catalog customization first-class and replaced overlapping backend selection with one composition contract; Phase 5 qualified explicitly supported payload/catalog pairings. Phase 6 published one coherent cache policy surface rather than preserving pre-production aliases. Migration and release gates established future version-to-version tooling without requiring a dual-role live store, and Phase 10 removed the unrelated `SqlCache` product rather than absorbing it. ADR 0001 governs topology-specific integrity, recovery, progress and performance; a common interface does not promise cross-resource ACID or identical availability.
 
 ## Phases
 
@@ -15,6 +15,8 @@ Cacheness will move from overlapping cache and storage paths to one storage engi
 - [x] **Phase 7: Explicit Migration and Rebuild Cutover** - Give existing stores an inspectable, resumable same-backend migration or confirmed rebuild path. (completed 2026-09-11)
 - [x] **Phase 07.1: Obstore Payload Participant Unification** - Use one obstore-backed payload participant while retaining `BlobStore` as the sole lifecycle authority. (completed 2026-09-13)
 - [x] **Phase 8: Production Gates and Performance Stabilization** - Make packaging, service integration, fault testing, coverage, and measured scalability release requirements. (completed 2026-09-15)
+- [x] **Phase 9: Adoption and Release Surface Closure** - Publish an accurate local-use surface without broadening lifecycle guarantees. (completed 2026-09-17)
+- [x] **Phase 10: Remove SqlCache Pull-Through Subsystem** - Remove the unrelated pull-through product and retain one BlobStore foundation plus UnifiedCache policy layer. (completed 2026-09-17)
 
 ## Phase Details
 
@@ -678,7 +680,7 @@ Plans:
   4. Public import, package, and documentation gates prove that the supported product surface contains BlobStore, UnifiedCache, and their shared format-handler ecosystem without dangling SqlCache references.
   5. Removal does not redesign BlobStore, UnifiedCache, lifecycle authority, backend topology, or handler persistence contracts.
 
-**Plans:** 9/9 plans executed
+**Plans:** 9/9 plans complete
 
 Plans:
 
@@ -720,7 +722,7 @@ Plans:
 | 07.1. Obstore Payload Participant Unification | 11/11 | Complete | 2026-09-13 |
 | 8. Production Gates and Performance Stabilization | 17/17 | Complete    | 2026-09-15 |
 | 9. Adoption and Release Surface Closure | 11/11 | Complete    | 2026-09-17 |
-| 10. Remove SqlCache Pull-Through Subsystem | 9/9 | In Progress|  |
+| 10. Remove SqlCache Pull-Through Subsystem | 9/9 | Complete    | 2026-09-17 |
 
 ## Backlog
 
