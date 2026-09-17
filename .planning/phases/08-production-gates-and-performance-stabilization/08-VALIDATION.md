@@ -1,14 +1,27 @@
 ---
 phase: 08
 slug: production-gates-and-performance-stabilization
-status: planned
+status: complete
 nyquist_compliant: true
-wave_0_complete: false
+wave_0_complete: true
 created: 2026-09-13
 updated: 2026-09-15
+completion_disposition: local_readiness_complete
+completion_evidence:
+  - 08-VERIFICATION.md
+  - 08-LOCAL-READINESS.json
+nonclaim_boundary: >-
+  LOCAL_READY completes Wave 0/Nyquist evidence only. BACK-05 and QUAL-06
+  remain DEFERRED/NOT_QUALIFIED, and publication remains NOT_PUBLISHED.
 ---
 
 # Phase 08 — Validation Strategy
+
+> **Completed metadata:** Wave 0 and the Nyquist validation strategy are
+> complete for the checked-in `LOCAL_READY` scope recorded by
+> `08-VERIFICATION.md` and `08-LOCAL-READINESS.json`. This planning record does
+> not qualify live services, controlled-Linux performance, Windows, or
+> publication; the detailed nonclaims below remain controlling.
 
 > Nyquist contract for canonical Plans 08-01 through 08-10 and 08-13 through
 > 08-19. Plans 08-11/08-12 are superseded by D-24 and preserved for SEED-007;

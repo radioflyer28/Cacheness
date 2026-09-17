@@ -1,69 +1,48 @@
 ---
 phase: 03-atomic-lifecycle-and-recovery-engine
 verified: 2026-09-06T17:50:59Z
-status: gaps_found
-score: 3/8
-behavior_unverified: 0
-overrides_applied: 0
-re_verification:
-  previous_status: gaps_found
-  previous_score: 3/8
-  gaps_closed:
-    - "The nine pre-ADR facade admission, projection ownership/CAS, cached-wrapper, locator, and PostgreSQL parity gaps were closed by Plans 03-15 through 03-18."
-  gaps_remaining:
-    - "CR-01: non-persisted in-memory abort leaves a dangling reconciliation row."
-    - "CR-02: retiring in-memory cleanup debt invalidates resume cursors."
-    - "CR-03: SQLite point/list reads silently erase corrupt committed cache_key_params."
-    - "CR-04: readers misclassify a transient first-writer SQLite leaf as incompatible."
-  regressions: []
-gaps:
-  - truth: "A non-persisted aborted in-memory mutation remains safely reconcilable."
-    status: failed
-    reason: "CR-01: abort_mutation deletes the mutation mapping but retains its operation ID in the ordered reconciliation index; public dry-run raises KeyError."
-    artifacts:
-      - path: src/cacheness/storage/memory_lifecycle_authority.py
-        issue: "_mutation_order retains an ID removed from _mutations."
-    missing:
-      - "Retain a stable terminal reconciliation row or remove it without invalidating captured high-water identity."
-      - "Add public dry-run/apply coverage after a pre-publication abort."
-  - truth: "Resumable in-memory cleanup retires every captured debt exactly once."
-    status: failed
-    reason: "CR-02: cleanup debts use mutable list positions as row IDs; applying one page shrinks the list, so a signed resume cursor skips work and eventually raises IndexError."
-    artifacts:
-      - path: src/cacheness/storage/memory_lifecycle_authority.py
-        issue: "Debt high-water/cursor values address a shrinking _debts list."
-    missing:
-      - "Assign stable monotonic debt IDs and page by stable ID/high-water."
-      - "Add a multi-page public apply/resume regression for the memory topology."
-  - truth: "Corrupt committed SQLite metadata fails closed without mutating a valid authority generation."
-    status: failed
-    reason: "CR-03: get_entry and list_entries suppress malformed non-null cache_key_params. Under strict signing, public get treats the omitted field as an invalid signature and deletes the valid canonical authority entry."
-    artifacts:
-      - path: src/cacheness/metadata.py
-        issue: "Malformed cache_key_params is silently omitted at the point/list read seams."
-      - path: src/cacheness/core.py
-        issue: "Derived projection corruption can trigger retirement of the valid authority snapshot."
-    missing:
-      - "Use the strict bounded decoder for live point/list observations and raise key-attributed METADATA_CORRUPT."
-      - "Prove strict-signing public get/list leaves authority, payload, and corrupt evidence unchanged."
-  - truth: "A reader racing first SQLite initialization receives only absence or a declared typed retryable outcome."
-    status: failed
-    reason: "CR-04: the first writer exposes an empty exclusive leaf before schema/application identity commits; a reader classifies it as durable authority and raises CacheBlobMigrationRequiredError."
-    artifacts:
-      - path: src/cacheness/storage/sqlite_lifecycle_authority.py
-        issue: "Read-side classification cannot distinguish the exact pristine initialization leaf from durable incompatible evidence."
-      - path: tests/test_sqlite_bootstrap_concurrency.py
-        issue: "Competing mutators are covered, but reader-versus-initializer after leaf creation is not."
-    missing:
-      - "Recognize the exact pristine leaf under SQLite's bounded coordination without adding another authority or process-local correctness gate."
-      - "Add a deterministic independent reader-versus-first-writer barrier test."
-decision_coverage:
-  honored: 32
-  total: 32
-  not_honored: []
+status: historical_superseded
+current_disposition: scoped_local_closure
+scope: SQLite/local filesystem plus declared memory authority
+superseded_snapshot: pre-03-21 verifier verdict (3/8)
+current_closure_artifacts:
+  - .planning/phases/03-atomic-lifecycle-and-recovery-engine/03-25-SUMMARY.md
+  - docs/phase3-direct-implementation-2026-09-06.md
+  - .planning/phases/07.1-obstore-payload-participant-unification/07.1-VERIFICATION.md
+  - .planning/phases/08-production-gates-and-performance-stabilization/08-VERIFICATION.md
+qualified_tree: 5282dcabc7157037d95144527a220f51e51c9803
+nonclaims:
+  - Windows remains UNAVAILABLE/NOT_QUALIFIED
+  - live PostgreSQL is not qualified
+  - controlled-Linux performance is not qualified
+  - immutable publication is not qualified
 ---
 
-# Phase 3: Atomic Lifecycle and Recovery Engine Verification Report
+# Phase 3: Current Evidence Disposition
+
+This report's former `gaps_found` / `3/8` verdict is historical evidence from
+before Plans 03-21 through 03-25. It is **not a fresh independent verifier verdict**,
+does not describe the current local implementation, and must not be
+used to reopen a lifecycle or race-fix loop.
+
+The current scoped closure is the direct, exact-tree qualification at
+`5282dcabc7157037d95144527a220f51e51c9803` (`5282dca`).
+[`03-25-SUMMARY.md`](03-25-SUMMARY.md) and the
+[direct implementation ledger](../../../docs/phase3-direct-implementation-2026-09-06.md)
+record the Plan 03-21 through 03-25 fixes, their finite tests, and the user's
+approved direct qualification process. Later [Phase 07.1](../07.1-obstore-payload-participant-unification/07.1-VERIFICATION.md)
+and [Phase 8](../08-production-gates-and-performance-stabilization/08-VERIFICATION.md)
+regression evidence confirm the same authority boundary without creating a new
+lifecycle claim.
+
+The closure applies only to the initialized single-host SQLite/local filesystem
+topology and the declared single-process memory authority. It preserves ADR
+0001: external payload effects are not cross-resource ACID, and finite
+regressions do not promise universal contender success or every interleaving.
+Windows remains UNAVAILABLE/NOT_QUALIFIED; live PostgreSQL, controlled-Linux
+performance, and immutable publication remain outside this evidence.
+
+## Historical Snapshot (pre-03-21; not current)
 
 **Phase Goal:** Object lifecycle operations preserve an old or new complete generation and leave every incomplete outcome recoverable.
 **Status:** gaps_found
