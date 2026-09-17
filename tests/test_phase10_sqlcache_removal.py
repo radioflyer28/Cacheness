@@ -69,23 +69,68 @@ HISTORICAL_REFERENCE_EXCLUSIONS = frozenset(
         "docs/phase3-architecture-audit-2026-09-06.md",
     }
 )
-CUTOVER_NOTE = (
-    "Cacheness no longer ships SqlCache or a range-aware SQL pull-through cache."
+CUTOVER_NOTE_BLOCK = """\
+> **SqlCache cutover:** Cacheness no longer ships SqlCache or a range-aware SQL pull-through cache. `UnifiedCache` provides object/function caching over
+> `BlobStore`, and `BlobStore` provides direct object persistence. There is no in-package replacement.
+> caller-owned SQL tables are untouched and unsupported; they are outside migration/rebuild tooling."""
+CUTOVER_NOTE_OWNERS = frozenset(
+    {
+        "docs/API_REFERENCE.md",
+        "docs/STORAGE_MIGRATION.md",
+        "docs/README.md",
+    }
 )
-REFERENCE_ALLOWLIST = {
-    "docs/API_REFERENCE.md": "canonical API cutover note",
-    "docs/STORAGE_MIGRATION.md": "canonical migration cutover note",
-    "docs/README.md": "canonical documentation-index cutover note",
-    "tests/test_phase10_sqlcache_removal.py": "negative source and import contract",
-    "tests/test_public_api_contract.py": "negative public-boundary contract",
-    "tests/test_phase6_public_api_contract.py": "negative cache-over-store contract",
-    "tests/test_phase071_contract_verifier.py": "fixed-manifest removal selector",
-    "tests/test_phase9_documentation.py": "negative documentation contract",
-    "tests/test_phase9_quality_workflow.py": "negative canonical-example assertion",
-    "tests/test_phase4_cutover_verifier.py": "negative historical-input assertion",
-    "tools/run_phase8_packaging.py": "negative wheel boundary contract",
-    "tools/verify_phase071_contracts.py": "fixed-manifest removal selector",
-    "tests/packaging/test_wheel_matrix.py": "negative wheel boundary contract",
+ALLOWED_NON_DOCUMENT_MARKER_COUNTS = {
+    "tests/packaging/test_wheel_matrix.py": {
+        "SqlCache": 4,
+        "SqlCacheAdapter": 1,
+        "cacheness.sql_cache": 2,
+        "sql_cache": 4,
+        "duckdb": 3,
+        "duckdb-engine": 1,
+    },
+    "tests/test_phase10_sqlcache_removal.py": {
+        "SqlCache": 32,
+        "SqlCacheAdapter": 10,
+        "cacheness.sql_cache": 10,
+        "sql_cache": 25,
+        "SQL pull-through": 6,
+        "range-aware SQL": 5,
+        "duckdb": 11,
+        "duckdb-engine": 4,
+    },
+    "tests/test_phase071_contract_verifier.py": {"SqlCache": 2},
+    "tests/test_phase4_cutover_verifier.py": {"SqlCache": 1, "sql_cache": 2},
+    "tests/test_phase6_public_api_contract.py": {
+        "SqlCache": 3,
+        "SqlCacheAdapter": 1,
+        "cacheness.sql_cache": 1,
+        "sql_cache": 1,
+        "SQL pull-through": 1,
+    },
+    "tests/test_phase9_documentation.py": {
+        "SqlCache": 4,
+        "sql_cache": 1,
+        "SQL pull-through": 4,
+        "range-aware SQL": 4,
+    },
+    "tests/test_phase9_quality_workflow.py": {"SqlCache": 1},
+    "tests/test_public_api_contract.py": {
+        "SqlCache": 9,
+        "SqlCacheAdapter": 3,
+        "cacheness.sql_cache": 2,
+        "sql_cache": 2,
+        "SQL pull-through": 1,
+        "range-aware SQL": 1,
+    },
+    "tools/run_phase8_packaging.py": {
+        "SqlCache": 2,
+        "SqlCacheAdapter": 1,
+        "cacheness.sql_cache": 1,
+        "sql_cache": 2,
+        "duckdb": 2,
+    },
+    "tools/verify_phase071_contracts.py": {"SqlCache": 1},
 }
 RETIRED_REFERENCE_MARKERS = (
     "SqlCache",
@@ -119,14 +164,26 @@ def _current_reference_files() -> tuple[Path, ...]:
     )
 
 
+def _marker_counts(source: str) -> dict[str, int]:
+    """Return exact retired-marker counts for a deliberately reviewed file."""
+    lowered = source.casefold()
+    return {
+        marker: lowered.count(marker.casefold())
+        for marker in RETIRED_REFERENCE_MARKERS
+        if lowered.count(marker.casefold())
+    }
+
+
 def _allowed_reference(relative_path: str, source: str) -> bool:
-    """Keep each surviving reference tied to an exact reviewed purpose."""
-    purpose = REFERENCE_ALLOWLIST.get(relative_path)
-    if purpose is None:
-        return False
-    if relative_path.startswith("docs/"):
-        return CUTOVER_NOTE in source
-    return True
+    """Keep each surviving reference tied to an exact bounded purpose."""
+    if relative_path in CUTOVER_NOTE_OWNERS:
+        if source.count(CUTOVER_NOTE_BLOCK) != 1:
+            return False
+        return _matching_references(source.replace(CUTOVER_NOTE_BLOCK, "")) == ()
+
+    return _marker_counts(source) == ALLOWED_NON_DOCUMENT_MARKER_COUNTS.get(
+        relative_path
+    )
 
 
 def _matching_references(source: str) -> tuple[str, ...]:
@@ -231,7 +288,7 @@ def test_manifest_lock_dependency_contract() -> None:
 def test_current_facing_references_match_allowlist() -> None:
     """Current claims cannot retain the product while dated/planning history stays intact."""
     unexpected: dict[str, tuple[str, ...]] = {}
-    missing_cutover_notes: list[str] = []
+    malformed_cutover_notes: list[str] = []
     for path in _current_reference_files():
         relative_path = path.relative_to(PROJECT_ROOT).as_posix()
         source = path.read_text(encoding="utf-8")
@@ -239,16 +296,21 @@ def test_current_facing_references_match_allowlist() -> None:
         if markers and not _allowed_reference(relative_path, source):
             unexpected[relative_path] = markers
 
-    for path in (
-        "docs/API_REFERENCE.md",
-        "docs/STORAGE_MIGRATION.md",
-        "docs/README.md",
-    ):
-        if CUTOVER_NOTE not in (PROJECT_ROOT / path).read_text(encoding="utf-8"):
-            missing_cutover_notes.append(path)
+    for path in CUTOVER_NOTE_OWNERS:
+        if not _allowed_reference(
+            path, (PROJECT_ROOT / path).read_text(encoding="utf-8")
+        ):
+            malformed_cutover_notes.append(path)
 
     assert unexpected == {}
-    assert missing_cutover_notes == []
+    assert malformed_cutover_notes == []
+
+
+def test_cutover_note_does_not_allow_positive_retired_guidance() -> None:
+    """One required negative note cannot exempt a second positive reference."""
+    hostile_source = f"{CUTOVER_NOTE_BLOCK}\n\nUse SqlCacheAdapter with duckdb-engine."
+
+    assert not _allowed_reference("docs/API_REFERENCE.md", hostile_source)
 
 
 def test_phase10_has_no_caller_table_tooling() -> None:
