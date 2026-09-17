@@ -1,17 +1,17 @@
 ---
 gsd_state_version: 1.0
 milestone: v1.0
-current_phase: 09
-current_phase_name: Adoption and Release Surface Closure
-status: verifying
-stopped_at: Completed 09-11-PLAN.md; awaiting independent Phase 09 verification
-last_updated: "2026-09-17T05:30:46.843Z"
+current_phase: 10
+current_phase_name: Remove SqlCache Pull-Through Subsystem
+status: planning
+stopped_at: Phase 09 complete, ready to plan Phase 10
+last_updated: "2026-09-17T05:46:28.222Z"
 last_activity: 2026-09-17
-last_activity_desc: Phase 09 Plan 11 qualification-ownership gap closure completed
-state_head: d84ea442b7acb0acb138495d89d2fc7781a74900
+last_activity_desc: Phase 09 complete, transitioned to Phase 10
+state_head: 535c810ac91ba65e25d35d19110223a9ed538590
 progress:
   total_phases: 11
-  completed_phases: 8
+  completed_phases: 9
   total_plans: 144
   completed_plans: 143
 milestone_name: milestone
@@ -24,14 +24,14 @@ milestone_name: milestone
 See: .planning/PROJECT.md (updated 2026-09-15)
 
 **Core value:** Applications can store and retrieve data reliably through one backend-neutral lifecycle, with caching policy layered above storage without compromising integrity or cleanup correctness.
-**Current focus:** Phase 09 — Adoption and Release Surface Closure
+**Current focus:** Phase 10 — Remove SqlCache Pull-Through Subsystem
 
 ## Current Position
 
-Phase: 09 (Adoption and Release Surface Closure) — VERIFYING
-Plan: 11 of 11
-Status: Plans complete — awaiting independent verification
-Last activity: 2026-09-17 — Phase 09 Plan 11 qualification-ownership gap closure completed
+Phase: 10 — Remove SqlCache Pull-Through Subsystem
+Plan: Not started
+Status: Ready to plan
+Last activity: 2026-09-17 — Phase 09 complete, transitioned to Phase 10
 
 Current execution chain: **08-18 complete → 08-19 complete → 08-16 complete → independent Phase 08 verification**. No older Phase 8 ordering statement overrides this chain.
 
@@ -49,9 +49,9 @@ retained; controlled-Linux performance qualification is deferred to SEED-006 by
 D-23, while real PostgreSQL/Amazon-S3 qualification and immutable publication are
 deferred to SEED-007 by D-24.
 
-Roadmap progress: [███████░░░░] 8 of 11 phases complete. Phase 9 is a bounded
-adoption-surface closure phase, followed by the separately scoped Phase 10
-direct removal of SqlCache; neither reopens storage lifecycle design. The generated disk plan
+Roadmap progress: [████████░░░] 9 of 11 phases complete. Phase 9 closed the bounded
+adoption surface; the separately scoped Phase 10 directly removes SqlCache.
+Neither phase reopens storage lifecycle design. The generated disk plan
 counter still includes the deliberately superseded Phase 03 plan; do not reopen
 that closed phase merely to repair the counter.
 
@@ -606,5 +606,5 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 ## Session Continuity
 
 Last session: 2026-09-17T05:30:46.606Z
-Stopped at: Completed 09-11-PLAN.md; awaiting independent Phase 09 verification
+Stopped at: Phase 09 complete, ready to plan Phase 10
 Resume file: None
