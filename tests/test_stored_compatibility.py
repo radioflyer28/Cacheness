@@ -70,6 +70,19 @@ def _tree_snapshot(root: Path) -> dict[Path, tuple[int, bytes | str | None]]:
     return snapshot
 
 
+def _persisted_identity(store: BlobStore, key: str) -> tuple[object, ...]:
+    """Read the authenticated stored identity without deserializing its payload."""
+    snapshot = store.lifecycle_authority.read_entry(key)
+    assert snapshot is not None
+    manifest = store.lifecycle._entry_manifest(snapshot)
+    return (
+        manifest.handler_type,
+        manifest.payload_format,
+        manifest.payload_format_version,
+        manifest.versions.to_mapping(),
+    )
+
+
 def _memory_topology() -> StoreTopology:
     """Create the explicitly same-process topology used for memory validation."""
     return StoreTopology(
@@ -139,26 +152,12 @@ def test_current_store_reopen_preserves_handler_and_version_identity(tmp_path: P
     with BlobStore(_local_topology(root), cache_dir=root) as store:
         store.initialize()
         receipt = store.put_entry(value, key="identity-entry")
-        entry = store.get_entry_info(receipt.key)
-        assert entry is not None
-        before = (
-            entry.manifest.handler_type,
-            entry.manifest.payload_format,
-            entry.manifest.payload_format_version,
-            entry.manifest.versions.to_mapping(),
-        )
+        before = _persisted_identity(store, receipt.key)
         before_tree = _tree_snapshot(root)
 
     with BlobStore(_local_topology(root), cache_dir=root) as reopened:
         reopened.initialize()
-        entry = reopened.get_entry_info(receipt.key)
-        assert entry is not None
-        after = (
-            entry.manifest.handler_type,
-            entry.manifest.payload_format,
-            entry.manifest.payload_format_version,
-            entry.manifest.versions.to_mapping(),
-        )
+        after = _persisted_identity(reopened, receipt.key)
         assert reopened.get(receipt.key) == value
         assert after == before
         assert _tree_snapshot(root) == before_tree

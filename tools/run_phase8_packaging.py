@@ -157,7 +157,8 @@ BASE_PUBLIC_EXPORTS: dict[str, tuple[str, ...]] = {
         "StoppedWorkerAcknowledgement",
         "MaintenanceRunEvidence",
         "render_migration_report",
-        "CacheHandler",
+        "FormatHandler",
+        "FormatHandlerError",
         "HandlerRegistry",
         "ArrayHandler",
         "ObjectHandler",
@@ -168,6 +169,9 @@ BASE_PUBLIC_EXPORTS: dict[str, tuple[str, ...]] = {
         "DILL_AVAILABLE",
         "CacheEntrySigner",
     ),
+}
+RETIRED_PUBLIC_EXPORTS: dict[str, tuple[str, ...]] = {
+    "cacheness.storage": ("CacheHandler", "CacheHandlerError"),
 }
 BASE_PROBE_NAMES = (
     "public_exports",
@@ -249,17 +253,25 @@ def _isolated_environment(
 def _base_probe_source() -> str:
     """Render the literal base-surface and public-composition qualification probe."""
     return f'''
+from contextlib import redirect_stderr, redirect_stdout
 from importlib import import_module
+from io import StringIO
 import os
 from pathlib import Path
 
 import numpy as np
 
-import cacheness
-import cacheness.storage as storage
-from cacheness import CacheConfig, UnifiedCache
-from cacheness.config import CacheStorageConfig
-from cacheness.storage import BackendRef, BlobStore, StoreTopology
+import_stdout = StringIO()
+import_stderr = StringIO()
+with redirect_stdout(import_stdout), redirect_stderr(import_stderr):
+    import cacheness
+    import cacheness.storage as storage
+    from cacheness import CacheConfig, UnifiedCache
+    from cacheness.config import CacheStorageConfig
+    from cacheness.storage import BackendRef, BlobStore, StoreTopology
+
+assert not import_stdout.getvalue(), "package-generated stdout during base import"
+assert not import_stderr.getvalue(), "package-generated stderr during base import"
 
 SOURCE_ROOT = Path(os.environ["CACHENESS_PHASE8_SOURCE_ROOT"]).resolve()
 for module in (cacheness, storage):
@@ -275,6 +287,8 @@ for module_name, exports in {BASE_PUBLIC_EXPORTS!r}.items():
     module = import_module(module_name)
     for export in exports:
         assert hasattr(module, export), f"missing public export: {{module_name}}.{{export}}"
+    for retired in {RETIRED_PUBLIC_EXPORTS!r}.get(module_name, ()):
+        assert not hasattr(module, retired), f"retired public export: {{module_name}}.{{retired}}"
 
 topology = StoreTopology(
     payload=BackendRef(name="memory"),
