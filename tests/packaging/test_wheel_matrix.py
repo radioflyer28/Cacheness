@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from importlib import metadata
 import importlib.util
 from pathlib import Path
 import sys
+from types import ModuleType, SimpleNamespace
+from zipfile import ZipFile
 
 import pytest
 
@@ -40,6 +43,64 @@ def _load_evidence():
     return module
 
 
+def _synthetic_artifact(runner, tmp_path: Path, *members: str):
+    """Create one minimal valid wheel archive for runner-boundary tests."""
+    path = tmp_path / "cacheness-0.3.14-py3-none-any.whl"
+    with ZipFile(path, "w") as wheel:
+        for member in members:
+            wheel.writestr(member, "synthetic")
+    return runner.WheelArtifact(path=path, sha256=runner._wheel_sha256(path))
+
+
+def _execute_base_probe_prelude(
+    runner,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    requirements: list[str] | None = None,
+    extras: list[str] | None = None,
+    retired_exports: tuple[str, ...] = (),
+) -> None:
+    """Run the generated absence/metadata assertions without a full wheel install."""
+    installed_root = tmp_path / "installed"
+    cacheness_module = ModuleType("cacheness")
+    cacheness_module.__file__ = str(installed_root / "cacheness" / "__init__.py")
+    cacheness_module.__path__ = []
+    storage_module = ModuleType("cacheness.storage")
+    storage_module.__file__ = str(installed_root / "cacheness" / "storage" / "__init__.py")
+    config_module = ModuleType("cacheness.config")
+
+    for export in runner.BASE_PUBLIC_EXPORTS["cacheness"]:
+        setattr(cacheness_module, export, object())
+    for export in retired_exports:
+        setattr(cacheness_module, export, object())
+    for export in runner.BASE_PUBLIC_EXPORTS["cacheness.storage"]:
+        setattr(storage_module, export, object())
+    config_module.CacheStorageConfig = object()
+
+    monkeypatch.setitem(sys.modules, "cacheness", cacheness_module)
+    monkeypatch.setitem(sys.modules, "cacheness.storage", storage_module)
+    monkeypatch.setitem(sys.modules, "cacheness.config", config_module)
+    monkeypatch.delitem(sys.modules, "cacheness.sql_cache", raising=False)
+    monkeypatch.setattr(
+        metadata,
+        "distribution",
+        lambda _name: SimpleNamespace(
+            requires=requirements or [],
+            metadata=SimpleNamespace(
+                get_all=lambda field, _default=None: extras or []
+                if field == "Provides-Extra"
+                else []
+            ),
+        ),
+    )
+    monkeypatch.setenv("CACHENESS_PHASE8_SOURCE_ROOT", str(PROJECT_ROOT))
+
+    prelude, separator, _remainder = runner._base_probe_source().partition("\ntopology =")
+    assert separator
+    exec(prelude, {"__name__": "phase10_packaging_probe"})
+
+
 def test_base_wheel_qualification_uses_one_artifact_and_public_round_trips(
     tmp_path: Path,
 ) -> None:
@@ -72,14 +133,68 @@ def test_base_probe_freezes_the_alias_free_storage_surface_and_quiet_import():
     assert "CacheHandler" not in storage_exports
     assert "CacheHandlerError" not in storage_exports
     assert runner.RETIRED_PUBLIC_EXPORTS == {
+        "cacheness": ("SqlCache", "SqlCacheAdapter"),
         "cacheness.storage": ("CacheHandler", "CacheHandlerError")
     }
+    assert runner.RETIRED_IMPORT_MODULES == ("cacheness.sql_cache",)
+    assert runner.RETIRED_WHEEL_MEMBERS == {"cacheness/sql_cache.py"}
 
     source = runner._base_probe_source()
     assert "redirect_stdout" in source
     assert "redirect_stderr" in source
     assert "package-generated stdout" in source
     assert "package-generated stderr" in source
+    assert "metadata.distribution" in source
+    assert "DuckDB requirement" in source
+    assert "sql extra" in source
+
+
+def test_base_probe_rejects_a_retired_wheel_member_before_installation(
+    tmp_path: Path,
+) -> None:
+    """A stale wheel member fails before the isolated package install runs."""
+    runner = _load_runner()
+    artifact = _synthetic_artifact(runner, tmp_path, "cacheness/sql_cache.py")
+    calls: list[tuple[str, ...]] = []
+
+    def fake_run(command, **_kwargs):
+        calls.append(tuple(command))
+        return runner.subprocess.CompletedProcess(command, 0, "", "")
+
+    with pytest.raises(runner.PackagingQualificationError, match="retired members"):
+        runner.run_base_probe(artifact, workspace=tmp_path / "probe", run=fake_run)
+
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    ("requirements", "extras", "retired_exports", "message"),
+    [
+        (["duckdb-engine>=0.16.0"], [], (), "DuckDB requirement"),
+        ([], ["sql"], (), "sql extra"),
+        ([], [], ("SqlCache",), "retired public export: cacheness.SqlCache"),
+    ],
+)
+def test_base_probe_rejects_retired_installed_metadata_and_exports(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    requirements: list[str],
+    extras: list[str],
+    retired_exports: tuple[str, ...],
+    message: str,
+) -> None:
+    """The generated installed-wheel probe rejects every retired surface edge."""
+    runner = _load_runner()
+
+    with pytest.raises(AssertionError, match=message):
+        _execute_base_probe_prelude(
+            runner,
+            monkeypatch,
+            tmp_path,
+            requirements=requirements,
+            extras=extras,
+            retired_exports=retired_exports,
+        )
 
 
 def test_base_probe_command_cannot_import_the_checkout_or_inherited_packages(
@@ -87,9 +202,8 @@ def test_base_probe_command_cannot_import_the_checkout_or_inherited_packages(
 ) -> None:
     """The base runner fixes isolated ``uv`` flags and strips Python path state."""
     runner = _load_runner()
-    artifact_path = tmp_path / "cacheness-0.3.14-py3-none-any.whl"
-    artifact_path.write_bytes(b"wheel")
-    artifact = runner.WheelArtifact(path=artifact_path, sha256="a" * 64)
+    artifact = _synthetic_artifact(runner, tmp_path)
+    artifact_path = artifact.path
     observed: dict[str, object] = {}
 
     def fake_run(command, **kwargs):
@@ -157,9 +271,8 @@ def test_optional_groups_get_fresh_wheel_requirements_and_non_live_probes(
 ) -> None:
     """Every literal extra is isolated; S3/PostgreSQL probes make no service claim."""
     runner = _load_runner()
-    artifact_path = tmp_path / "cacheness-0.3.14-py3-none-any.whl"
-    artifact_path.write_bytes(b"wheel")
-    artifact = runner.WheelArtifact(path=artifact_path, sha256="b" * 64)
+    artifact = _synthetic_artifact(runner, tmp_path)
+    artifact_path = artifact.path
     calls: list[tuple[tuple[str, ...], Path]] = []
 
     def fake_run(command, **kwargs):
@@ -276,9 +389,8 @@ def test_runner_payload_preserves_the_reviewed_non_live_group_order(
 ) -> None:
     """Runner-generated evidence remains canonical instead of set-order dependent."""
     runner = _load_runner()
-    artifact_path = tmp_path / "cacheness-0.3.14-py3-none-any.whl"
-    artifact_path.write_bytes(b"wheel")
-    artifact = runner.WheelArtifact(path=artifact_path, sha256="d" * 64)
+    artifact = _synthetic_artifact(runner, tmp_path)
+    artifact_path = artifact.path
     results = (
         runner.ProbeResult("base", str(artifact_path), ("public_exports",)),
         *(
