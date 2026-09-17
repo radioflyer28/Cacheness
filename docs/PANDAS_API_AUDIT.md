@@ -10,7 +10,7 @@ This document audits all pandas API usage in Cacheness to verify compatibility w
 
 | API | Location | pandas 2.0+ | pandas 3.0+ | Notes |
 |-----|----------|-------------|-------------|-------|
-| `pd.DataFrame` | handlers.py, sql_cache.py, tests | ✅ Stable | ✅ Stable | Constructor |
+| `pd.DataFrame` | handlers.py, tests | ✅ Stable | ✅ Stable | Constructor |
 | `df.to_parquet()` | handlers.py:391 | ✅ Stable | ✅ Stable | Primary storage method |
 | `pd.read_parquet()` | handlers.py:419 | ✅ Stable | ✅ Stable | Primary loading method |
 | `df.shape` | handlers.py:408 | ✅ Stable | ✅ Stable | Metadata property |
@@ -160,11 +160,10 @@ File: `tests/test_pandas_compatibility.py`
 
 ### Integration Tests
 
-Files: `tests/test_handlers.py`, `tests/test_sql_cache.py`
+Files: `tests/test_handlers.py`
 
 - ✅ DataFrame handler tests
 - ✅ Series handler tests
-- ✅ SqlCache with pandas
 - ✅ Parquet format tests
 
 ## Dependency Management

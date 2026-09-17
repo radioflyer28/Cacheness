@@ -145,8 +145,8 @@ that their corresponding repository test modules exercise. During an earlier
 shared-environment run, nested `uv run ruff` resolution removed live package
 files, which then appeared as three public-import failures, 23 S3/botocore setup
 errors, and 13 SQL/pandas failures. That was a test-invocation/test-isolation
-cascade, not evidence of independent S3, SQL-cache, pandas, or public-API product
-defects; reproduce failures from the isolated command before treating them as
+cascade, not evidence of independent S3, pandas, or public-API product defects;
+reproduce failures from the isolated command before treating them as
 repository behavior failures.
 
 ```bash
