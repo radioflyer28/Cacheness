@@ -22,7 +22,6 @@ recommended = [
     "pandas>=2.0.0,<4.0.0",
     "pyarrow>=21.0.0",
     "sqlalchemy>=2.0.0",
-    "duckdb-engine>=0.16.0",
     "orjson>=3.8.0",
     "dill>=0.4.0",
 ]
@@ -52,13 +51,8 @@ recommended = [
     "pandas>=2.0.0,<4.0.0",
     "pyarrow>=21.0.0",
     "sqlalchemy>=2.0.0",
-    "duckdb-engine>=0.16.0",
     "orjson>=3.8.0",
     "dill>=0.4.0",
-]
-sql = [
-     "duckdb-engine>=0.16.0",
-     "sqlalchemy>=2.0.0",
 ]
 dataframes = [
     "pandas>=2.0.0,<4.0.0",
