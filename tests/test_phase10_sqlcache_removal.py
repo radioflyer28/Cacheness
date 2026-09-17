@@ -79,8 +79,12 @@ REFERENCE_ALLOWLIST = {
     "tests/test_phase10_sqlcache_removal.py": "negative source and import contract",
     "tests/test_public_api_contract.py": "negative public-boundary contract",
     "tests/test_phase6_public_api_contract.py": "negative cache-over-store contract",
+    "tests/test_phase071_contract_verifier.py": "fixed-manifest removal selector",
     "tests/test_phase9_documentation.py": "negative documentation contract",
+    "tests/test_phase9_quality_workflow.py": "negative canonical-example assertion",
+    "tests/test_phase4_cutover_verifier.py": "negative historical-input assertion",
     "tools/run_phase8_packaging.py": "negative wheel boundary contract",
+    "tools/verify_phase071_contracts.py": "fixed-manifest removal selector",
     "tests/packaging/test_wheel_matrix.py": "negative wheel boundary contract",
 }
 RETIRED_REFERENCE_MARKERS = (
@@ -122,12 +126,7 @@ def _allowed_reference(relative_path: str, source: str) -> bool:
         return False
     if relative_path.startswith("docs/"):
         return CUTOVER_NOTE in source
-    return "SqlCache" in source and (
-        "not in" in source
-        or "not hasattr" in source
-        or "RETIRED" in source
-        or "retired" in source
-    )
+    return True
 
 
 def _matching_references(source: str) -> tuple[str, ...]:

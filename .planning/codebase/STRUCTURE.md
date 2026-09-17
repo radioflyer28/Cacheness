@@ -1,189 +1,82 @@
+<!-- refreshed: 2026-09-17 -->
 # Codebase Structure
 
-**Analysis Date:** 2026-08-29
+**Analysis date:** 2026-09-17
 
-**Independent Review:** 2026-08-29 — structure was assessed as a change-impact map in addition to a directory inventory
-
-## Directory Layout
+## Directory layout
 
 ```text
 cacheness/
-├── src/cacheness/                 # Installable Python package
-│   ├── __init__.py                # Public exports and optional feature guards
-│   ├── core.py                    # UnifiedCache coordinator and global cache
-│   ├── decorators.py              # @cached, memoize, cache context
-│   ├── config.py                  # Composed cache configuration
-│   ├── handlers.py                # Built-in handlers and handler registry
-│   ├── interfaces.py              # Handler contracts and handler errors
-│   ├── metadata.py                # Metadata models, factories, and backends
-│   ├── serialization.py           # Cache-key serialization and hashing
-│   ├── sql_cache.py               # SQL pull-through cache
-│   ├── custom_metadata.py         # Registered SQLAlchemy metadata models
-│   ├── storage/                    # Reusable low-level storage API
-│   │   ├── blob_store.py           # BlobStore object API
-│   │   ├── compression.py          # Compression re-exports
-│   │   ├── security.py             # Security re-export
-│   │   ├── backends/               # Metadata/blob backend contracts and registries
-│   │   └── handlers/               # Handler compatibility re-exports
-│   └── ...                         # Hashing, compression, JSON, security, errors
-├── tests/                         # Pytest unit, integration, and optional-dependency tests
-├── examples/                      # Runnable usage examples
-├── benchmarks/                    # Performance and backend benchmark scripts
-├── docs/                          # API, configuration, backend, and feature documentation
-├── pyproject.toml                 # Packaging, dependencies, pytest, coverage, Ruff
-├── uv.lock                        # Locked development/project dependencies
-├── verify_platform.py             # Platform compatibility verification
-└── .gitignore                     # Excludes generated cache payloads and local artifacts
+├── src/cacheness/                  # Installable package and public facades
+│   ├── core.py                      # UnifiedCache policy over one BlobStore
+│   ├── config.py                    # Configuration and capability declarations
+│   ├── handlers.py                  # Built-in formats and handler registry
+│   ├── metadata.py                  # Metadata/projection support
+│   ├── storage/                     # Lifecycle, catalog, authority, payload I/O
+│   │   ├── blob_store.py             # Canonical direct-persistence API
+│   │   ├── composition.py            # One authority/participant topology seam
+│   │   ├── obstore_generation_io.py  # Guarded local/memory/S3 participant
+│   │   ├── *_lifecycle_authority.py  # Memory, SQLite, PostgreSQL authority paths
+│   │   └── migration*.py             # Explicit maintenance/migration support
+│   └── ...                          # Integrity, security, paths, errors, utilities
+├── tests/                           # Unit, contract, integration, qualification tests
+│   ├── contracts/                   # Authority/payload/topology contracts
+│   ├── integration/                 # Non-live and optional remote topology tests
+│   ├── packaging/                   # Fresh isolated wheel qualification
+│   ├── qualification/               # Declared evidence and live-boundary checks
+│   └── performance/                 # Bounded complexity/benchmark contracts
+├── examples/                        # Four canonical local usage journeys
+├── docs/                            # Current API, migration, format, and qualification docs
+├── tools/                           # Contract, packaging, qualification, and evidence tools
+├── benchmarks/                      # Measured workloads and baselines
+├── pyproject.toml                   # Package/extras/test/lint configuration
+└── uv.lock                          # Frozen resolution
 ```
 
-## Directory Purposes
+## Source ownership
 
-**`src/cacheness/`:**
-- Purpose: Installable library implementation using the src layout.
-- Contains: Public facades, cache coordination, handlers, backends, configuration, utilities, and SQL caching.
-- Key files: `src/cacheness/__init__.py`, `src/cacheness/core.py`, `src/cacheness/handlers.py`, `src/cacheness/metadata.py`, `src/cacheness/sql_cache.py`.
+| Area | Canonical location | Change rule |
+|---|---|---|
+| Direct persistence | `storage/blob_store.py` | Route lifecycle mutations, recovery, and exact deletion through this owner. |
+| Cache policy | `core.py`, `cache_policy.py`, `decorators.py` | Add only policy behavior; do not create a second storage lifecycle. |
+| Topology/authority | `storage/composition.py`, `storage/*lifecycle_authority.py` | Read ADR 0001 first; preserve one declared authority. |
+| Payload mechanics | `storage/obstore_generation_io.py`, `storage/guarded_handler_io.py` | Keep managed locators and staging behind the participant boundary. |
+| Handlers | `handlers.py`, `interfaces.py` | Add custom formats through the store-local registry and handler contract. |
+| Catalog/projections | `storage/catalog.py`, `storage/projections.py`, `metadata.py` | Keep authoritative metadata distinct from optional derived projections. |
+| Security and migration | `storage/path_security.py`, `storage/integrity.py`, `storage/migration*.py` | Preserve containment, fail-closed checks, and explicit maintenance evidence. |
 
-**`src/cacheness/storage/`:**
-- Purpose: Reusable lower-level storage surface separated from higher-level TTL/eviction behavior.
-- Contains: `BlobStore`, compression/security exports, and backend/handler subpackages.
-- Key files: `src/cacheness/storage/blob_store.py`, `src/cacheness/storage/__init__.py`.
+## Where to add work
 
-**`src/cacheness/storage/backends/`:**
-- Purpose: Pluggable metadata and blob backend contracts, implementations, and registries.
-- Contains: `base.py`, `blob_backends.py`, `postgresql_backend.py`, optional `s3_backend.py`, and registry exports in `__init__.py`.
-- Key files: `src/cacheness/storage/backends/__init__.py`, `src/cacheness/storage/backends/blob_backends.py`, `src/cacheness/storage/backends/postgresql_backend.py`.
+- A new durable object capability normally belongs in `BlobStore` or an
+  authority/participant contract, only after ADR 0001 review.
+- A new cache semantic belongs in the policy layer and must use the existing
+  store receipt/snapshot contract.
+- A file format belongs in a handler and must preserve private suffix-contained
+  staging and snapshot behavior.
+- A metadata field/query belongs in the catalog contract, not a new persistence
+  coordinator.
+- New optional integration dependencies require matching extras, guarded
+  imports, lock convergence, fresh-wheel tests, and documentation.
 
-**`src/cacheness/storage/handlers/`:**
-- Purpose: Compatibility import path for type handlers and handler interfaces.
-- Contains: `__init__.py`, which re-exports implementations from `src/cacheness/handlers.py` and contracts from `src/cacheness/interfaces.py`.
-- Key files: `src/cacheness/storage/handlers/__init__.py`.
+## Test and documentation placement
 
-**`tests/`:**
-- Purpose: Pytest coverage for core behavior, serialization, metadata, handlers, storage registries, SQL cache, concurrency, and optional integrations.
-- Contains: `test_core.py`, `test_decorators.py`, `test_handlers.py`, `test_metadata.py`, `test_sql_cache.py`, backend-specific tests, and compatibility tests.
-- Key files: `tests/test_integration.py`, `tests/test_backend_compatibility.py`, `tests/test_sqlite_concurrency.py`.
+- Put focused behavioral tests in `tests/test_<subject>.py`; use `contracts/`
+  for authority/payload invariants, `integration/` for multi-component flows,
+  and `packaging/` for installed-artifact proof.
+- `examples/README.md` indexes the current four local journeys:
+  `memory_blob_store.py`, `durable_catalog_store.py`, `unified_cache.py`, and
+  `custom_mcap_format.py`.
+- Keep current user guidance in `docs/`; retain dated audits and completed phase
+  records as history rather than changing them to fit a current map.
 
-**`examples/`:**
-- Purpose: User-facing recipes for key/value caching, decorators, configuration, dataframes, SQL, S3, metadata, and ML artifacts.
-- Contains: Small scripts such as `examples/simple_function_caching.py`, `examples/beginner_sql_cache.py`, and `examples/s3_caching.py`.
-- Key files: `examples/README.md`, `examples/simple_config_demo.py`.
+## Generated and special directories
 
-**`benchmarks/`:**
-- Purpose: Measure backend, serialization, threshold, and memory/performance behavior.
-- Contains: Standalone Python benchmark scripts and checked-in analysis output.
-- Key files: `benchmarks/comprehensive_backend_benchmark.py`, `benchmarks/test_performance_comparison.py`.
-
-**`docs/`:**
-- Purpose: Detailed reference and design guidance beyond the package docstrings.
-- Contains: API reference, configuration, backend selection, SQL cache, custom metadata, security, compatibility, and performance documentation.
-- Key files: `docs/API_REFERENCE.md`, `docs/CONFIGURATION.md`, `docs/BACKEND_SELECTION.md`, `docs/SQL_CACHE.md`.
-
-## Key File Locations
-
-**Entry Points:**
-- `src/cacheness/__init__.py`: Public package namespace and optional exports.
-- `src/cacheness/core.py`: `UnifiedCache`, `get_cache`, and `reset_cache`.
-- `src/cacheness/decorators.py`: `cached`, `cache_function`, `memoize`, and `CacheContext`.
-- `src/cacheness/storage/blob_store.py`: Low-level `BlobStore` API.
-- `src/cacheness/sql_cache.py`: `SqlCache` and `SqlCacheAdapter`.
-
-**Configuration:**
-- `pyproject.toml`: Project metadata, Python requirement, dependencies, optional extras, pytest settings, coverage, and Ruff settings.
-- `src/cacheness/config.py`: Runtime `CacheConfig` and focused sub-configurations.
-- `src/cacheness/json_utils.py`: JSON serialization compatibility helpers used by metadata backends.
-- `.gitignore`: Generated cache databases, payloads, metadata JSON, signing key path, and Python build artifacts.
-
-**Core Logic:**
-- `src/cacheness/core.py`: Key/value orchestration, lifecycle, TTL, integrity, signing, and eviction.
-- `src/cacheness/handlers.py`: Format-specific persistence and ordered handler selection.
-- `src/cacheness/serialization.py`: Parameter serialization and XXH3_64 cache-key generation.
-- `src/cacheness/metadata.py`: Metadata contracts, JSON/SQLite/in-memory persistence, and factory selection.
-- `src/cacheness/sql_cache.py`: SQL schema augmentation, query conditions, gap detection, upsert, and tabular retrieval.
-- `src/cacheness/custom_metadata.py`: Decorator registry and cache-entry link-table model.
-
-**Testing:**
-- `tests/test_core.py`: UnifiedCache behavior and lifecycle.
-- `tests/test_decorators.py`: Decorator keying and cache behavior.
-- `tests/test_handlers.py`, `tests/test_serialization.py`: Type handlers and key serialization.
-- `tests/test_metadata.py`, `tests/test_metadata_backend_registry.py`: Metadata persistence and registries.
-- `tests/test_sql_cache.py`, `tests/test_sqlite_concurrency.py`: SQL pull-through and concurrency behavior.
-- `tests/test_s3_blob_backend.py`, `tests/test_postgresql_backend.py`: Optional external backend coverage.
-
-## Naming Conventions
-
-**Files:**
-- Use lowercase `snake_case.py` for implementation modules, e.g. `file_hashing.py`, `sql_cache.py`, and `blob_store.py`.
-- Use `test_<subject>.py` for pytest modules, e.g. `tests/test_cache_integrity.py` and `tests/test_query_meta.py`.
-- Use uppercase Markdown names for top-level documentation, e.g. `docs/API_REFERENCE.md` and `docs/CONFIGURATION.md`.
-- Use suffixes that describe the implementation role: `_backend.py`, `_store.py`, `_cache.py`, `_utils.py`.
-
-**Directories:**
-- Use lowercase plural or domain names: `tests/`, `examples/`, `benchmarks/`, `docs/`, `storage/`, `backends/`, and `handlers/`.
-- Keep installable code under `src/cacheness/`; do not place new package modules at repository root.
-
-**Python symbols:**
-- Classes use `PascalCase`, functions and variables use `snake_case`, and module-level feature flags use uppercase names such as `SQLALCHEMY_AVAILABLE` (`src/cacheness/metadata.py`).
-- Backend and handler classes end with `Backend` or `Handler`; SQL cache adapters end with `Adapter` (`src/cacheness/handlers.py`, `src/cacheness/sql_cache.py`).
-- Public compatibility aliases are declared in `src/cacheness/__init__.py`; preserve them when changing canonical implementations.
-
-## Where to Add New Code
-
-**New Feature:**
-- Primary code: Put UnifiedCache behavior in `src/cacheness/core.py` only when it is cross-format coordination; put format behavior in `src/cacheness/handlers.py`; put standalone storage behavior in `src/cacheness/storage/`.
-- Tests: Add focused coverage under `tests/test_<feature>.py`, with integration/backend-specific coverage in an existing relevant module when appropriate.
-- Documentation: Add or update the nearest domain reference in `docs/` and a runnable recipe in `examples/` for user-facing APIs.
-
-**New Component/Module:**
-- Implementation: Add a module under `src/cacheness/` for top-level behavior or under `src/cacheness/storage/` for reusable storage infrastructure.
-- New cache data type: Implement `CacheHandler` in `src/cacheness/handlers.py`, add it to `HandlerRegistry` priority/config handling, and expose it through `src/cacheness/storage/handlers/__init__.py` only if the compatibility surface requires it.
-- New metadata backend: Implement the metadata contract, register it through `src/cacheness/storage/backends/`, and route construction through `create_metadata_backend`/registry APIs (`src/cacheness/metadata.py`, `src/cacheness/storage/backends/__init__.py`).
-- New blob backend: Implement `BlobBackend` in `src/cacheness/storage/backends/`, register it in `blob_backends.py`, and add optional imports/exports without making the base install require its SDK.
-- New SQL access pattern: Add a `SqlCache` builder in `src/cacheness/sql_cache.py` that creates a schema and an adapter, and cover range/filter/TTL behavior in `tests/test_sql_cache.py`.
-
-**Utilities:**
-- Shared helpers: Put cache-key logic in `src/cacheness/serialization.py`, file hashing in `src/cacheness/file_hashing.py`, compression in `src/cacheness/compress_pickle.py` or its storage re-export, error wrappers in `src/cacheness/error_handling.py`, and signing in `src/cacheness/security.py`.
-- Avoid placing generic helpers in `core.py`; keep the coordinator focused on orchestration.
-
-## Change Impact Map
-
-| Change | Canonical implementation | Required adjacent checks | Common trap |
-|---|---|---|---|
-| Key/value lifecycle | `src/cacheness/core.py` | `tests/test_core.py`, `tests/test_integration.py`, `tests/test_cache_integrity.py` | Updating metadata without deleting/rolling back payload files |
-| New configuration field | `src/cacheness/config.py` | `tests/test_config_validation.py`, `tests/test_config_options.py`, `docs/CONFIGURATION.md` | Adding a dataclass field that no runtime path reads |
-| New handler / data type | `src/cacheness/handlers.py` and `src/cacheness/interfaces.py` | `tests/test_handlers.py`, `tests/test_handler_registration.py`, compatibility exports | Implementing a second interface only in `storage/handlers/` instead of the canonical registry |
-| Metadata behavior | `src/cacheness/metadata.py` | `tests/test_metadata.py`, `tests/test_metadata_backend_registry.py`, concurrency tests | Assuming JSON, SQLite, memory, and PostgreSQL return the same entry shape |
-| Blob backend | `src/cacheness/storage/backends/` | registry, sharding, S3, and compatibility tests | Assuming registration wires the backend into `UnifiedCache` or `BlobStore` |
-| Direct object storage | `src/cacheness/storage/blob_store.py` | add dedicated BlobStore lifecycle tests | Reusing backend-level tests as evidence that `BlobStore.delete/exists/clear` work |
-| SQL pull-through behavior | `src/cacheness/sql_cache.py` | `tests/test_sql_cache.py`, `tests/test_query_meta.py`, documentation tests | Treating partial fetch failure as a cache miss instead of an incomplete result |
-| Public import/export | `src/cacheness/__init__.py` | minimal-install import smoke test and `__all__` assertions | Capability flags that test helper importability instead of dependency availability |
-
-**Duplicated or compatibility-oriented locations:**
-- `tests/test_sqlite_concurrency.py` and `tests/test_sqlite_concurrency_temp.py` contain near-duplicate suites; the latter mainly adds explicit cleanup. Consolidate them before expanding concurrency coverage so the same scenarios do not double collection and drift.
-- `src/cacheness/interfaces.py` defines handler abstractions while `src/cacheness/handlers.py` also owns a concrete registry; `src/cacheness/storage/handlers/__init__.py` is a compatibility barrel, not a second implementation home.
-- `src/cacheness/metadata.py` contains canonical JSON/SQLite/in-memory implementations, while `src/cacheness/storage/backends/__init__.py` adds registry semantics and `storage/backends/base.py` defines a separate storage-facing contract. Verify which contract a new backend must satisfy before choosing its location.
-
-## Special Directories
-
-**`cache/`:**
-- Purpose: Default runtime payload/metadata location used by `UnifiedCache` and local examples.
-- Generated: Yes; handlers may create `.pkl`, `.pkl.<codec>`, `.npz`, `.b2nd`, and `.parquet` payloads, while metadata backends create database/JSON files.
-- Committed: No; generated cache artifacts are excluded by `.gitignore`.
-
-**`.planning/codebase/`:**
-- Purpose: Codebase mapping artifacts consumed by planning/execution workflows.
-- Generated: Yes, by mapping agents.
-- Committed: Intended as project planning documentation; write analysis documents here and do not mix them into `src/`.
-
-**`__pycache__/`, `.pytest_cache/`, `.ruff_cache/`:**
-- Purpose: Python, pytest, and Ruff generated caches.
-- Generated: Yes.
-- Committed: No; excluded or treated as local build/test artifacts.
-
-**`.venv/`:**
-- Purpose: Local Python virtual environment for development.
-- Generated: Yes.
-- Committed: No; excluded by `.gitignore`.
+- `cache/`, `.blobstore/`, SQLite files, signing keys, and bytecode are local
+  generated state and must not be committed or cleaned broadly.
+- `.planning/codebase/` contains current maps used by GSD; phase directories
+  preserve planning/implementation evidence.
+- `.venv/`, `.pytest_cache/`, and Ruff caches are local build/test artifacts.
 
 ---
 
-*Structure analysis: 2026-08-29*
+*Current structure map refreshed for the post-cut product boundary on 2026-09-17.*
