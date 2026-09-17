@@ -111,7 +111,33 @@ class CacheSerializationError(CacheError):
 class FormatHandlerError(CacheError):
     """Raised when format handler operations fail."""
 
-    pass
+    def __init__(
+        self,
+        message: str,
+        handler_type: Optional[str] | Dict[str, Any] = None,
+        data_type: Optional[str] = None,
+        context: Optional[Dict[str, Any]] = None,
+    ):
+        # ``CacheError`` historically accepted context as its second positional
+        # argument.  Preserve that call shape while also carrying the focused
+        # handler fields used by CacheWriteError/CacheReadError.
+        if isinstance(handler_type, dict) and data_type is None and context is None:
+            context = handler_type
+            handler_type = None
+        self.handler_type = handler_type
+        self.data_type = data_type
+        error_context = dict(context or {})
+        if handler_type is not None:
+            error_context["handler_type"] = handler_type
+        if data_type is not None:
+            error_context["data_type"] = data_type
+        super().__init__(message, error_context)
+        logger.error(
+            "Cache handler error: %s (handler=%s, data_type=%s)",
+            message,
+            handler_type,
+            data_type,
+        )
 
 
 class CacheIntegrityError(CacheError):

@@ -10,7 +10,9 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
 import logging
-from typing import Any, ContextManager, Dict, Optional, Protocol, TYPE_CHECKING, TypedDict
+from typing import Any, ContextManager, Dict, Protocol, TYPE_CHECKING, TypedDict
+
+from .error_handling import FormatHandlerError
 
 if TYPE_CHECKING:
     from .config import CacheConfig
@@ -334,26 +336,6 @@ class ObjectHandler(FormatHandler):
             True if object can be safely pickled
         """
         pass
-
-
-# Exception classes for handler errors
-class FormatHandlerError(Exception):
-    """Base exception for format handler errors."""
-
-    def __init__(
-        self,
-        message: str,
-        handler_type: Optional[str] = None,
-        data_type: Optional[str] = None,
-    ):
-        self.handler_type = handler_type
-        self.data_type = data_type
-        super().__init__(message)
-
-        # Log the error for debugging
-        logger.error(
-            f"Cache handler error: {message} (handler={handler_type}, data_type={data_type})"
-        )
 
 
 class CacheWriteError(FormatHandlerError):

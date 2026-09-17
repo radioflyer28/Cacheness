@@ -84,6 +84,17 @@ class TestPublicExports:
         assert not hasattr(storage, "CacheHandler")
         assert not hasattr(storage, "CacheHandlerError")
 
+    def test_format_handler_error_has_one_public_identity(self):
+        """All handler failures share the cross-cutting CacheError hierarchy."""
+        import cacheness.storage as storage
+        from cacheness.error_handling import CacheError, FormatHandlerError
+        from cacheness.interfaces import CacheReadError, CacheWriteError
+
+        assert storage.FormatHandlerError is FormatHandlerError
+        assert issubclass(CacheWriteError, FormatHandlerError)
+        assert issubclass(CacheReadError, FormatHandlerError)
+        assert issubclass(FormatHandlerError, CacheError)
+
     def test_explicit_constructor_returns_typed_results(self, tmp_path):
         """The package surface exposes one explicit cache lifecycle."""
 
@@ -227,7 +238,7 @@ def test_public_storage_docs_keep_the_d16_transport_boundary_explicit():
 
     repository_root = Path(__file__).parents[1]
     documented = {
-        "README.md": ("128 MiB", "opaque transport evidence", "Phase 8"),
+        "README.md": ("release qualification guide",),
         "docs/API_REFERENCE.md": (
             "BlobStore",
             "CacheOutcome",
@@ -245,6 +256,11 @@ def test_public_storage_docs_keep_the_d16_transport_boundary_explicit():
             "bucket policy",
             "Phase 8",
         ),
+        "docs/RELEASE_QUALIFICATION.md": (
+            "128 MiB",
+            "opaque corroborating transport evidence",
+            "Phase 8",
+        ),
     }
     retired_payload_apis = ("S3BlobBackend", "BlobBackend", "register_blob_backend")
 
@@ -255,10 +271,11 @@ def test_public_storage_docs_keep_the_d16_transport_boundary_explicit():
         assert all(term in text for term in required_terms)
         assert all(retired not in text for retired in retired_payload_apis)
 
-    for relative_path in ("README.md", "docs/PLUGIN_DEVELOPMENT.md"):
-        source = (repository_root / relative_path).read_text(encoding="utf-8")
-        assert '"actual_path": str(' in source
-        assert '"file_path": str(' not in source
+    plugin_source = (repository_root / "docs/PLUGIN_DEVELOPMENT.md").read_text(
+        encoding="utf-8"
+    )
+    assert '"actual_path": str(' in plugin_source
+    assert '"file_path": str(' not in plugin_source
 
 
 def test_api_reference_imports_are_current_barrel_exports() -> None:
