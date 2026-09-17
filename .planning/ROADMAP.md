@@ -678,14 +678,14 @@ Plans:
   4. Public import, package, and documentation gates prove that the supported product surface contains BlobStore, UnifiedCache, and their shared format-handler ecosystem without dangling SqlCache references.
   5. Removal does not redesign BlobStore, UnifiedCache, lifecycle authority, backend topology, or handler persistence contracts.
 
-**Plans:** 1/9 plans executed
+**Plans:** 2/9 plans executed
 
 Plans:
 
 **Wave 1 — foundational cutover contracts**
 
 - [x] 10-01-PLAN.md — Establish the fail-closed removal, retained public API, and suite-isolation contracts.
-- [ ] 10-03-PLAN.md — Extend the one-artifact wheel harness with retired member and metadata assertions.
+- [x] 10-03-PLAN.md — Extend the one-artifact wheel harness with retired member and metadata assertions.
 - [ ] 10-04-PLAN.md — Repair static quality, full-suite environment, and canonical documentation ownership gates.
 
 **Wave 2 — dependent verifier and published-surface removal**
@@ -720,7 +720,7 @@ Plans:
 | 07.1. Obstore Payload Participant Unification | 11/11 | Complete | 2026-09-13 |
 | 8. Production Gates and Performance Stabilization | 17/17 | Complete    | 2026-09-15 |
 | 9. Adoption and Release Surface Closure | 11/11 | Complete    | 2026-09-17 |
-| 10. Remove SqlCache Pull-Through Subsystem | 1/9 | In Progress|  |
+| 10. Remove SqlCache Pull-Through Subsystem | 2/9 | In Progress|  |
 
 ## Backlog
 

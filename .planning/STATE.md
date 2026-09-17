@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 10
 current_phase_name: Remove SqlCache Pull-Through Subsystem
 status: executing
-stopped_at: Completed 10-01-PLAN.md
-last_updated: "2026-09-17T16:46:42.207Z"
+stopped_at: Completed 10-03-PLAN.md
+last_updated: "2026-09-17T16:59:51.564Z"
 last_activity: 2026-09-17
 last_activity_desc: Phase 10 execution started
-state_head: b7dd4ae9ca0f1e902d4b5e4dfc0f7f670fa5d9ff
+state_head: 3ca6e116ce7ea04102016b889c05711e278c035d
 progress:
   total_phases: 11
   completed_phases: 9
   total_plans: 153
-  completed_plans: 144
+  completed_plans: 145
 milestone_name: milestone
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-09-15)
 ## Current Position
 
 Phase: 10 (Remove SqlCache Pull-Through Subsystem) — EXECUTING
-Plan: 2 of 9
+Plan: 3 of 9
 Status: Ready to execute
 Last activity: 2026-09-17 — Phase 10 execution started
 
@@ -238,6 +238,7 @@ Raw file counts include superseded plans and therefore are not completion claims
 | Phase 09 P10 | 15m | 2 tasks | 4 files |
 | Phase 09 P11 | 2min | 1 tasks | 2 files |
 | Phase 10 P01 | 3 min | 2 tasks | 4 files |
+| Phase 10 P03 | 9 min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -569,6 +570,7 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - [Phase 09]: Narwhals remains a dormant future dataframe compatibility investigation; native handlers retain Parquet and persisted format identities.
 - [Phase 09]: Migration guidance routes mutable qualification status to Release qualification; Phase 8 remains local-readiness evidence while SEED-006, SEED-007, and Phase 999.1 own deferred work.
 - [Phase 10]: Phase 10 removal contracts require natural Python absence and preserve only the BlobStore/UnifiedCache public boundary.
+- [Phase 10]: Use one digest-bound WheelArtifact for ZIP inspection, source-free installation, metadata checks, and retained local round trips. — A single artifact prevents checkout-only or parallel-harness evidence from masking stale shipped surface.
 
 ### Pending Todos
 
@@ -607,6 +609,6 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 
 ## Session Continuity
 
-Last session: 2026-09-17T16:46:41.929Z
-Stopped at: Completed 10-01-PLAN.md
+Last session: 2026-09-17T16:59:51.295Z
+Stopped at: Completed 10-03-PLAN.md
 Resume file: None
