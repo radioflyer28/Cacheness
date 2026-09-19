@@ -24,7 +24,22 @@ NON_OWNER_CURRENT_GUIDES = (
     PROJECT_ROOT / "docs" / "PLUGIN_DEVELOPMENT.md",
     PROJECT_ROOT / "docs" / "STORAGE_INITIALIZATION.md",
     PROJECT_ROOT / "docs" / "PANDAS_API_AUDIT.md",
-    PROJECT_ROOT / "docs" / "CROSS_PLATFORM_GUIDE.md",
+)
+PLATFORM_AND_TENSORFLOW_SUPPLEMENTS = (
+    "docs/CROSS_PLATFORM_GUIDE.md",
+    "docs/WINDOWS_COMPATIBILITY.md",
+    "docs/TENSORFLOW_TENSOR_GUIDE.md",
+    "docs/TENSORFLOW_HANDLER_STATUS.md",
+)
+PANDAS_AND_CUSTOM_METADATA_SUPPLEMENTS = (
+    "docs/PANDAS_COMPATIBILITY.md",
+    "docs/CUSTOM_METADATA.md",
+)
+CANONICAL_EXECUTABLE_EXAMPLES = (
+    "memory_blob_store.py",
+    "durable_catalog_store.py",
+    "unified_cache.py",
+    "custom_mcap_format.py",
 )
 
 
@@ -347,3 +362,86 @@ def test_all_relative_documentation_links_resolve() -> None:
             if not resolved.exists():
                 missing.append(f"{document.name}: {raw_target}")
     assert missing == []
+
+
+def test_platform_and_tensorflow_supplements_are_consolidated_or_deleted() -> None:
+    """Platform/TensorFlow guides yield to one qualified nonclaim owner."""
+    present = [
+        relative_path
+        for relative_path in PLATFORM_AND_TENSORFLOW_SUPPLEMENTS
+        if (PROJECT_ROOT / relative_path).exists()
+    ]
+    qualification = QUALIFICATION_GUIDE.read_text(encoding="utf-8")
+
+    assert present == []
+    for nonclaim in (
+        "Windows remains `UNAVAILABLE` / `NOT_QUALIFIED`",
+        "S3 and PostgreSQL remain `NOT_QUALIFIED`",
+        "controlled Linux performance remains `DEFERRED` / `NOT_QUALIFIED`",
+        "immutable publication remains `NOT_PUBLISHED`",
+    ):
+        assert nonclaim in qualification
+    assert "tensorflow" not in qualification.casefold()
+
+
+def test_pandas_and_custom_metadata_supplements_are_consolidated_or_deleted() -> None:
+    """Current navigation owns one concise, verified DataFrame/Parquet note."""
+    present = [
+        relative_path
+        for relative_path in PANDAS_AND_CUSTOM_METADATA_SUPPLEMENTS
+        if (PROJECT_ROOT / relative_path).exists()
+    ]
+    navigation = DOCS_INDEX.read_text(encoding="utf-8")
+    api_reference = API_REFERENCE.read_text(encoding="utf-8")
+
+    assert present == []
+    assert "Pandas and Polars DataFrames use Parquet" in api_reference
+    assert "`dataframes`" in api_reference
+    assert "PANDAS_COMPATIBILITY.md" not in navigation
+    assert "CUSTOM_METADATA.md" not in navigation
+
+    linked_examples = tuple(
+        re.findall(r"\]\(\.\./examples/([a-z_]+\.py)\)", navigation)
+    )
+    assert linked_examples == CANONICAL_EXECUTABLE_EXAMPLES
+    assert all(
+        (PROJECT_ROOT / "examples" / example).is_file()
+        for example in CANONICAL_EXECUTABLE_EXAMPLES
+    )
+
+
+def test_supplemental_documentation_is_consolidated_or_deleted() -> None:
+    """Both independent consolidation contracts finish with one exact deletion set."""
+    deleted_supplements = (
+        *PLATFORM_AND_TENSORFLOW_SUPPLEMENTS,
+        *PANDAS_AND_CUSTOM_METADATA_SUPPLEMENTS,
+    )
+
+    present = [
+        relative_path
+        for relative_path in deleted_supplements
+        if (PROJECT_ROOT / relative_path).exists()
+    ]
+
+    assert deleted_supplements == (
+        "docs/CROSS_PLATFORM_GUIDE.md",
+        "docs/WINDOWS_COMPATIBILITY.md",
+        "docs/TENSORFLOW_TENSOR_GUIDE.md",
+        "docs/TENSORFLOW_HANDLER_STATUS.md",
+        "docs/PANDAS_COMPATIBILITY.md",
+        "docs/CUSTOM_METADATA.md",
+    )
+    assert present == []
+
+
+def test_current_guidance_has_no_supported_tensorflow_claim() -> None:
+    """Current guides cannot retain a dormant handler as supported guidance."""
+    current_documents = tuple(sorted((PROJECT_ROOT / "docs").glob("*.md")))
+
+    tensorflow_claims = [
+        document.relative_to(PROJECT_ROOT).as_posix()
+        for document in current_documents
+        if "tensorflow" in document.read_text(encoding="utf-8").casefold()
+    ]
+
+    assert tensorflow_claims == []
