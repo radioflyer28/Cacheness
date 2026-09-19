@@ -88,6 +88,34 @@ def test_tensorflow_profile_is_absent_from_quality_workflow() -> None:
         assert f"  {retained_job}:\n" in workflow
 
 
+def test_normal_ci_qualifies_retained_packaging_on_primary_stable_row() -> None:
+    """Ordinary CI keeps the five-extra gate while RC preserves exact-SHA proof."""
+
+    workflow = _workflow()
+    linux_stable = _job_block(workflow, "linux-stable", "macos-boundary")
+    release_candidate_packaging = _job_block(workflow, "release-candidate-packaging")
+
+    expected_normal_step = """      - name: Run retained five-extra wheel qualification on the primary stable row
+        if: matrix.python == '3.13'
+        run: |
+          uv run --isolated --all-extras --group dev --frozen python \\
+            tools/run_phase8_local_gates.py packaging \\
+            --output build/phase8/evidence/packaging.json
+"""
+    assert expected_normal_step in linux_stable
+    assert linux_stable.count("tools/run_phase8_local_gates.py packaging") == 1
+    assert "if: github.event_name != 'workflow_dispatch'" in linux_stable
+    assert "continue-on-error:" not in linux_stable
+
+    assert "if: github.event_name == 'workflow_dispatch'" in release_candidate_packaging
+    assert "environment: release-qualification" in release_candidate_packaging
+    assert "CANDIDATE_SHA: ${{ inputs.candidate_sha }}" in release_candidate_packaging
+    assert "ref: ${{ inputs.candidate_sha }}" in release_candidate_packaging
+    assert "candidate checkout must be detached" in release_candidate_packaging
+    assert 'python-version: "3.13"' in release_candidate_packaging
+    assert "tools/run_phase8_local_gates.py packaging" in release_candidate_packaging
+
+
 def test_quality_workflow_keeps_live_and_controlled_performance_out_of_pr_jobs() -> (
     None
 ):

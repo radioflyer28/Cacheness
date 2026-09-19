@@ -45,6 +45,12 @@ jobs:
         run: |
           uv run --isolated --all-extras --group dev --frozen python \
             tools/run_phase8_local_gates.py core --output-dir build/phase8/evidence
+      - name: Run retained five-extra wheel qualification on the primary stable row
+        if: matrix.python == '3.13'
+        run: |
+          uv run --isolated --all-extras --group dev --frozen python \
+            tools/run_phase8_local_gates.py packaging \
+            --output build/phase8/evidence/packaging.json
       - name: Run exact Phase 9 published examples
         if: matrix.python == '3.13'
         run: |
