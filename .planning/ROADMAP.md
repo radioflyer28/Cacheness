@@ -763,14 +763,36 @@ Plans:
 **Plans:** 10 plans
 
 Plans:
+**Wave 1**
 
 - [ ] 11-01-PLAN.md — Encode the end-to-end negative wheel/document cutover contract.
 - [ ] 11-02-PLAN.md — Encode retained CI/profile, seed, validation-discovery, and audit-boundary contracts.
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
 - [ ] 11-03-PLAN.md — Remove TensorFlow runtime/config/export/package/lock/packaging surfaces.
-- [ ] 11-04-PLAN.md — Remove TensorFlow-only qualification profiles and CI jobs.
 - [ ] 11-05-PLAN.md — Consolidate verified supplemental guidance and delete stale guides.
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [ ] 11-04-PLAN.md — Remove TensorFlow-only qualification profiles and CI jobs.
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
 - [ ] 11-06-PLAN.md — Run the Phase 3 ADR stop gate and write its compact canonical validation record.
+
+**Wave 5** *(blocked on Wave 4 completion)*
+
 - [ ] 11-07-PLAN.md — Refresh current agent/codebase maps and fulfill SEED-005.
+
+**Wave 6** *(blocked on Wave 5 completion)*
+
 - [ ] 11-08-PLAN.md — Normalize Phase 1/5/6/7/8/9 validation records in place.
+
+**Wave 7** *(blocked on Wave 6 completion)*
+
 - [ ] 11-09-PLAN.md — Run layered final acceptance and finalize Phase 11 Nyquist evidence.
+
+**Wave 8** *(blocked on Wave 7 completion)*
+
 - [ ] 11-10-PLAN.md — Refresh the milestone audit last with an evidence-derived verdict.
