@@ -6,6 +6,7 @@ nyquist_compliant: true
 wave_0_complete: true
 created: 2026-09-17
 governing_decision: docs/adr/0001-topology-specific-storage-guarantees.md
+qualified_source_revision: 450aa77ae12081aa17317c2eea8c633d38242ed7
 ---
 
 # Phase 11 — Validation Strategy
@@ -91,6 +92,30 @@ and native Windows evidence target) plus one
 `__init__` constructor; it did not report a test failure.
 
 `uv run --isolated --all-extras --group dev --frozen pytest -q -o log_cli=false -m 'not (live_postgresql or live_aws_s3 or live_remote)'`
+
+## Post-Review Second Local Acceptance — 2026-09-19T23:32:33Z
+
+This is a separate post-review acceptance record for the committed source/test
+tree at `450aa77ae12081aa17317c2eea8c633d38242ed7`. It includes the CR-01
+release-guide correction, the WR-01 normal-CI packaging correction, and the
+qualified-source provenance contract. The earlier Plan 11-09 one-run
+acceptance remains historical evidence; it is not relabeled or replaced here.
+
+Before recording this addendum, Git verified that the qualified revision is
+the checked-out `HEAD` and that no staged, unstaged, or untracked path in the
+protected source/test inventory (`README.md`, `AGENTS.md`, `docs/`,
+`.github/workflows/`, `src/`, `tests/`, `tools/`, `examples/`,
+`pyproject.toml`, `uv.lock`, `.planning/codebase/`, or
+`.planning/REQUIREMENTS.md`) had drifted. Planning/evidence artifacts may
+follow this source revision; the milestone audit remains intentionally
+unmodified until Plan 11-12 derives it from this record.
+
+- `uv lock --check` — exit 0; resolved 95 packages.
+- `uv run --isolated --all-extras --group dev --frozen pytest -q -o log_cli=false tests/test_full_suite_environment.py::test_documented_full_suite_command_uses_locked_extras_and_dev_group tests/qualification/test_phase8_quality_workflow.py::test_normal_ci_qualifies_retained_packaging_on_primary_stable_row -x` — exit 0; both focused CR-01/WR-01 selectors passed.
+- `uv run --isolated --all-extras --group dev --frozen pytest -q tests/packaging/test_wheel_matrix.py -x` — exit 0; 28 passed in 37.52s. The digest-bound fresh wheel, installed metadata, retired-surface absence, and retained local `BlobStore`/`UnifiedCache` round trips passed.
+- `uv run --isolated --all-extras --group dev --frozen ruff check tests/qualification/test_phase8_quality_workflow.py tests/test_full_suite_environment.py tests/test_phase9_evidence_metadata.py` — exit 0; all checks passed.
+- `uv run --isolated --all-extras --group dev --frozen pytest -q tests/test_phase9_evidence_metadata.py -k 'provenance or qualification' -x` — exit 0; 20 passed and 10 deselected, including temporary-Git stale-audit and protected-tree rejection cases.
+- `uv run --isolated --all-extras --group dev --frozen pytest -q -o log_cli=false -m 'not (live_postgresql or live_aws_s3 or live_remote)'` — exit 0 at 100%. Its actual quiet output did not print an aggregate pass count; it reported exactly three expected skips (Windows junction fixture, unavailable device-node creation, and native Windows evidence target) plus one `PytestCollectionWarning` for `TestDataClassForConsistency` having an `__init__` constructor.
 
 ## Explicit Nonclaims
 
