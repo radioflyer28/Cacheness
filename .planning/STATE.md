@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 11
 current_phase_name: Clean supplemental documentation and normalize validation evidence
 status: executing
-stopped_at: Completed 11-01-PLAN.md
-last_updated: "2026-09-19T17:14:20.595Z"
+stopped_at: Completed 11-02-PLAN.md
+last_updated: "2026-09-19T17:27:38.753Z"
 last_activity: 2026-09-19
 last_activity_desc: Phase 11 execution started
-state_head: bfd2116f48bf7e19e5406374ec71abfd3d1b6da9
+state_head: 6d5fb185e2ab2df28d1d714c962849031d0d86e0
 progress:
   total_phases: 12
   completed_phases: 10
   total_plans: 163
-  completed_plans: 153
+  completed_plans: 154
 milestone_name: milestone
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-09-17)
 ## Current Position
 
 Phase: 11 (Clean supplemental documentation and normalize validation evidence) — EXECUTING
-Plan: 2 of 10
+Plan: 3 of 10
 Status: Ready to execute
 Last activity: 2026-09-19 — Phase 11 execution started
 
@@ -241,6 +241,7 @@ Raw file counts include superseded plans and therefore are not completion claims
 | Phase 10 P01 | 3 min | 2 tasks | 4 files |
 | Phase 10 P03 | 9 min | 2 tasks | 2 files |
 | Phase 11 P01 | 8m 36s | 2 tasks | 3 files |
+| Phase 11 P02 | 12m | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -578,6 +579,9 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - [Phase 10]: The cutover did not alter lifecycle, concurrency, recovery, topology, or handler-persistence contracts; ADR 0001 remains the guardrail.
 - [Phase 11]: Wave 0 TensorFlow cutover and documentation contracts are intentionally red until later Phase 11 removal plans make them green.
 - [Phase 11]: The installed package boundary reuses one digest-bound WheelArtifact and preserves retained BlobStore and UnifiedCache local round trips.
+- [Phase 11]: Use literal seven-record validation discovery and one fulfilled SEED-005 rather than a wrapper validation authority.
+- [Phase 11]: Keep original audit assertions valid until both provenance fields change, then require final evidence without selecting a verdict.
+- [Phase 11]: Set the release fixture to the retained five published extras before the package-manifest cutover.
 
 ### Pending Todos
 
@@ -616,6 +620,6 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 
 ## Session Continuity
 
-Last session: 2026-09-19T17:14:20.192Z
-Stopped at: Completed 11-01-PLAN.md
+Last session: 2026-09-19T17:27:38.504Z
+Stopped at: Completed 11-02-PLAN.md
 Resume file: None
