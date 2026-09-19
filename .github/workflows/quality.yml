@@ -51,37 +51,6 @@ jobs:
           uv run --isolated --all-extras --group dev --frozen pytest \
             -q -o log_cli=false tests/test_phase9_examples.py
 
-  tensorflow-compatible:
-    if: github.event_name != 'workflow_dispatch'
-    name: Linux stable ${{ matrix.python }} TensorFlow
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        python: ["3.11", "3.12"]
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          persist-credentials: false
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
-        with:
-          python-version: ${{ matrix.python }}
-      - name: Install frozen TensorFlow qualification dependencies
-        run: uv sync --all-extras --group dev --frozen
-      - name: Run exact compatible TensorFlow platform row
-        run: |
-          uv run --isolated --all-extras --group dev --frozen python \
-            tools/run_phase8_local_gates.py platform \
-            --expected-os Linux --python-minor ${{ matrix.python }} \
-            --feature-profile tensorflow --output build/phase8/platform-tensorflow.json
-      - name: Qualify the complete wheel-extra inventory on the primary compatible row
-        if: matrix.python == '3.12'
-        run: |
-          uv run --isolated --all-extras --group dev --frozen python \
-            tools/run_phase8_local_gates.py packaging \
-            --output build/phase8/packaging.json
-
   macos-boundary:
     if: github.event_name != 'workflow_dispatch'
     name: macOS boundary ${{ matrix.python }}
@@ -246,10 +215,10 @@ jobs:
             echo "candidate checkout must be detached" >&2
             exit 1
           fi
-      - name: Set up compatible TensorFlow Python
+      - name: Set up pinned packaging Python
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
-          python-version: "3.12"
+          python-version: "3.13"
       - name: Install frozen project dependencies
         run: uv sync --all-extras --group dev --frozen
       - name: Run release-candidate wheel qualification

@@ -187,7 +187,8 @@ def test_documentation_states_all_evidence_classes_and_nonclaims() -> None:
         "diagnostic only",
     ):
         assert nonclaim in guide
-    assert "Linux" in guide and "macOS" in guide and "TensorFlow" in guide
+    assert "Linux" in guide and "macOS" in guide
+    assert "TensorFlow" not in guide
     assert "current and immediately previous" in guide
     assert "candidate SHA" in guide and "source digest" in guide
     assert "30 days" in guide
