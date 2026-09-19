@@ -2,9 +2,9 @@
 schema_version: 1
 open_count: 7
 waived_count: 0
-fixed_count: 53
-total_count: 60
-last_updated: 2026-09-19T18:14:12.447Z
+fixed_count: 54
+total_count: 61
+last_updated: 2026-09-19T22:44:25.024Z
 ---
 
 # Broken Windows Ledger
@@ -75,6 +75,7 @@ last_updated: 2026-09-19T18:14:12.447Z
 | 58 | 08 | deviation | tools/phase8_evidence.py |  | Structural evidence needed a bounded raw-observation allow-list. | fixed |  | 2026-09-14T00:30:21.066Z | 2026-09-14T00:30:41.975Z |
 | 59 | 08 | deviation | tools/run_phase8_scale_gates.py |  | Unsupported POSIX RSS environments fail closed before a byte claim. | fixed |  | 2026-09-14T00:30:21.194Z | 2026-09-14T00:30:42.096Z |
 | 60 | 11 | deviation | tests/qualification/test_phase8_quality_workflow.py | 191 | Repaired stale release-guide TensorFlow-presence assertion after the completed documentation cutover. | open |  | 2026-09-19T18:14:12.447Z |  |
+| 61 | 11 | deviation | .planning/v1.0-v1.0-MILESTONE-AUDIT.md | 30 | Restored the explicit immutable-publication NOT_PUBLISHED nonclaim required by the refreshed-audit parser. | fixed |  | 2026-09-19T22:44:04.286Z | 2026-09-19T22:44:25.024Z |
 
 ````json
 [
@@ -797,6 +798,18 @@ last_updated: 2026-09-19T18:14:12.447Z
     "reason": "",
     "recorded_at": "2026-09-19T18:14:12.447Z",
     "resolved_at": null
+  },
+  {
+    "id": 61,
+    "kind": "deviation",
+    "phase": "11",
+    "file": ".planning/v1.0-v1.0-MILESTONE-AUDIT.md",
+    "line": 30,
+    "description": "Restored the explicit immutable-publication NOT_PUBLISHED nonclaim required by the refreshed-audit parser.",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-09-19T22:44:04.286Z",
+    "resolved_at": "2026-09-19T22:44:25.024Z"
   }
 ]
 ````
