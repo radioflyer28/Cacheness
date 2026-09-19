@@ -55,7 +55,8 @@ own behavior unless multiple modules need the same invariant.
   and handler regression nodes plus ADR 0001 review.
 - Packaging changes require `uv lock --check` and
   `tests/packaging/test_wheel_matrix.py`; the harness builds one artifact,
-  inspects its archive/install metadata, and exercises installed local
+  inspects its archive/install metadata, rejects retired modules, requirements,
+  extras, and handler identities, and exercises installed local
   `BlobStore`/`UnifiedCache` round trips.
 - Documentation/maps require their exact source-contract tests and a
   current-reference scan. Do not satisfy such a scan by rewriting dated audits
@@ -67,11 +68,9 @@ own behavior unless multiple modules need the same invariant.
 
 - Real PostgreSQL/Amazon-S3 qualification and immutable publication evidence
   remain future work; mocked/non-live tests make no broader claim.
-- TensorFlow remains an opt-in/guarded handler path with deliberately bounded
-  execution coverage.
 - Controlled-Linux performance budgets are deferred while the benchmark harness
   remains checked in for diagnostic measurement.
 
 ---
 
-*Current testing map refreshed for the post-cut product boundary on 2026-09-17.*
+*Current testing map refreshed for the post-cut product boundary on 2026-09-19.*

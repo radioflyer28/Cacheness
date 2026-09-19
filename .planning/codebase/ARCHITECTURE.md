@@ -89,7 +89,7 @@ does not extend lifecycle authority beyond the underlying store.
 - SQLAlchemy supports local metadata/projection facilities and the optional
   PostgreSQL lifecycle authority; it is not a separate cache product.
 - `psycopg` provides the optional PostgreSQL authority connection path.
-- pandas, PyArrow, Polars, NumPy, Blosc2, dill, and TensorFlow are handler
+- pandas, PyArrow, Polars, NumPy, Blosc2, dill, and orjson are retained handler
   integrations. Dataframes persist through handler-owned formats such as
   Parquet; their support does not create a table-oriented cache lifecycle.
 - Built-in local, memory, and S3 payload mechanics are unified behind
@@ -131,4 +131,4 @@ Integrity, path, descriptor, and lifecycle-control failures fail closed.
 
 ---
 
-*Current architecture map refreshed for the post-cut product boundary on 2026-09-17.*
+*Current architecture map refreshed for the post-cut product boundary on 2026-09-19.*

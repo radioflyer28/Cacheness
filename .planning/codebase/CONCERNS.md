@@ -65,7 +65,9 @@ owns lifecycle, while `UnifiedCache` owns only policy.
 - **Impact:** users can install a documented surface that cannot import or an
   artifact can accidentally lose a retained integration.
 - **Required response:** update `pyproject.toml` and `uv.lock` together, run
-  `uv lock --check`, and retain fresh isolated-wheel metadata probes.
+  `uv lock --check`, and retain fresh isolated-wheel metadata probes, including
+  the source-free check that rejects retired modules, metadata, and handler
+  identities.
 - **Evidence:** `pyproject.toml`, `tools/run_phase8_packaging.py`,
   `tests/packaging/test_wheel_matrix.py`.
 
@@ -91,8 +93,6 @@ owns lifecycle, while `UnifiedCache` owns only policy.
   qualification are still future work, not local-release claims.
 - **Performance evidence:** the benchmark harness and diagnostics exist, but
   controlled-Linux budgets remain future work.
-- **TensorFlow support:** the optional handler remains a deferred maintenance
-  decision because import cost and platform coverage are intentionally bounded.
 
 ## Historical lesson retained for future phases
 
@@ -104,4 +104,4 @@ state where a guarantee stops before changing lifecycle code.
 
 ---
 
-*Current concerns map refreshed for the post-cut product boundary on 2026-09-17.*
+*Current concerns map refreshed for the post-cut product boundary on 2026-09-19.*

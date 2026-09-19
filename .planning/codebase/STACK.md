@@ -24,18 +24,20 @@
 | `sqlalchemy` | SQLite metadata/projection work and optional PostgreSQL lifecycle/projection integration. |
 | `psycopg` | Optional PostgreSQL authority driver. |
 | `pandas`, `pyarrow`, `polars` | Optional dataframe/Parquet handler integrations. |
-| `blosc2`, `dill`, `orjson`, `tensorflow`, `boto3` | Optional format, serialization, JSON, tensor, and S3-adjacent integrations. |
+| `blosc2`, `dill`, `orjson` | Optional format and serialization handler integrations. |
 
 ## Published extras
 
 The exact installable extras are:
 
-`recommended`, `dataframes`, `tensorflow`, `s3`, `postgresql`, and `cloud`.
+`recommended`, `dataframes`, `s3`, `postgresql`, and `cloud`.
 
 The wheel contract verifies this complete retained set along with the absence of
-the retired dependency surface. Do not add compatibility groups or remove
-SQLAlchemy, `psycopg`, pandas, or PyArrow without tracing their retained
-authority, projection, and handler owners.
+retired modules, requirements, extras, and handler identities. The `s3` group
+has no additional package requirement because base `obstore` supplies the
+participant. Do not add compatibility groups or remove SQLAlchemy, `psycopg`,
+pandas, or PyArrow without tracing their retained authority, projection, and
+handler owners.
 
 ## Installability and configuration
 
@@ -57,4 +59,4 @@ authority, projection, and handler owners.
 
 ---
 
-*Current stack map refreshed for the post-cut product boundary on 2026-09-17.*
+*Current stack map refreshed for the post-cut product boundary on 2026-09-19.*

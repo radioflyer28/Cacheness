@@ -76,10 +76,10 @@ application ──> UnifiedCache policy ──> one BlobStore
 - SQLAlchemy supports SQLite metadata/projection work and the PostgreSQL
   authority path. `psycopg` is optional support for the PostgreSQL path.
 - NumPy is a base dependency. Optional handler integrations include Blosc2,
-  pandas/PyArrow, Polars, TensorFlow, dill, orjson, and boto3-compatible S3
-  support. Keep extras and guarded imports synchronized.
-- The six published extras are `recommended`, `dataframes`, `tensorflow`,
-  `s3`, `postgresql`, and `cloud`. Do not add an empty compatibility extra.
+  pandas/PyArrow, Polars, dill, and orjson. PostgreSQL and S3 remain optional
+  topology integrations. Keep extras and guarded imports synchronized.
+- The five published extras are `recommended`, `dataframes`, `s3`,
+  `postgresql`, and `cloud`. Do not add a compatibility extra.
 
 ## Implementation conventions
 
