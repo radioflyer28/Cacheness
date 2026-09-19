@@ -520,6 +520,8 @@ else:
 """
     environment = runner._isolated_environment()
     environment["CACHENESS_PHASE8_SOURCE_ROOT"] = str(PROJECT_ROOT)
+    probe_workspace = tmp_path / "probe"
+    probe_workspace.mkdir()
     completed = subprocess.run(
         [
             "uv",
@@ -532,7 +534,7 @@ else:
             "-c",
             probe,
         ],
-        cwd=tmp_path / "probe",
+        cwd=probe_workspace,
         env=environment,
         capture_output=True,
         text=True,

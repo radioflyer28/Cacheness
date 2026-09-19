@@ -117,7 +117,6 @@ _MAX_STRUCTURAL_OBSERVATIONS = 64
 _PACKAGING_OPTIONAL_GROUPS = (
     "recommended",
     "dataframes",
-    "tensorflow",
     "s3",
     "postgresql",
     "cloud",

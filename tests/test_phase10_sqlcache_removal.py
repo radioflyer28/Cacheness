@@ -99,7 +99,7 @@ ALLOWED_NON_DOCUMENT_MARKER_COUNTS = {
         "sql_cache": 25,
         "SQL pull-through": 6,
         "range-aware SQL": 5,
-        "duckdb": 12,
+        "duckdb": 11,
         "duckdb-engine": 4,
     },
     "tests/test_phase071_contract_verifier.py": {"SqlCache": 2},

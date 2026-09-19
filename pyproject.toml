@@ -30,9 +30,6 @@ dataframes = [
     "polars>=1.30.0",
     "pyarrow>=21.0.0",
 ]
-tensorflow = [
-    "tensorflow>=2.0.0",
-]
 s3 = []
 postgresql = [
     "psycopg[binary]>=3.1.0",
@@ -64,9 +61,6 @@ dev = [
     "pytest-cov>=6.2.1",
     "ruff>=0.12.8",
     "moto[s3,server]>=5.0.0",
-]
-tensorflow = [
-    "tensorflow>=2.0.0",
 ]
 
 [build-system]

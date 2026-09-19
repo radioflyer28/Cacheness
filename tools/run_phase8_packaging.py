@@ -27,12 +27,10 @@ EVIDENCE_PATH = REPOSITORY_ROOT / "tools" / "phase8_evidence.py"
 OPTIONAL_GROUPS = (
     "recommended",
     "dataframes",
-    "tensorflow",
     "s3",
     "postgresql",
     "cloud",
 )
-TENSORFLOW_COMPATIBLE_PYTHON_MINORS = frozenset({(3, 11), (3, 12)})
 NON_LIVE_SERVICE_GROUPS = ("s3", "postgresql", "cloud")
 RELEVANT_SOURCE_PATHS = (
     "pyproject.toml",
@@ -487,11 +485,6 @@ def optional_groups_from_pyproject(path: Path) -> tuple[str, ...]:
     return tuple(optional)
 
 
-def tensorflow_is_compatible() -> bool:
-    """Return whether this interpreter has a reviewed TensorFlow probe contract."""
-    return sys.version_info[:2] in TENSORFLOW_COMPATIBLE_PYTHON_MINORS
-
-
 def _extra_probe_source(group: str) -> str:
     """Return one group-specific public round trip after the base probe succeeds."""
     if group == "recommended":
@@ -534,24 +527,6 @@ try:
     assert dataframe_store.get(polars_key).equals(polars_value)
 finally:
     dataframe_store.close()
-'''
-    elif group == "tensorflow":
-        extension = '''
-import tensorflow as tf
-
-tensorflow_store = BlobStore(
-    StoreTopology(payload=BackendRef(name="memory"), authority=BackendRef(name="memory")),
-    cache_dir=Path.cwd() / "tensorflow-store",
-)
-tensorflow_store.initialize()
-try:
-    tensor = tf.constant([[1.0, 2.0], [3.0, 4.0]], dtype=tf.float32)
-    tensor_key = tensorflow_store.put(tensor, key="tensorflow-tensor")
-    restored_tensor = tensorflow_store.get(tensor_key)
-    assert isinstance(restored_tensor, tf.Tensor)
-    assert bool(tf.reduce_all(tf.equal(restored_tensor, tensor)))
-finally:
-    tensorflow_store.close()
 '''
     elif group in NON_LIVE_SERVICE_GROUPS:
         dependency_import = {
@@ -618,7 +593,6 @@ def _run_optional_probe(
     probe_names = {
         "recommended": ("public_exports", "blosc2_object_round_trip"),
         "dataframes": ("public_exports", "pandas_polars_parquet_round_trip"),
-        "tensorflow": ("public_exports", "tensorflow_tensor_round_trip"),
         "s3": ("public_exports", "memory_round_trip", "no_live_service"),
         "postgresql": ("public_exports", "memory_round_trip", "no_live_service"),
         "cloud": ("public_exports", "memory_round_trip", "no_live_service"),
@@ -637,24 +611,12 @@ def run_optional_probes(
     workspace: Path,
     run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
     environment: Mapping[str, str] | None = None,
-    tensorflow_compatible: bool | None = None,
 ) -> tuple[ProbeResult, ...]:
     """Qualify every exact extra in a new source-free wheel environment."""
     optional_groups_from_pyproject(REPOSITORY_ROOT / "pyproject.toml")
     _require_current_wheel_artifact(artifact)
-    compatible = tensorflow_is_compatible() if tensorflow_compatible is None else tensorflow_compatible
     results: list[ProbeResult] = []
     for group in OPTIONAL_GROUPS:
-        if group == "tensorflow" and not compatible:
-            results.append(
-                ProbeResult(
-                    name=group,
-                    requirement=f"{artifact.path}[{group}]",
-                    probes=("tensorflow_incompatible_platform",),
-                    compatibility="INCOMPATIBLE",
-                )
-            )
-            continue
         results.append(
             _run_optional_probe(
                 artifact,
@@ -772,7 +734,6 @@ def run_qualification(
     *,
     output: Path,
     workspace: Path,
-    tensorflow_compatible: bool | None = None,
 ) -> int:
     """Build one wheel, qualify each extra, and write exact package evidence."""
     optional_groups_from_pyproject(REPOSITORY_ROOT / "pyproject.toml")
@@ -784,7 +745,6 @@ def run_qualification(
     extra_results = run_optional_probes(
         artifact,
         workspace=workspace / "extras",
-        tensorflow_compatible=tensorflow_compatible,
     )
     after = _source_identity()
     if after != before:
