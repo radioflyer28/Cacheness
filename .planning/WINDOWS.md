@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 6
+open_count: 7
 waived_count: 0
 fixed_count: 53
-total_count: 59
-last_updated: 2026-09-14T00:30:42.096Z
+total_count: 60
+last_updated: 2026-09-19T18:14:12.447Z
 ---
 
 # Broken Windows Ledger
@@ -74,6 +74,7 @@ last_updated: 2026-09-14T00:30:42.096Z
 | 57 | 08 | deviation | tests/performance/test_memory_bounds.py |  | Spawned RSS child requires an importable runner module. | fixed |  | 2026-09-14T00:30:20.931Z | 2026-09-14T00:30:41.849Z |
 | 58 | 08 | deviation | tools/phase8_evidence.py |  | Structural evidence needed a bounded raw-observation allow-list. | fixed |  | 2026-09-14T00:30:21.066Z | 2026-09-14T00:30:41.975Z |
 | 59 | 08 | deviation | tools/run_phase8_scale_gates.py |  | Unsupported POSIX RSS environments fail closed before a byte claim. | fixed |  | 2026-09-14T00:30:21.194Z | 2026-09-14T00:30:42.096Z |
+| 60 | 11 | deviation | tests/qualification/test_phase8_quality_workflow.py | 191 | Repaired stale release-guide TensorFlow-presence assertion after the completed documentation cutover. | open |  | 2026-09-19T18:14:12.447Z |  |
 
 ````json
 [
@@ -784,6 +785,18 @@ last_updated: 2026-09-14T00:30:42.096Z
     "reason": "",
     "recorded_at": "2026-09-14T00:30:21.194Z",
     "resolved_at": "2026-09-14T00:30:42.096Z"
+  },
+  {
+    "id": 60,
+    "kind": "deviation",
+    "phase": "11",
+    "file": "tests/qualification/test_phase8_quality_workflow.py",
+    "line": 191,
+    "description": "Repaired stale release-guide TensorFlow-presence assertion after the completed documentation cutover.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-19T18:14:12.447Z",
+    "resolved_at": null
   }
 ]
 ````

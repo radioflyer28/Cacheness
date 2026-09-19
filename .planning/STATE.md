@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 11
 current_phase_name: Clean supplemental documentation and normalize validation evidence
 status: executing
-stopped_at: Completed 11-05-PLAN.md
-last_updated: "2026-09-19T18:04:42.756Z"
+stopped_at: Completed 11-04-PLAN.md
+last_updated: "2026-09-19T18:14:35.513Z"
 last_activity: 2026-09-19
 last_activity_desc: Phase 11 execution started
-state_head: 787746488b116b0300a78015c279911c8c055c98
+state_head: 868d5b170e9b75ddd3ba93a689eb2e50b64cd8cf
 progress:
   total_phases: 12
   completed_phases: 10
   total_plans: 163
-  completed_plans: 156
+  completed_plans: 157
 milestone_name: milestone
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-09-17)
 ## Current Position
 
 Phase: 11 (Clean supplemental documentation and normalize validation evidence) — EXECUTING
-Plan: 5 of 10
+Plan: 6 of 10
 Status: Ready to execute
 Last activity: 2026-09-19 — Phase 11 execution started
 
@@ -244,6 +244,7 @@ Raw file counts include superseded plans and therefore are not completion claims
 | Phase 11 P02 | 12m | 2 tasks | 5 files |
 | Phase 11 P03 | 15m 2s | 2 tasks | 10 files |
 | Phase 11 P05 | 4m 23s | 2 tasks | 10 files |
+| Phase 11-clean-supplemental-documentation-and-normalize-validation-ev P04 | 4m 42s | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -590,6 +591,8 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - [Phase 11]: Release qualification is the sole detailed owner of the locked complete-suite command and all platform/nonpublication nonclaims.
 - [Phase 11]: Only concise, test-backed pandas Parquet behavior survives; catalog and TensorFlow supplements are deleted directly.
 - [Phase 11]: Documentation navigation names the four literal executable examples instead of duplicating runnable snippets.
+- [Phase 11]: Keep core as the sole literal profile with strict unknown-profile rejection.
+- [Phase 11]: Retain the quality workflow boundaries while removing the TensorFlow-only CI path.
 
 ### Pending Todos
 
@@ -628,6 +631,6 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 
 ## Session Continuity
 
-Last session: 2026-09-19T18:04:42.508Z
-Stopped at: Completed 11-05-PLAN.md
+Last session: 2026-09-19T18:14:35.245Z
+Stopped at: Completed 11-04-PLAN.md
 Resume file: None
