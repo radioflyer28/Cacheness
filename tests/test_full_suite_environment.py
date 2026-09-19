@@ -16,7 +16,7 @@ PROJECT_ROOT = Path(__file__).parent.parent
 QUALITY_GATE_PATH = PROJECT_ROOT / "tests" / "test_phase1_quality_gates.py"
 DOCUMENTED_FULL_SUITE_COMMAND = (
     "uv run --isolated --all-extras --group dev --frozen pytest -q -o "
-    "log_cli=false"
+    "log_cli=false -m 'not (live_postgresql or live_aws_s3 or live_remote)'"
 )
 PHASE6_LOCAL_SUITE_COMMAND = (
     "uv run --isolated --all-extras --group dev --frozen python "
@@ -179,7 +179,7 @@ def test_phase6_local_suite_command_keeps_live_qualification_out_of_local_eviden
     )
     assert DOCUMENTED_FULL_SUITE_COMMAND == (
         "uv run --isolated --all-extras --group dev --frozen pytest -q -o "
-        "log_cli=false"
+        "log_cli=false -m 'not (live_postgresql or live_aws_s3 or live_remote)'"
     )
 
 

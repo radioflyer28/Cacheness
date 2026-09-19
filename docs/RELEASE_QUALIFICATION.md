@@ -43,14 +43,15 @@ cannot qualify or disqualify the stable matrix.
 Run the complete repository suite in a fresh, lockfile-backed environment:
 
 ```bash
-uv run --isolated --all-extras --group dev --frozen pytest -q -o log_cli=false
+uv run --isolated --all-extras --group dev --frozen pytest -q -o log_cli=false -m 'not (live_postgresql or live_aws_s3 or live_remote)'
 ```
 
 This command exercises declared optional local integrations and the development
 test group from `uv.lock`. It is a local regression command, not a native
 Windows, controlled-Linux performance, real PostgreSQL/Amazon-S3, or immutable
-publication qualification. Those boundaries remain governed by the evidence
-matrix above.
+publication qualification. Live service qualification remains a separate,
+explicitly provisioned protected workflow. Those boundaries remain governed by
+the evidence matrix above.
 
 ## Local-readiness boundary
 
