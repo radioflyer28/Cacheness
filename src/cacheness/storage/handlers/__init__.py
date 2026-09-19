@@ -81,7 +81,7 @@ __all__ = [
 ]
 
 if _HAS_PANDAS:
-    __all__.extend(["PandasDataFrameHandler", "PandasSeriesHandler"])
+    __all__.extend([PandasDataFrameHandler.__name__, PandasSeriesHandler.__name__])
 
 if _HAS_POLARS:
-    __all__.append("PolarsDataFrameHandler")
+    __all__.append(PolarsDataFrameHandler.__name__)
