@@ -462,9 +462,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--expected-os", choices=("Linux", "Darwin", "Windows"))
     parser.add_argument("--python-minor")
-    parser.add_argument(
-        "--feature-profile", choices=("core", "non_tensorflow", "tensorflow")
-    )
+    parser.add_argument("--feature-profile", choices=("core",))
     parser.add_argument("--advisory", action="store_true")
     parsed = parser.parse_args(arguments)
     if parsed.gate in {"core", "all"}:

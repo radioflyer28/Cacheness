@@ -23,11 +23,10 @@ LOCAL_GATE_PATH = REPOSITORY_ROOT / "tools" / "run_phase8_local_gates.py"
 PHASE071_CONTRACT_TOOL = REPOSITORY_ROOT / "tools" / "verify_phase071_contracts.py"
 STABLE_PYTHON_MINORS = ("3.11", "3.12", "3.13", "3.14")
 ADVISORY_PYTHON_MINORS = ("3.15",)
-TENSORFLOW_COMPATIBLE_MINORS = ("3.11", "3.12")
 MACOS_BOUNDARY_MINORS = ("3.11", "3.14")
 WINDOWS_BACKLOG_PHASE = "999.1"
 ADR_PROGRESS_OUTCOMES = ("success", "conflict", "typed_retryable")
-FEATURE_PROFILES = frozenset({"core", "non_tensorflow", "tensorflow"})
+FEATURE_PROFILES = frozenset({"core"})
 ROW_STATUSES = frozenset({"PASS", "FAIL", "SKIPPED", "UNAVAILABLE"})
 _ROW_KEYS = frozenset(
     {
@@ -105,11 +104,7 @@ def current_python_minor() -> str:
 
 def is_feature_profile_compatible(feature_profile: str, python_minor: str) -> bool:
     """Return whether the published profile is eligible for this stable minor."""
-    if feature_profile not in FEATURE_PROFILES:
-        return False
-    if feature_profile == "tensorflow":
-        return python_minor in TENSORFLOW_COMPATIBLE_MINORS
-    return python_minor in STABLE_PYTHON_MINORS
+    return feature_profile in FEATURE_PROFILES and python_minor in STABLE_PYTHON_MINORS
 
 
 def _role_for_os(expected_os: str) -> str:
@@ -190,13 +185,9 @@ def validate_row(row: Mapping[str, object]) -> dict[str, object]:
 
 
 def _required_linux_slots(feature_profile: str) -> tuple[tuple[str, str, str], ...]:
-    if feature_profile == "tensorflow":
-        minors = TENSORFLOW_COMPATIBLE_MINORS
-    elif feature_profile in {"core", "non_tensorflow"}:
-        minors = STABLE_PYTHON_MINORS
-    else:
+    if feature_profile != "core":
         raise ValueError("unsupported feature profile")
-    return tuple(("Linux", minor, feature_profile) for minor in minors)
+    return tuple(("Linux", minor, feature_profile) for minor in STABLE_PYTHON_MINORS)
 
 
 def _aggregate_required_rows(
@@ -214,10 +205,6 @@ def _aggregate_required_rows(
             str(row["python_minor"]),
             str(row["feature_profile"]),
         )
-        if row["feature_profile"] == "tensorflow" and (
-            row["python_minor"] not in TENSORFLOW_COMPATIBLE_MINORS
-        ):
-            raise ValueError("TensorFlow row is not compatible with this Python minor")
         if row["advisory"]:
             if row["python_minor"] in STABLE_PYTHON_MINORS:
                 raise ValueError("stable row cannot be advisory")
@@ -247,11 +234,6 @@ def _aggregate_required_rows(
 def aggregate_rows(rows: Sequence[Mapping[str, object]]) -> dict[str, object]:
     """Require an exact Linux core matrix; advisory rows are nonqualifying."""
     return _aggregate_required_rows(rows, feature_profile="core")
-
-
-def aggregate_feature_rows(rows: Sequence[Mapping[str, object]]) -> dict[str, object]:
-    """Require the documented TensorFlow-compatible Linux subset only."""
-    return _aggregate_required_rows(rows, feature_profile="tensorflow")
 
 
 def validate_adr_progress_outcome(outcome: str) -> str:
