@@ -125,6 +125,13 @@ The durable contract is the handler's `data_type`, `payload_format`, and
 is the focused extension error base. Read the [format tutorial](PLUGIN_DEVELOPMENT.md)
 before implementing an application format.
 
+### DataFrame compatibility
+
+The optional `dataframes` integration persists pandas Series and DataFrames
+through Parquet. Pandas and Polars DataFrames use Parquet; current pandas
+compatibility coverage preserves representative index, Series name, and dtype
+behavior.
+
 ## Integrity and qualification boundaries
 
 Direct reads fail closed on invalid payload evidence. For example,

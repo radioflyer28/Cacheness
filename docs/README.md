@@ -42,4 +42,9 @@ cache policy with [UnifiedCache policy](CACHE_POLICY.md). Use the qualification
 guide to determine which topology claims have evidence for this checkout.
 
 The [example directory](../examples/README.md) contains the exact executable
-local journeys used by the quality workflow.
+local journeys used by the quality workflow:
+
+- [In-memory BlobStore](../examples/memory_blob_store.py)
+- [Durable catalog store](../examples/durable_catalog_store.py)
+- [UnifiedCache policy](../examples/unified_cache.py)
+- [Custom MCAP-style format](../examples/custom_mcap_format.py)
