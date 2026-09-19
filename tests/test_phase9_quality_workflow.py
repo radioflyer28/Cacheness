@@ -37,7 +37,7 @@ def _linux_stable_job(workflow: str) -> str:
     """Return the ordinary Linux matrix job, excluding later workflow paths."""
 
     match = re.search(
-        r"^  linux-stable:(.*?)(?=^  tensorflow-compatible:)",
+        r"^  linux-stable:(.*?)(?=^  [a-z_-]+:|\Z)",
         workflow,
         flags=re.MULTILINE | re.DOTALL,
     )

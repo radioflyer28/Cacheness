@@ -69,14 +69,23 @@ def test_quality_workflow_has_exact_non_live_matrix_and_least_permissions() -> N
     for macos_minor in ("3.11", "3.14"):
         assert macos_minor in workflow
     assert "continue-on-error: true" in workflow
-    assert "tensorflow" in workflow
-    tensorflow_job = re.search(
-        r"tensorflow-compatible:(.*?)(?:\n  [a-z_-]+:|\Z)",
-        workflow,
-        flags=re.DOTALL,
-    ).group(1)
-    assert "3.13" not in tensorflow_job
-    assert "3.14" not in tensorflow_job
+
+
+def test_tensorflow_profile_is_absent_from_quality_workflow() -> None:
+    """Retiring TensorFlow cannot remove the retained CI evidence structure."""
+
+    workflow = _workflow()
+
+    assert "tensorflow" not in workflow.casefold()
+    assert "tools/run_phase8_local_gates.py core" in workflow
+    assert "tests/test_phase9_examples.py" in workflow
+    for retained_job in (
+        "macos-boundary",
+        "prerelease-advisory",
+        "release-candidate",
+        "release-candidate-packaging",
+    ):
+        assert f"  {retained_job}:\n" in workflow
 
 
 def test_quality_workflow_keeps_live_and_controlled_performance_out_of_pr_jobs() -> (

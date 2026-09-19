@@ -14,12 +14,28 @@ import pytest
 RUNNER_PATH = (
     Path(__file__).resolve().parents[2] / "tools" / "run_phase8_platform_gates.py"
 )
+LOCAL_GATE_RUNNER_PATH = (
+    Path(__file__).resolve().parents[2] / "tools" / "run_phase8_local_gates.py"
+)
 
 
 @pytest.fixture()
 def runner():
     """Load the standalone platform evidence runner."""
     spec = importlib.util.spec_from_file_location("phase8_platform_runner", RUNNER_PATH)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.fixture()
+def local_gate_runner():
+    """Load the local gate CLI without importing project package code."""
+    spec = importlib.util.spec_from_file_location(
+        "phase8_local_gate_runner", LOCAL_GATE_RUNNER_PATH
+    )
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
@@ -93,51 +109,34 @@ def test_python_advisory_result_cannot_satisfy_or_invalidate_stable_slot(
         runner.aggregate_rows(unpublished)
 
 
-def test_python_tensorflow_profile_has_explicit_stable_compatibility(runner) -> None:
-    """TensorFlow gaps are nonqualifying results, never skip-based qualification."""
-    assert runner.TENSORFLOW_COMPATIBLE_MINORS == ("3.11", "3.12")
-    rows = [
+@pytest.mark.parametrize("retired_profile", ("tensorflow", "non_tensorflow"))
+def test_core_is_the_only_feature_profile(
+    runner, local_gate_runner, tmp_path: Path, retired_profile: str
+) -> None:
+    """Both platform tools reject retired profiles before emitting evidence."""
+    assert runner.FEATURE_PROFILES == frozenset({"core"})
+    assert not runner.is_feature_profile_compatible(retired_profile, "3.11")
+    with pytest.raises(ValueError, match="unsupported feature profile"):
         runner.build_row(
             expected_os="Linux",
-            python_minor=minor,
-            feature_profile="tensorflow",
+            python_minor="3.11",
+            feature_profile=retired_profile,
             command_status="PASS",
         )
-        for minor in runner.TENSORFLOW_COMPATIBLE_MINORS
-    ]
-    assert runner.aggregate_feature_rows(rows)["status"] == "QUALIFIED"
-
-    rows.append(
-        runner.build_row(
-            expected_os="Linux",
-            python_minor="3.14",
-            feature_profile="tensorflow",
-            command_status="SKIPPED",
+    with pytest.raises(SystemExit):
+        local_gate_runner.main(
+            [
+                "platform",
+                "--expected-os",
+                "Linux",
+                "--python-minor",
+                "3.11",
+                "--feature-profile",
+                retired_profile,
+                "--output",
+                str(tmp_path / f"{retired_profile}.json"),
+            ]
         )
-    )
-    with pytest.raises(ValueError, match="not compatible"):
-        runner.aggregate_feature_rows(rows)
-
-    rows = [
-        runner.build_row(
-            expected_os="Linux",
-            python_minor=minor,
-            feature_profile="tensorflow",
-            command_status="PASS",
-        )
-        for minor in runner.TENSORFLOW_COMPATIBLE_MINORS
-    ]
-    rows.append(
-        runner.build_row(
-            expected_os="Linux",
-            python_minor="3.15",
-            feature_profile="tensorflow",
-            command_status="PASS",
-            advisory=True,
-        )
-    )
-    with pytest.raises(ValueError, match="not compatible"):
-        runner.aggregate_feature_rows(rows)
 
 
 def test_python_runtime_identity_mismatch_is_rejected(runner, tmp_path: Path) -> None:
