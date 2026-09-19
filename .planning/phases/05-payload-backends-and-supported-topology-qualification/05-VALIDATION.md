@@ -1,7 +1,7 @@
 ---
 phase: 05
 slug: payload-backends-and-supported-topology-qualification
-status: complete
+status: validated
 nyquist_compliant: true
 wave_0_complete: true
 created: 2026-09-08
@@ -102,3 +102,15 @@ non-substitutable; it is not a Phase 5 manual check.
 - [x] No implementation files were changed by this Nyquist audit.
 
 **Approval:** 19/19 deterministic task gaps filled; BACK-01/BACK-04 Phase 5 validation green. BACK-05 remains a Phase 8 obligation.
+
+## Canonical Validation Normalization (Phase 11)
+
+The 19 green rows above remain the Phase 5 deterministic evidence. Plan 05-10
+is explicitly superseded rather than a passing row, and its historical
+real-service command remains a Phase 8/SEED-007 input only. Phase 5 does not
+promote PostgreSQL or Amazon S3 from deterministic contracts to live support.
+
+The retained cross-phase nonclaims are unchanged: real PostgreSQL and Amazon S3
+remain `DEFERRED`/`NOT_QUALIFIED` under BACK-05 and SEED-007; controlled-Linux
+performance remains `DEFERRED`/`NOT_QUALIFIED` under QUAL-06 and SEED-006;
+Windows remains `NOT_QUALIFIED`; immutable publication remains `NOT_PUBLISHED`.

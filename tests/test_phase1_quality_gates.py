@@ -244,7 +244,7 @@ def test_validation_artifact_records_terminal_approval_and_gap_wave_history() ->
     """Terminal approval is executable while the temporary gap state stays documented."""
     validation = VALIDATION_FILE.read_text(encoding="utf-8")
     frontmatter = validation.split("---", 2)[1]
-    assert "status: complete" in frontmatter
+    assert "status: validated" in frontmatter
     assert "nyquist_compliant: true" in frontmatter
     assert "wave_0_complete: true" in frontmatter
     assert "**Approval:** approved 2026-08-30" in validation

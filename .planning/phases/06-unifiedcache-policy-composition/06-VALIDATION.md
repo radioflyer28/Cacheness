@@ -1,7 +1,7 @@
 ---
 phase: 06
 slug: unifiedcache-policy-composition
-status: executed
+status: validated
 nyquist_compliant: true
 wave_0_complete: true
 executed: 2026-09-09T08:10:40Z
@@ -28,10 +28,10 @@ executed: 2026-09-09T08:10:40Z
 
 | Command | Actual result | Status |
 | --- | --- | --- |
-| `uv run --isolated --all-extras --group dev --frozen pytest -q tests/test_phase6_contract_verifier.py -o log_cli=false` | `18 passed` | PASS |
-| `uv run --isolated --all-extras --group dev --frozen python tools/run_phase6_local_suite.py --repo-root .` | Exit `0`; exact three live-path exclusions; `1232` collected local nodes, `1223 passed`, `9 skipped`, `0 failed`. | PASS |
-| `uv run --isolated --all-extras --group dev --frozen python tools/verify_phase6_contracts.py --repo-root .` | Exit `0`; CACH-01 through CACH-07, strict projection, canonical cutover/suite-order, and retained Phase 3–5 groups all passed. | PASS |
-| `uv run --isolated --all-extras --group dev --frozen ruff check` over the 15 Plan 09–11 Python paths named in `06-11-PLAN.md` | `All checks passed!` | PASS |
+| `uv run --isolated --all-extras --group dev --frozen pytest -q tests/test_phase6_contract_verifier.py -o log_cli=false` | `18 passed` | ✅ green |
+| `uv run --isolated --all-extras --group dev --frozen python tools/run_phase6_local_suite.py --repo-root .` | Exit `0`; exact three live-path exclusions; `1232` collected local nodes, `1223 passed`, `9 skipped`, `0 failed`. | ✅ green |
+| `uv run --isolated --all-extras --group dev --frozen python tools/verify_phase6_contracts.py --repo-root .` | Exit `0`; CACH-01 through CACH-06, strict projection, canonical cutover/suite-order, and retained Phase 3–5 groups all passed. | ✅ green |
+| `uv run --isolated --all-extras --group dev --frozen ruff check` over the 15 Plan 09–11 Python paths named in `06-11-PLAN.md` | `All checks passed!` | ✅ green |
 
 The local runner printed only these exclusions:
 
@@ -44,17 +44,19 @@ Their concrete artifacts are [the root-safe runner](../../../tools/run_phase6_lo
 [the fixed verifier](../../../tools/verify_phase6_contracts.py), and
 [its adversarial contract tests](../../../tests/test_phase6_contract_verifier.py).
 
-## Requirement Evidence
+## Per-Task Verification Map
+
+### Requirement Evidence
 
 | Requirement | Fixed evidence | Current result | Status |
 | --- | --- | --- | --- |
-| CACH-01 | `tests/contracts/test_phase6_topology_policy.py` plus verifier one-store/one-engine AST checks | CACH-01 printed `PASS` | PASS |
-| CACH-02 | `tests/test_phase6_policy_contract.py` plus verifier direct-mutation/projection-authority checks | CACH-02 printed `PASS` | PASS |
-| CACH-03 | `tests/test_phase6_removal_contract.py` plus bounded query/direct-delete AST checks | CACH-03 printed `PASS` | PASS |
-| CACH-04 | `tests/test_phase6_lookup_contract.py`, `tests/test_phase6_decorator_contract.py` | CACH-04 printed `PASS` | PASS |
-| CACH-05 | `tests/test_phase6_statistics.py` | CACH-05 printed `PASS` | PASS |
-| CACH-06 | `tests/test_phase6_public_api_contract.py`, `tests/test_phase6_decorator_contract.py`, contract-text check | CACH-06 printed `PASS` | PASS |
-| CACH-07 regression | `tests/test_sql_cache.py` is fixed in the manifest and ordered isolation probes | Printed `CACH-07 SqlCache regression: PASS`; local suite exited `0` | PASS |
+| CACH-01 | `tests/contracts/test_phase6_topology_policy.py` plus verifier one-store/one-engine AST checks | CACH-01 printed `PASS` | ✅ green |
+| CACH-02 | `tests/test_phase6_policy_contract.py` plus verifier direct-mutation/projection-authority checks | CACH-02 printed `PASS` | ✅ green |
+| CACH-03 | `tests/test_phase6_removal_contract.py` plus bounded query/direct-delete AST checks | CACH-03 printed `PASS` | ✅ green |
+| CACH-04 | `tests/test_phase6_lookup_contract.py`, `tests/test_phase6_decorator_contract.py` | CACH-04 printed `PASS` | ✅ green |
+| CACH-05 | `tests/test_phase6_statistics.py` | CACH-05 printed `PASS` | ✅ green |
+| CACH-06 | `tests/test_phase6_public_api_contract.py`, `tests/test_phase6_decorator_contract.py`, contract-text check | CACH-06 printed `PASS` | ✅ green |
+| CACH-07 (historical) | Historical `tests/test_sql_cache.py` ordered-isolation probe | Original local-suite result was `CACH-07 SqlCache regression: PASS`; the deleted surface is now covered by Phase 10's direct-removal/negative contract | ⚪ superseded — Phase 10 direct-removal/negative contract |
 
 ## Strict Derived-Projection Evidence
 
@@ -106,8 +108,9 @@ Their concrete artifacts are [the root-safe runner](../../../tools/run_phase6_lo
 `tools/verify_phase6_contracts.py` now contains the literal Plan 09–11
 canonical-cutover inventory, audits each migrated source AST, and explicitly
 names retained Phase 3–5 local lifecycle, integrity, recovery, authority, and
-topology nodes. The final fixed-verifier run passed that finite group and the
-separate SqlCache regression. No live service result is credited here.
+topology nodes. The final fixed-verifier run passed that finite group. The
+historical separate SqlCache regression is superseded by the Phase 10
+direct-removal/negative contract; no live service result is credited here.
 
 ## Open Gates
 
@@ -125,8 +128,17 @@ separate SqlCache regression. No live service result is credited here.
 - [x] No watch-mode flags were used.
 - [x] Scoped Ruff passed for Phase 6 production/test/tool files.
 - [x] Current-environment non-live local suite is green under the locked all-extras environment.
-- [x] Fixed verifier is fully green, including CACH-07 collection and ordered-isolation coverage.
+- [x] Fixed verifier is fully green for CACH-01 through CACH-06; the historical CACH-07 collection is explicitly superseded by Phase 10.
 - [x] `nyquist_compliant: true` for the finite Phase 6 local gate.
 
 **Approval:** local Phase 6 evidence is complete. PostgreSQL/Amazon-S3 and
 native-Windows qualification remain explicitly open for Phase 8/backlog.
+
+## Canonical Validation Normalization (Phase 11)
+
+Phase 6 owns only CACH-01 through CACH-06. Its former CACH-07/`SqlCache`
+selector is retained above as historical evidence with an explicit supersession
+mapping to the Phase 10 direct-removal/negative contract; it is not a runnable current
+requirement. PostgreSQL and Amazon S3 remain `NOT_QUALIFIED`, controlled-Linux
+performance remains `NOT_QUALIFIED`, Windows remains `NOT_QUALIFIED`, and
+immutable publication remains `NOT_PUBLISHED`.

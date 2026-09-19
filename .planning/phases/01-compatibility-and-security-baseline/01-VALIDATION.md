@@ -1,7 +1,7 @@
 ---
 phase: 01
 slug: compatibility-and-security-baseline
-status: complete
+status: validated
 nyquist_compliant: true
 wave_0_complete: true
 created: 2026-08-29
@@ -28,7 +28,7 @@ created: 2026-08-29
 ## Sampling Rate
 
 - **After every task commit:** Run the focused command mapped to that task.
-- **After every plan wave:** Run `uv run pytest -q -o log_cli=false tests/test_public_api_contract.py tests/test_stored_compatibility.py tests/test_filesystem_containment.py tests/test_legacy_array_security.py tests/test_query_meta.py tests/test_query_meta_security.py tests/test_sql_cache.py tests/test_sql_cache_failure_contract.py tests/test_security_documentation.py`.
+- **After every plan wave:** Run `uv run --isolated --all-extras --group dev --frozen pytest -q -o log_cli=false tests/test_public_api_contract.py tests/test_stored_compatibility.py tests/test_filesystem_containment.py tests/test_legacy_array_security.py tests/test_query_meta.py tests/test_query_meta_security.py tests/test_security_documentation.py tests/test_phase10_sqlcache_removal.py -x`.
 - **Before phase verification:** Run `uv run pytest -q -o log_cli=false` and `uv run ruff check src tests`.
 - **Max feedback latency:** 30 seconds for focused checks; record and split any focused command that exceeds it.
 
@@ -41,7 +41,7 @@ Task and wave assignments are finalized by the planner. Every requirement alread
 | Task ID | Plan | Wave | Requirement | Threat Ref | Secure Behavior | Test Type | Automated Command | File Exists | Status |
 |---------|------|------|-------------|------------|-----------------|-----------|-------------------|-------------|--------|
 | 01-01, 01-08..01-12 | 01-01, 01-08..01-12 | 0-6 | MIGR-01 | T-01-09..T-01-11, T-01-28..T-01-36 | Supported exports, aliases, signatures, configs, registries, decorators, errors, and selected `0.3.x` artifacts remain executable | characterization + fixture integration | `uv run pytest -q -o log_cli=false tests/test_public_api_contract.py tests/test_stored_compatibility.py -x` | ✅ W0 | ✅ green |
-| 01-06 | 01-06 | 4 | CACH-07 | T-01-20..T-01-23 | `SqlCache` stays independent; fetch/gap failures are strict unless explicit best effort; equivalent internal fallback remains observable | unit + SQLite integration | `uv run pytest -q -o log_cli=false tests/test_sql_cache.py tests/test_sql_cache_failure_contract.py -x` | ✅ W0 | ✅ green |
+| 01-06 | 01-06 | 4 | CACH-07 (historical) | T-01-20..T-01-23 | Historical `SqlCache` failure-isolation characterization established the original risk boundary; the retired surface is now absent rather than executable. | historical selector → direct-removal negative contract | `uv run --isolated --all-extras --group dev --frozen pytest -q -o log_cli=false tests/test_phase10_sqlcache_removal.py -x` | Phase 10 | ⚪ superseded — Phase 10 direct-removal/negative contract |
 | 01-02, 01-03 | 01-02, 01-03 | 1-2 | SECU-01 | T-01-01..T-01-07, T-01-12, T-01-37 | Every filesystem operation rejects escape forms without mutating rejected metadata or payload evidence | unit + filesystem integration | `uv run pytest -q -o log_cli=false tests/test_filesystem_containment.py -x` | ✅ W0 | ✅ green |
 | 01-04 | 01-04 | 3 | SECU-02 | T-01-13..T-01-16 | Legacy headers use bounded non-executing parsing; ordinary NPZ loading disallows pickle; declared invalid artifacts fail closed | unit + stored fixture | `uv run pytest -q -o log_cli=false tests/test_legacy_array_security.py -x` | ✅ W0 | ✅ green |
 | 01-05 | 01-05 | 4 | SECU-06 | T-01-17..T-01-19 | Query fields prevalidate before database access while documented numeric/string semantics remain intact | unit + SQLite integration | `uv run pytest -q -o log_cli=false tests/test_query_meta.py tests/test_query_meta_security.py -x` | ✅ W0 | ✅ green |
@@ -92,7 +92,7 @@ generation/CAS model, or general lifecycle/reconciliation engine.
 - [x] `tests/test_filesystem_containment.py` — reusable hostile path corpus, outside-root evidence, and symlink fixtures.
 - [x] `tests/test_legacy_array_security.py` — valid/corrupt legacy raw-array fixtures generated without evaluating metadata.
 - [x] `tests/test_query_meta_security.py` — hostile field corpus and pre-database call-order spies.
-- [x] `tests/test_sql_cache_failure_contract.py` — deterministic failing adapters/gap detectors and structured-log assertions.
+- [x] Historical `tests/test_sql_cache_failure_contract.py` — original deterministic failing-adapter/gap-detector characterization; superseded by the Phase 10 direct-removal/negative contract in `tests/test_phase10_sqlcache_removal.py`.
 - [x] `tests/test_security_documentation.py` — trusted-payload and unsafe-serializer documentation assertions.
 
 ---
@@ -128,7 +128,7 @@ All phase behaviors have automated verification. Human review may improve docume
 - [x] Focused, full-suite, and executable parsed-Ruff evidence was rerun after Waves 8-10 and the final review fixes.
 - [x] Renewed independent code review is clean with zero findings.
 - [x] Renewed independent security review is SECURED with 47/47 threats closed.
-- [x] `status: complete`, `nyquist_compliant: true`, and `wave_0_complete: true` are restored by the orchestrator after review convergence.
+- [x] Historical terminal state: `status: complete`, `nyquist_compliant: true`, and `wave_0_complete: true` were restored by the orchestrator after review convergence.
 
 ## Renewed Approval Evidence
 
@@ -140,3 +140,15 @@ All phase behaviors have automated verification. Human review may improve docume
 - Downstream `STOR-03..STOR-06`, `CACH-03`, `BACK-03`, and `BACK-06` remain incomplete and are not claimed by this approval.
 
 **Approval:** approved 2026-08-30
+
+## Canonical Validation Normalization (Phase 11)
+
+The current frontmatter is `status: validated` with the original completed
+evidence retained above. The only removed executable selector is `01-06`:
+its historical `SqlCache` characterization has an explicit supersession mapping
+to Phase 10's direct-removal/negative contract. No historical role or result is
+erased.
+
+This normalization remains local and deterministic only. PostgreSQL, Amazon S3,
+controlled-Linux performance, and Windows remain `NOT_QUALIFIED`; immutable
+publication remains `NOT_PUBLISHED` under the existing deferred owners.
