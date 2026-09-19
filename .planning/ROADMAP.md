@@ -760,7 +760,7 @@ Plans:
 4. Phase 1, 3, 5, 6, 7, 8, 9, and 11 validation records discover canonically with green or explicitly superseded evidence, while BACK-05, QUAL-06, native Windows, and immutable publication remain nonpassing deferrals.
 5. Focused contracts, scoped Ruff, lock freshness, a fresh source-free wheel, and one frozen non-live suite pass before the milestone audit derives and records its current verdict.
 
-**Plans:** 10/10 plans executed
+**Plans:** 10/12 plans executed
 
 Plans:
 **Wave 1**
@@ -796,3 +796,11 @@ Plans:
 **Wave 8** *(blocked on Wave 7 completion)*
 
 - [x] 11-10-PLAN.md — Refresh the milestone audit last with an evidence-derived verdict.
+
+**Wave 9** *(gap closure; blocked on Wave 8 completion)*
+
+- [ ] 11-11-PLAN.md — Bind post-review acceptance evidence to the qualified source tree.
+
+**Wave 10** *(blocked on Wave 9 completion)*
+
+- [ ] 11-12-PLAN.md — Re-derive the milestone audit from the qualified post-review evidence.
