@@ -1,7 +1,7 @@
 ---
 phase: 7
 slug: explicit-migration-and-rebuild-cutover
-status: complete
+status: validated
 nyquist_compliant: true
 wave_0_complete: true
 created: 2026-09-09
@@ -91,7 +91,16 @@ The non-live suite excludes exactly these Phase 8-owned real-service modules. Th
 - tests/integration/test_remote_topology.py
 - tests/integration/test_s3_generation.py
 
-## Plan Task Ledger
+## Per-Task Verification Map
+
+The historical task ledger below preserves the original individual selectors.
+Its current canonical disposition is `✅ green`: the fixed `--all` verifier
+validated the literal Phase 7 inventory, and the 07-20 through 07-22 evidence
+retains the repaired gaps without altering the stopped-worker/explicit-maintenance
+boundary. Deterministic PostgreSQL adapter rows remain local adapter evidence,
+not live qualification.
+
+### Historical Plan Task Ledger
 
 | Task ID | Named evidence | Status |
 |---|---|---|
@@ -288,6 +297,15 @@ policy, or perfect reclamation of invisible pre-checkpoint orphans.
 - [x] nyquist_compliant: true
 
 Approval: deterministic local Phase 7 gate complete; Phase 8 owns every listed non-qualification boundary.
+
+## Canonical Validation Normalization (Phase 11)
+
+All Phase 7 task rows are green only for their fixed deterministic/local scope.
+The required stopped-worker maintenance, explicit migration/rebuild, resumability,
+and no-online-upgrade boundaries remain unchanged. PostgreSQL and Amazon S3 live
+services, controlled-Linux performance, and Windows remain `NOT_QUALIFIED`;
+immutable publication remains `NOT_PUBLISHED`. No row here qualifies an external
+service or publishes a release.
 
 ## Current verified gap-cycle evidence — Plans 07-20 through 07-22 (2026-09-11)
 

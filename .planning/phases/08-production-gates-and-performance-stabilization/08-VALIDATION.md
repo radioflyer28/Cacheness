@@ -1,7 +1,7 @@
 ---
 phase: 08
 slug: production-gates-and-performance-stabilization
-status: complete
+status: validated
 nyquist_compliant: true
 wave_0_complete: true
 created: 2026-09-13
@@ -206,7 +206,21 @@ The coverage capture tool must preflight the literal selector inventory and refu
 write a baseline when a selector is absent, skipped, deselected, or failing. The
 pre-gap research percentages are diagnostic and never qualify this dependency.
 
-## Exact Plan/Task Verification Map
+## Per-Task Verification Map
+
+The original pre-execution map is retained below for provenance. Its “Wave 0
+missing” and dependency labels are historical planning states, not current
+evidence. The canonical dispositions are:
+
+| Task rows | Current bounded evidence | Status |
+|---|---|---|
+| 08-01-01 through 08-10-03 | Exact local deterministic, packaging, platform-role, coverage, structural, workflow, and release-harness contracts recorded by `08-VERIFICATION.md` and the local-readiness record | ✅ green — self-test/local evidence only |
+| 08-13-01 through 08-15-02 | Controlled-runner, release-policy, publication-controller, and protected-live preflight self-tests | ✅ green — retained future capability, never live qualification |
+| 08-11 and 08-12 | D-24 preserved the original live collection and immutable-publication paths for SEED-007 | ⚪ superseded — explicit SEED-007 nonclaim |
+| 08-17-01 through 08-19-02 | Exact-snapshot, initialized-worker, and SQLite coverage-ratchet selectors | ✅ green — deterministic local safety/recovery/coverage |
+| 08-16-01 and 08-16-02 | `08-LOCAL-READINESS.json` and its fixed source-bound verifier | ✅ green — `LOCAL_READY` only |
+
+### Historical Exact Plan/Task Verification Map
 
 | Task ID | Wave | Requirement focus | Automated command | Evidence class | Status |
 |---|---:|---|---|---|---|
