@@ -5,6 +5,7 @@ from __future__ import annotations
 from importlib import metadata
 import importlib.util
 from pathlib import Path
+import subprocess
 import sys
 from types import ModuleType, SimpleNamespace
 from zipfile import ZipFile
@@ -15,6 +16,20 @@ import pytest
 PROJECT_ROOT = Path(__file__).parents[2]
 RUNNER_PATH = PROJECT_ROOT / "tools" / "run_phase8_packaging.py"
 EVIDENCE_PATH = PROJECT_ROOT / "tools" / "phase8_evidence.py"
+RETAINED_OPTIONAL_GROUPS = (
+    "recommended",
+    "dataframes",
+    "s3",
+    "postgresql",
+    "cloud",
+)
+RETIRED_TENSORFLOW_HANDLER_IDENTITIES = (
+    "TensorFlowTensorHandler",
+    "_lazy_import_tensorflow",
+    "tensorflow_tensor",
+    "blosc2_tensor",
+    ".b2tr",
+)
 
 
 def _load_runner():
@@ -291,14 +306,7 @@ def test_optional_group_inventory_is_exact_and_rejects_metadata_drift(
     """The runner cannot silently omit, rename, or add an advertised extra."""
     runner = _load_runner()
 
-    assert runner.OPTIONAL_GROUPS == (
-        "recommended",
-        "dataframes",
-        "tensorflow",
-        "s3",
-        "postgresql",
-        "cloud",
-    )
+    assert runner.OPTIONAL_GROUPS == RETAINED_OPTIONAL_GROUPS
     assert runner.optional_groups_from_pyproject(PROJECT_ROOT / "pyproject.toml") == (
         runner.OPTIONAL_GROUPS
     )
@@ -306,7 +314,7 @@ def test_optional_group_inventory_is_exact_and_rejects_metadata_drift(
     drifted = tmp_path / "pyproject.toml"
     drifted.write_text(
         "[project]\n[project.optional-dependencies]\nrecommended = []\ndataframes = []\n"
-        "tensorflow = []\ns3 = []\npostgresql = []\nrenamed-cloud = []\n",
+        "s3 = []\npostgresql = []\nrenamed-cloud = []\n",
         encoding="utf-8",
     )
     with pytest.raises(runner.PackagingQualificationError, match="optional group"):
@@ -331,7 +339,6 @@ def test_optional_groups_get_fresh_wheel_requirements_and_non_live_probes(
         workspace=tmp_path / "probes",
         run=fake_run,
         environment={"PATH": "/usr/bin"},
-        tensorflow_compatible=False,
     )
 
     assert [result.name for result in results] == list(runner.OPTIONAL_GROUPS)
@@ -339,7 +346,7 @@ def test_optional_groups_get_fresh_wheel_requirements_and_non_live_probes(
         f"{artifact_path}[{group}]" for group in runner.OPTIONAL_GROUPS
     ]
     assert len({workspace for _command, workspace in calls}) == len(calls)
-    assert len(calls) == len(runner.OPTIONAL_GROUPS) - 1
+    assert len(calls) == len(runner.OPTIONAL_GROUPS)
     assert all("--isolated" in command for command, _workspace in calls)
     assert all("--no-project" in command for command, _workspace in calls)
     assert all(
@@ -347,9 +354,6 @@ def test_optional_groups_get_fresh_wheel_requirements_and_non_live_probes(
         for result in results
         if result.name in {"s3", "postgresql", "cloud"}
     )
-    tensorflow = next(result for result in results if result.name == "tensorflow")
-    assert tensorflow.compatibility == "INCOMPATIBLE"
-    assert tensorflow.probes == ("tensorflow_incompatible_platform",)
 
 
 def test_optional_group_wheel_qualification_runs_each_compatible_extra(
@@ -362,7 +366,6 @@ def test_optional_group_wheel_qualification_runs_each_compatible_extra(
     results = runner.run_optional_probes(
         artifact,
         workspace=tmp_path / "probes",
-        tensorflow_compatible=False,
     )
 
     assert [result.name for result in results] == list(runner.OPTIONAL_GROUPS)
@@ -372,8 +375,6 @@ def test_optional_group_wheel_qualification_runs_each_compatible_extra(
         for result in results
         if result.name in {"s3", "postgresql", "cloud"}
     )
-    tensorflow = next(result for result in results if result.name == "tensorflow")
-    assert tensorflow.compatibility == "INCOMPATIBLE"
 
 
 def test_packaging_evidence_allows_only_the_reviewed_sanitized_pass_shape() -> None:
@@ -403,7 +404,6 @@ def test_packaging_evidence_allows_only_the_reviewed_sanitized_pass_shape() -> N
         "optional_groups": [
             "recommended",
             "dataframes",
-            "tensorflow",
             "s3",
             "postgresql",
             "cloud",
@@ -411,7 +411,6 @@ def test_packaging_evidence_allows_only_the_reviewed_sanitized_pass_shape() -> N
         "compatibility": [
             "recommended:COMPATIBLE",
             "dataframes:COMPATIBLE",
-            "tensorflow:COMPATIBLE",
             "s3:COMPATIBLE",
             "postgresql:COMPATIBLE",
             "cloud:COMPATIBLE",
@@ -454,3 +453,107 @@ def test_runner_payload_preserves_the_reviewed_non_live_group_order(
     payload = runner._packaging_payload(artifact, results, status="PASS")
 
     assert payload["non_live_groups"] == ["s3", "postgresql", "cloud"]
+
+
+def test_tensorflow_surface_is_absent_from_built_wheel_and_metadata(
+    tmp_path: Path,
+) -> None:
+    """One digest-bound source-free wheel exposes no retired TensorFlow surface."""
+    runner = _load_runner()
+    artifact = runner.build_wheel(tmp_path / "dist")
+
+    assert artifact.sha256 == runner._wheel_sha256(artifact.path)
+    with ZipFile(artifact.path) as wheel:
+        members = tuple(wheel.namelist())
+        metadata_members = tuple(
+            member for member in members if member.endswith(".dist-info/METADATA")
+        )
+        assert len(metadata_members) == 1
+        assert not any("tensorflow" in member.casefold() for member in members)
+
+        handler_source = wheel.read("cacheness/handlers.py").decode("utf-8")
+        assert all(
+            identity not in handler_source
+            for identity in RETIRED_TENSORFLOW_HANDLER_IDENTITIES
+        )
+
+        installed_metadata = wheel.read(metadata_members[0]).decode("utf-8")
+        assert "provides-extra: tensorflow" not in installed_metadata.casefold()
+        assert "requires-dist: tensorflow" not in installed_metadata.casefold()
+
+    probe = """
+from importlib import import_module, metadata
+from importlib.util import find_spec
+from pathlib import Path
+import os
+
+import cacheness
+import cacheness.handlers as handlers
+
+source_root = Path(os.environ["CACHENESS_PHASE8_SOURCE_ROOT"]).resolve()
+for module in (cacheness, handlers):
+    module_path = Path(module.__file__).resolve()
+    try:
+        module_path.relative_to(source_root)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(f"wheel probe imported checkout module: {module.__name__}")
+
+distribution = metadata.distribution("cacheness")
+extras = {
+    extra.casefold() for extra in distribution.metadata.get_all("Provides-Extra", [])
+}
+assert extras == {"recommended", "dataframes", "s3", "postgresql", "cloud"}
+assert all(
+    "tensorflow" not in requirement.casefold()
+    for requirement in distribution.requires or ()
+)
+assert find_spec("tensorflow") is None
+assert not hasattr(handlers, "TensorFlowTensorHandler")
+try:
+    import_module("cacheness.handlers").TensorFlowTensorHandler
+except AttributeError:
+    pass
+else:
+    raise AssertionError("retired TensorFlow handler remains importable")
+"""
+    environment = runner._isolated_environment()
+    environment["CACHENESS_PHASE8_SOURCE_ROOT"] = str(PROJECT_ROOT)
+    completed = subprocess.run(
+        [
+            "uv",
+            "run",
+            "--isolated",
+            "--no-project",
+            "--with",
+            str(artifact.path),
+            "python",
+            "-c",
+            probe,
+        ],
+        cwd=tmp_path / "probe",
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_retained_local_round_trips_survive_tensorflow_cutover(tmp_path: Path) -> None:
+    """The same digest-bound base-wheel journey preserves retained local behavior."""
+    runner = _load_runner()
+    artifact = runner.build_wheel(tmp_path / "dist")
+
+    result = runner.run_base_probe(artifact, workspace=tmp_path / "probe")
+
+    assert artifact.sha256 == runner._wheel_sha256(artifact.path)
+    assert result.requirement == str(artifact.path)
+    assert result.probes == (
+        "public_exports",
+        "blobstore_generic",
+        "blobstore_numpy_pickle",
+        "blobstore_numpy_npz",
+        "unified_cache_generic",
+    )

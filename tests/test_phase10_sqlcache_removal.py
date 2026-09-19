@@ -43,7 +43,6 @@ RETIRED_EXAMPLE_PATHS = (
 EXPECTED_OPTIONAL_GROUPS = (
     "recommended",
     "dataframes",
-    "tensorflow",
     "s3",
     "postgresql",
     "cloud",
@@ -285,7 +284,7 @@ def test_package_version_remains_unchanged() -> None:
 
 
 def test_manifest_lock_dependency_contract() -> None:
-    """DuckDB and the retired dependency group vanish without pruning retained extras."""
+    """Retired dependency surfaces vanish without pruning retained extras."""
     project_path = PROJECT_ROOT / "pyproject.toml"
     project_source = project_path.read_text(encoding="utf-8")
     project = tomllib.loads(project_source)
@@ -298,6 +297,8 @@ def test_manifest_lock_dependency_contract() -> None:
     assert "sql" not in dependency_groups
     assert "duckdb" not in project_source.casefold()
     assert "duckdb" not in lock_source.casefold()
+    assert "tensorflow" not in project_source.casefold()
+    assert "tensorflow" not in lock_source.casefold()
     assert "sqlalchemy>=2.0.0" in optional["recommended"]
     assert "sqlalchemy>=2.0.0" in optional["postgresql"]
     assert "psycopg[binary]>=3.1.0" in optional["postgresql"]
