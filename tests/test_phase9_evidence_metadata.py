@@ -2,6 +2,9 @@
 
 from pathlib import Path
 import re
+import subprocess
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -64,6 +67,158 @@ FROZEN_NON_LIVE_COMMAND = (
 )
 ORIGINAL_AUDITED = "2026-09-17T19:16:14Z"
 ORIGINAL_AUDITED_HEAD = "6c8e235721151111b81c69ffe6446412dc0ef803"
+PROTECTED_TREE_PATHS = (
+    "README.md",
+    "AGENTS.md",
+    "docs/",
+    ".github/workflows/",
+    "src/",
+    "tests/",
+    "tools/",
+    "examples/",
+    "pyproject.toml",
+    "uv.lock",
+    ".planning/codebase/",
+    ".planning/REQUIREMENTS.md",
+)
+
+
+def _fixture_git(repository: Path, *arguments: str) -> str:
+    """Run Git for an isolated provenance fixture."""
+
+    result = subprocess.run(
+        ["git", *arguments],
+        cwd=repository,
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    return result.stdout.strip()
+
+
+def _commit_fixture(repository: Path, message: str) -> str:
+    """Commit current fixture changes and return its immutable Git identity."""
+
+    _fixture_git(repository, "add", ".")
+    _fixture_git(repository, "commit", "-qm", message)
+    return _fixture_git(repository, "rev-parse", "HEAD")
+
+
+def _qualified_fixture(tmp_path: Path) -> tuple[Path, str, str]:
+    """Create a clean protected tree and one later qualified source revision."""
+
+    repository = tmp_path / "qualified-source"
+    repository.mkdir()
+    _fixture_git(repository, "init", "-q")
+    _fixture_git(repository, "config", "user.email", "fixture@example.invalid")
+    _fixture_git(repository, "config", "user.name", "Provenance Fixture")
+
+    for relative_path in PROTECTED_TREE_PATHS:
+        path = repository / relative_path.rstrip("/")
+        if relative_path.endswith("/"):
+            path /= "fixture.txt"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("base\n", encoding="utf-8")
+    base_revision = _commit_fixture(repository, "base protected tree")
+
+    (repository / "README.md").write_text("qualified\n", encoding="utf-8")
+    qualified_revision = _commit_fixture(repository, "qualified source tree")
+    return repository, base_revision, qualified_revision
+
+
+def test_qualified_source_provenance_accepts_artifact_only_commit_before_audit(
+    tmp_path: Path,
+) -> None:
+    """Planning artifacts may follow qualified source while the audit remains stale."""
+
+    repository, stale_audit_head, qualified_revision = _qualified_fixture(tmp_path)
+    artifact = repository / ".planning/phases/11/11-VALIDATION.md"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text("recorded later\n", encoding="utf-8")
+    _commit_fixture(repository, "record validation artifact")
+
+    _assert_qualified_source_tree(repository, qualified_revision)
+    with pytest.raises(AssertionError):
+        _assert_refreshed_audit_provenance(
+            repository,
+            qualified_revision,
+            stale_audit_head,
+        )
+    _assert_refreshed_audit_provenance(
+        repository,
+        qualified_revision,
+        qualified_revision,
+    )
+
+
+@pytest.mark.parametrize("revision", ("not-a-revision", "a" * 39, "a" * 41))
+def test_qualified_source_provenance_rejects_malformed_revision(
+    tmp_path: Path,
+    revision: str,
+) -> None:
+    """A qualification record requires exactly one full Git commit identity."""
+
+    repository, _base_revision, _qualified_revision = _qualified_fixture(tmp_path)
+
+    with pytest.raises(AssertionError):
+        _assert_qualified_source_tree(repository, revision)
+
+
+def test_qualified_source_provenance_rejects_nonancestor_revision(
+    tmp_path: Path,
+) -> None:
+    """A syntactically valid commit must still lead to the checked-out tree."""
+
+    repository, _base_revision, _qualified_revision = _qualified_fixture(tmp_path)
+    unrelated_revision = _fixture_git(
+        repository,
+        "commit-tree",
+        _fixture_git(repository, "write-tree"),
+        "-m",
+        "unrelated root",
+    )
+
+    with pytest.raises(AssertionError):
+        _assert_qualified_source_tree(repository, unrelated_revision)
+
+
+@pytest.mark.parametrize("protected_path", PROTECTED_TREE_PATHS)
+def test_qualified_source_provenance_rejects_protected_committed_drift(
+    tmp_path: Path,
+    protected_path: str,
+) -> None:
+    """Later docs, CI, source, tooling, test, and package drift invalidates a run."""
+
+    repository, _base_revision, qualified_revision = _qualified_fixture(tmp_path)
+    changed_path = repository / protected_path.rstrip("/")
+    if protected_path.endswith("/"):
+        changed_path /= "later.txt"
+    changed_path.parent.mkdir(parents=True, exist_ok=True)
+    changed_path.write_text("changed after qualification\n", encoding="utf-8")
+    _commit_fixture(repository, "change protected path")
+
+    with pytest.raises(AssertionError):
+        _assert_qualified_source_tree(repository, qualified_revision)
+
+
+@pytest.mark.parametrize("state", ("staged", "unstaged", "untracked"))
+def test_qualified_source_provenance_rejects_dirty_protected_paths(
+    tmp_path: Path,
+    state: str,
+) -> None:
+    """Protected staged, unstaged, and untracked paths cannot piggyback a pass."""
+
+    repository, _base_revision, qualified_revision = _qualified_fixture(tmp_path)
+    dirty_path = repository / "docs/dirty.md"
+    if state != "untracked":
+        dirty_path = repository / "docs/fixture.txt"
+    dirty_path.write_text("dirty\n", encoding="utf-8")
+    if state == "staged":
+        _fixture_git(repository, "add", str(dirty_path.relative_to(repository)))
+
+    with pytest.raises(AssertionError):
+        _assert_qualified_source_tree(repository, qualified_revision)
 
 
 def _frontmatter(document: str) -> str:
