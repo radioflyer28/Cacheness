@@ -1,6 +1,6 @@
 ---
 phase: 11-clean-supplemental-documentation-and-normalize-validation-ev
-verified: 2026-09-19T23:03:31Z
+verified: 2026-09-19T23:47:45Z
 status: gaps_found
 score: 4/5 must-haves verified
 behavior_unverified: 0
@@ -9,70 +9,67 @@ decision_coverage:
   honored: 20
   total: 20
   not_honored: []
+re_verification:
+  previous_status: gaps_found
+  previous_score: 4/5
+  gaps_closed:
+    - "Post-review validation and current audit now identify the same qualified source revision with no later protected-tree drift."
+  gaps_remaining: []
+  regressions: []
 gaps:
-  - truth: "Focused contracts, scoped Ruff, lock freshness, a fresh source-free wheel, and one frozen non-live suite pass before the milestone audit derives and records its current verdict."
+  - truth: "The refreshed milestone-audit contract fails closed when qualified-source provenance is absent, stale, or changed."
     status: failed
-    reason: "The audit's audited_head is 1424ce47cb824aa4a37eea4e2d461a50c5d3ea74, before post-review source/CI changes 0a515e5 and ca31e63. The recorded layered pre-audit acceptance qualified the earlier tree. A later exact frozen non-live suite and lock check passed on the final tree, but 11-VALIDATION.md and the passed audit have not incorporated that post-review evidence or derived a verdict for the changed tree."
+    reason: "The current records agree, but both final selectors use an optional qualified_source_revision lookup; removing the field skips Git ancestry, protected-tree cleanliness, and audited_head equality checks, so a provenance-less refreshed audit would pass."
     artifacts:
-      - path: .planning/phases/11-clean-supplemental-documentation-and-normalize-validation-ev/11-VALIDATION.md
-        issue: "Acceptance evidence predates the review fixes and has no post-review qualification addendum or source identity."
-      - path: .planning/v1.0-v1.0-MILESTONE-AUDIT.md
-        issue: "audited_head predates the release-guide and normal-CI packaging fixes while the prose calls the verdict current."
       - path: tests/test_phase9_evidence_metadata.py
-        issue: "Audit parser only requires audited_head to differ from the original head; it does not bind the head to the qualified final source tree."
+        issue: "Lines 504-509 and 537-547 condition all source-provenance assertions on field presence; no missing-field negative test exists."
     missing:
-      - "Record the post-review exact frozen non-live result, lock check, and focused CR-01/WR-01 checks in 11-VALIDATION.md with the revision they qualify; confirm the fresh-wheel and scoped-Ruff evidence still applies to the final tree or rerun those bounded gates."
-      - "Re-derive the audit after that evidence, update audited timestamp/head and verdict for the qualified tree, then run its focused parser."
+      - "Require qualified_source_revision in the refreshed-audit branch and always run _assert_refreshed_audit_provenance there, while preserving the historical pre-qualification transition."
+      - "Add a negative regression case for a refreshed audit with the qualified revision field removed."
 ---
 
-# Phase 11: Clean Supplemental Documentation and Normalize Validation Evidence — Verification
+# Phase 11: Clean Supplemental Documentation and Normalize Validation Evidence — Re-verification
 
-**Phase goal:** Close the milestone's supplemental-documentation and validation-evidence debt, remove dormant TensorFlow across current surfaces, and derive a bounded local milestone verdict without reopening lifecycle or concurrency implementation.
+**Phase goal:** Close supplemental-documentation and validation-evidence debt, remove dormant TensorFlow, and derive a bounded local milestone verdict without reopening lifecycle or concurrency implementation.
 
-**Status:** gaps_found — one provenance BLOCKER; the product cutover and bounded local checks otherwise hold.
-**Re-verification:** No previous Phase 11 verification existed.
+**Status:** gaps_found — the prior stale-audit gap is closed in the present tree, but its claimed fail-closed contract is incomplete.
 
 ## Goal Achievement
 
-| # | Roadmap success criterion | Status | Codebase evidence |
+| # | Roadmap success criterion | Status | Independent evidence |
 |---|---|---|---|
-| 1 | TensorFlow is naturally unreachable across runtime, package, CI, docs, and maps; retained journeys remain green | VERIFIED | Current `src/`, `pyproject.toml`, `uv.lock`, `.github/`, `tools/`, `docs/`, `examples/`, `.planning/codebase/`, and `AGENTS.md` have no TensorFlow references. The dedicated handler test is absent; the literal five-extra package inventory and source-free wheel/installed-round-trip tests exist in `tests/packaging/test_wheel_matrix.py`. The final non-live suite passed after the review fixes. |
-| 2 | Verified supplements are consolidated, redundant guides deleted, four canonical executable examples remain | VERIFIED | All six specified supplemental guides are absent. `docs/API_REFERENCE.md` owns the concise pandas/Parquet note; `docs/RELEASE_QUALIFICATION.md` owns platform and nonclaims. `examples/` has exactly four `.py` examples, and the exact-disposition/current-link contract passed. |
-| 3 | Finite Phase 3 integrity/recovery gate and honest direct provenance, approved scope, ADR stop/nonclaims | VERIFIED | `03-VALIDATION.md` names `5282dca`, direct primary-agent qualification without independent verifier, SQLite/local-filesystem plus single-process memory scope, ADR classes, and 50-pass finite six-file confirmation. No post-audit changes touch `src/cacheness/` lifecycle code. |
-| 4 | Canonical validation discovery for Phases 1/3/5/6/7/8/9/11 and explicit nonpassing deferrals | VERIFIED | All eight requested records have `status: validated`, `nyquist_compliant: true`, and `wave_0_complete: true`; the current evidence-discovery contract and audit parser pass. `REQUIREMENTS.md` leaves BACK-05 and QUAL-06 unchecked; release guide and audit retain live-service, controlled-Linux, Windows, and `NOT_PUBLISHED` nonclaims. |
-| 5 | Layered final-tree acceptance precedes a current milestone-audit verdict | FAILED — BLOCKER | Pre-audit 111-test focused cluster, 50-test Phase 3 gate, Ruff, wheel, lock, and frozen non-live suite are recorded for the earlier tree. Review fixes `0a515e5` and `ca31e63` changed release guidance/tests and ordinary CI/tests afterward. The orchestrator then reran the exact frozen non-live suite (exit 0, 100%, three expected skips, one collection warning) and `uv lock --check` (exit 0), but the validation/audit record still predates those fixes; `audited_head` is `1424ce4`. |
+| 1 | TensorFlow absent across runtime/package/CI/docs/maps; retained journeys green | VERIFIED | Current `src/`, `pyproject.toml`, `uv.lock`, `.github/`, `tools/`, `docs/`, `examples/`, `.planning/codebase/`, `README.md`, and `AGENTS.md` have no TensorFlow reference. `pyproject.toml` has five extras. Qualified-wheel and local store/cache tests are recorded. |
+| 2 | Supplements consolidated/deleted; four canonical executable examples | VERIFIED | Six retired guides remain absent; `docs/API_REFERENCE.md` and `docs/RELEASE_QUALIFICATION.md` own surviving guidance; `examples/` contains exactly four Python examples. No protected-tree drift since previous passing checks. |
+| 3 | Finite Phase 3 gate and honest direct provenance/nonclaims | VERIFIED | `03-VALIDATION.md` remains canonical, names direct primary-agent qualification at `5282dca`, local SQLite/filesystem and one-process memory scope, ADR 0001 stop rule, and the 50-pass finite gate. No later lifecycle edit exists. |
+| 4 | Canonical validation discovery and explicit nonpassing deferrals | VERIFIED | Phase 1/3/5/6/7/8/9/11 records have `status: validated`, `nyquist_compliant: true`, and `wave_0_complete: true`. `REQUIREMENTS.md` leaves BACK-05 and QUAL-06 unchecked; audit and release guide retain external/platform/publication nonclaims. |
+| 5 | Layered final-tree acceptance precedes an evidence-derived current audit | FAILED — BLOCKER (guard only) | `11-VALIDATION.md` records a post-review run at `450aa77ae12081aa17317c2eea8c633d38242ed7`; audit `audited_head` matches exactly, and later commits touch planning/evidence only. The two named selectors pass. However, both accept a missing qualified revision and skip their only provenance assertions, contrary to Plans 11-11/11-12's strict-parser contract. |
 
-**Score:** 4/5 verified; 0 present-but-behavior-unverified.
+**Score:** 4/5; zero behavior-unverified truths. Actual current audit identity is correct. The blocker is a newly exposed test-quality hole, not observed source drift.
 
-## Artifact and Wiring Checks
+## Artifact and Key-Link Verification
 
-The ten PLAN artifact queries report 24/24 existing, substantive artifacts; their key-link queries report 20/20 linked patterns. Manual checks found real use rather than mere names: `quality.yml` invokes the core-only platform path and, after `ca31e63`, the five-extra packaging path on normal Python 3.13 CI; the release guide's exact frozen non-live command is asserted by `test_full_suite_environment.py`; the installed-wheel test binds one wheel artifact through archive, metadata, imports, and BlobStore/UnifiedCache round trips. Documentation/evidence artifacts have no dynamic rendered data, so Level 4 UI data-flow tracing is not applicable. The audit-to-qualified-source identity link is nevertheless incomplete as stated in gap 1.
+GSD focused queries report 3/3 Plan 11-11/11-12 artifacts substantive and 4/4 links syntactically present. Manual checks confirm validation and audit frontmatter both name the same 40-character revision; `git merge-base --is-ancestor 450aa77... HEAD` exits 0. `git diff --name-only 450aa77..HEAD` lists only `.planning/ROADMAP.md`, `.planning/STATE.md`, gap-plan summaries, Phase 11 validation, and milestone audit. No staged or unstaged protected change exists. The untracked `.claude/` worktree and `.planning/milestone.lock` are outside the protected inventory and were untouched. Semantic strictness fails as described; pattern-only link checks cannot close it. Rendered-data flow tracing is inapplicable to docs and tests.
 
 ## Behavioral Spot-Checks and Test Quality
 
 | Check | Result |
 |---|---|
-| `uv lock --check` | Exit 0, 95 packages resolved. |
-| Exact current documentation disposition, normal-CI packaging, and refreshed-audit named tests | 3 selected tests passed on the final tree. |
-| Exact frozen non-live suite on the post-review tree | Orchestrator-observed exit 0 at 100%, three expected skips and one collection warning; this verifier did not rerun the full suite. |
-| `11-VALIDATION.md` pre-audit gate | Records 111 focused passes, 50 finite Phase 3 passes, scoped Ruff, lock and fresh source-free wheel, and one earlier frozen non-live exit 0. |
+| `uv run --isolated --all-extras --group dev --frozen pytest -q tests/test_phase9_evidence_metadata.py::test_phase11_validation_record_matches_final_acceptance_evidence tests/test_phase9_evidence_metadata.py::test_phase11_refreshed_milestone_audit_is_evidence_derived` | 2 passed. |
+| Git ancestry and protected-tree comparison from qualified revision | Ancestor exit 0; later tracked changes planning/evidence only. |
+| Post-review acceptance record | Wheel/metadata/local journeys: 28 passed; provenance cases: 20 passed; scoped Ruff, lock, CR-01/WR-01 selectors: pass; frozen non-live suite: exit 0 at 100%, three expected skips and one known collection warning. The full suite was not rerun by this verifier. |
 
-No disabled/skipped requirement-linked test or circular expected-value generator was found in the inspected Phase 11 contract files. The refreshed-audit test's assertion strength is insufficient for current-source provenance: it checks only `audited_head != ORIGINAL_AUDITED_HEAD`, so it passes with a stale head. This is the misleading passing test, not evidence that the current verdict is bound to the post-review tree. No phase-declared shell probe was found; the named pytest contracts are the executable checks.
+No requirement-linked test is disabled or circular. Temporary-Git cases assert malformed/nonancestor revisions, committed/dirty protected drift, and stale audited heads. The misleading tests are the two named final-evidence selectors: `_optional_frontmatter_value(..., "qualified_source_revision")` followed by `if qualified_source_revision is not None` means absence bypasses the entire provenance assertion. Historical pre-qualification permissiveness was intentional; the refreshed audit must be fail-closed. No phase-declared shell probe exists.
 
-## Decisions, Requirements, and Nonclaims
+## Decisions, Requirements, Nonclaims, and Anti-Patterns
 
-The decision-coverage gate reports 20/20 D-01–D-20 decisions honored by shipped artifacts. This warning-only heuristic does not override the independently observed audit-provenance gap. Phase 11 has no newly mapped requirement IDs; `REQUIREMENTS.md` retains 42 satisfied in-scope requirements and two explicitly deferred ones (BACK-05, QUAL-06). Native Windows and immutable publication also remain nonpassing. No later phase in the current milestone specifically owns re-deriving the Phase 11 audit after these review fixes, so the gap is not deferred.
+The warning-only decision-coverage gate reports 20/20 D-01–D-20 decisions honored. Phase 11 has no new product requirement IDs. The audit's 42/42 in-scope, 12 canonical records, 7/7 integration points, and 8/8 flows are internally consistent with present local evidence; BACK-05, QUAL-06, live services, controlled-Linux, native Windows, and immutable publication remain explicitly nonpassing. No unreferenced `TBD`, `FIXME`, or `XXX` marker was found in the new provenance test, validation record, or audit. No later phase owns this exact strict-parser repair.
 
-## Anti-Patterns and Human Verification
+## Human Verification and Gap Summary
 
-No unreferenced `TBD`, `FIXME`, or `XXX` markers were found in the inspected changed production, tooling, documentation, CI, and contract files. The audit parser's weak provenance assertion is a BLOCKER because it permits a stale current verdict to look green. Human verification is N/A: this is a documentation/package/CI foundation phase with no user-facing visual flow; the gap has a deterministic evidence-and-audit remedy.
-
-## Gap Summary
-
-The implementation appears sound within the declared local boundary, but the final milestone verdict is not demonstrably derived from the final post-review tree. Preserve the historical one-run acceptance result, append the later exact-suite and scoped fix evidence with a qualified revision, confirm any remaining affected wheel/Ruff gates, then re-derive the audit at the qualified head. Do not turn this bookkeeping repair into a lifecycle change or promote BACK-05, QUAL-06, Windows, or publication.
+Human verification is N/A: this is a documentation/package/CI foundation phase and the remaining failure has a deterministic regression test. Require the source revision when the audit is refreshed, add its missing-field negative case, and rerun only focused evidence selectors and scoped Ruff. Do not repeat the full suite unless protected source/tests change; preserve ADR 0001 and all deferred qualification claims.
 
 ---
 
-_Verified: 2026-09-19T23:03:31Z_  
+_Verified: 2026-09-19T23:47:45Z_  
 _Verifier: gsd-verifier_  
 _Not committed._
