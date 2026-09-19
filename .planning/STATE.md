@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 11
 current_phase_name: Clean supplemental documentation and normalize validation evidence
 status: executing
-stopped_at: Completed 11-03-PLAN.md
-last_updated: "2026-09-19T17:56:37.766Z"
+stopped_at: Completed 11-05-PLAN.md
+last_updated: "2026-09-19T18:04:42.756Z"
 last_activity: 2026-09-19
 last_activity_desc: Phase 11 execution started
-state_head: 99ca0e8bb80b197d9ad67d9ff50cee50aaac7509
+state_head: 787746488b116b0300a78015c279911c8c055c98
 progress:
   total_phases: 12
   completed_phases: 10
   total_plans: 163
-  completed_plans: 155
+  completed_plans: 156
 milestone_name: milestone
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-09-17)
 ## Current Position
 
 Phase: 11 (Clean supplemental documentation and normalize validation evidence) — EXECUTING
-Plan: 4 of 10
+Plan: 5 of 10
 Status: Ready to execute
 Last activity: 2026-09-19 — Phase 11 execution started
 
@@ -243,6 +243,7 @@ Raw file counts include superseded plans and therefore are not completion claims
 | Phase 11 P01 | 8m 36s | 2 tasks | 3 files |
 | Phase 11 P02 | 12m | 2 tasks | 5 files |
 | Phase 11 P03 | 15m 2s | 2 tasks | 10 files |
+| Phase 11 P05 | 4m 23s | 2 tasks | 10 files |
 
 ## Accumulated Context
 
@@ -586,6 +587,9 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - [Phase 11]: Removed the dormant TensorFlow handler and persisted identity directly; unsupported identities use ordinary registry lookup failure.
 - [Phase 11]: Retained exactly recommended, dataframes, s3, postgresql, and cloud as published extras, with dev only as a local dependency group.
 - [Phase 11]: Kept one digest-bound WheelArtifact and retained BlobStore/UnifiedCache local probes as the package qualification authority.
+- [Phase 11]: Release qualification is the sole detailed owner of the locked complete-suite command and all platform/nonpublication nonclaims.
+- [Phase 11]: Only concise, test-backed pandas Parquet behavior survives; catalog and TensorFlow supplements are deleted directly.
+- [Phase 11]: Documentation navigation names the four literal executable examples instead of duplicating runnable snippets.
 
 ### Pending Todos
 
@@ -624,6 +628,6 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 
 ## Session Continuity
 
-Last session: 2026-09-19T17:56:37.522Z
-Stopped at: Completed 11-03-PLAN.md
+Last session: 2026-09-19T18:04:42.508Z
+Stopped at: Completed 11-05-PLAN.md
 Resume file: None

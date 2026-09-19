@@ -760,7 +760,7 @@ Plans:
 4. Phase 1, 3, 5, 6, 7, 8, 9, and 11 validation records discover canonically with green or explicitly superseded evidence, while BACK-05, QUAL-06, native Windows, and immutable publication remain nonpassing deferrals.
 5. Focused contracts, scoped Ruff, lock freshness, a fresh source-free wheel, and one frozen non-live suite pass before the milestone audit derives and records its current verdict.
 
-**Plans:** 3/10 plans executed
+**Plans:** 4/10 plans executed
 
 Plans:
 **Wave 1**
@@ -771,7 +771,7 @@ Plans:
 **Wave 2** *(blocked on Wave 1 completion)*
 
 - [x] 11-03-PLAN.md — Remove TensorFlow runtime/config/export/package/lock/packaging surfaces.
-- [ ] 11-05-PLAN.md — Consolidate verified supplemental guidance and delete stale guides.
+- [x] 11-05-PLAN.md — Consolidate verified supplemental guidance and delete stale guides.
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
