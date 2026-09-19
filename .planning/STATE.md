@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 11
 current_phase_name: Clean supplemental documentation and normalize validation evidence
 status: executing
-stopped_at: Completed 11-06-PLAN.md
-last_updated: "2026-09-19T18:24:46.214Z"
+stopped_at: Completed 11-07-PLAN.md
+last_updated: "2026-09-19T18:39:45.885Z"
 last_activity: 2026-09-19
 last_activity_desc: Phase 11 execution started
-state_head: bdeffbc1894351b5b6f922039b9482f7b6de7c1a
+state_head: 6ab640f1dfbf94336a263dda21299916e3e2c1d4
 progress:
   total_phases: 12
   completed_phases: 10
   total_plans: 163
-  completed_plans: 158
+  completed_plans: 159
 milestone_name: milestone
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-09-17)
 ## Current Position
 
 Phase: 11 (Clean supplemental documentation and normalize validation evidence) — EXECUTING
-Plan: 7 of 10
+Plan: 8 of 10
 Status: Ready to execute
 Last activity: 2026-09-19 — Phase 11 execution started
 
@@ -246,6 +246,7 @@ Raw file counts include superseded plans and therefore are not completion claims
 | Phase 11 P05 | 4m 23s | 2 tasks | 10 files |
 | Phase 11-clean-supplemental-documentation-and-normalize-validation-ev P04 | 4m 42s | 2 tasks | 4 files |
 | Phase 11 P06 | 4m 25s | 2 tasks | 1 files |
+| Phase 11 P07 | 8m | 2 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -596,6 +597,8 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - [Phase 11]: Retain the quality workflow boundaries while removing the TensorFlow-only CI path.
 - [Phase 11]: Phase 11 Plan 06: The finite Phase 3 gate is scoped evidence only and cannot authorize lifecycle repair.
 - [Phase 11]: Phase 11 Plan 06: Canonical Phase 3 provenance remains user-approved direct_primary_agent at 5282dca with no independent verifier claim.
+- [Phase 11]: Current guidance names only the literal five-extra manifest surface; BlobStore authority and qualification limits remain unchanged.
+- [Phase 11]: SEED-005 is fulfilled in place with Phase 8 rationale retained as history and promotion fields removed.
 
 ### Pending Todos
 
@@ -634,6 +637,6 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 
 ## Session Continuity
 
-Last session: 2026-09-19T18:24:45.958Z
-Stopped at: Completed 11-06-PLAN.md
+Last session: 2026-09-19T18:39:44.562Z
+Stopped at: Completed 11-07-PLAN.md
 Resume file: None
