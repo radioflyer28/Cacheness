@@ -106,7 +106,6 @@ def _envelope_bytes(evidence_class: str, revision: str) -> bytes:
                 "optional_groups": [
                     "recommended",
                     "dataframes",
-                    "tensorflow",
                     "s3",
                     "postgresql",
                     "cloud",
@@ -114,7 +113,6 @@ def _envelope_bytes(evidence_class: str, revision: str) -> bytes:
                 "compatibility": [
                     "recommended:COMPATIBLE",
                     "dataframes:COMPATIBLE",
-                    "tensorflow:COMPATIBLE",
                     "s3:COMPATIBLE",
                     "postgresql:COMPATIBLE",
                     "cloud:COMPATIBLE",
