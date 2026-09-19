@@ -10,7 +10,6 @@ Available handlers:
 - DataFrameHandler: Pandas/Polars DataFrames in Parquet format
 - ObjectHandler: Generic Python objects via pickle/dill
 - SeriesHandler: Pandas Series
-- TensorHandler: TensorFlow tensors (optional)
 
 Usage:
     from cacheness.storage.handlers import HandlerRegistry, ArrayHandler
@@ -61,12 +60,6 @@ try:
 except ImportError:
     _HAS_POLARS = False
 
-try:
-    from cacheness.handlers import TensorFlowTensorHandler
-    _HAS_TENSORFLOW = True
-except ImportError:
-    _HAS_TENSORFLOW = False
-
 __all__ = [
     # Base interfaces
     "FormatHandler",
@@ -92,6 +85,3 @@ if _HAS_PANDAS:
 
 if _HAS_POLARS:
     __all__.append("PolarsDataFrameHandler")
-
-if _HAS_TENSORFLOW:
-    __all__.append("TensorFlowTensorHandler")

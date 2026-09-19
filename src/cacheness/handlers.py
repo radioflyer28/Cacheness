@@ -73,36 +73,6 @@ except ImportError:
     dill = None  # type: ignore
     DILL_AVAILABLE = False
 
-# Optional dependency - TensorFlow for tensor compression (completely lazy loaded)
-TENSORFLOW_AVAILABLE = False
-tf = None
-_tensorflow_import_attempted = False
-
-def _lazy_import_tensorflow():
-    """Lazy import TensorFlow to avoid slow startup times and system issues."""
-    global tf, TENSORFLOW_AVAILABLE, _tensorflow_import_attempted
-    
-    if _tensorflow_import_attempted:
-        return tf, TENSORFLOW_AVAILABLE
-        
-    _tensorflow_import_attempted = True
-    
-    try:
-        import tensorflow as tf_module
-        tf = tf_module
-        TENSORFLOW_AVAILABLE = True
-        logger.debug("TensorFlow successfully imported")
-    except ImportError:
-        tf = None
-        TENSORFLOW_AVAILABLE = False
-        logger.debug("TensorFlow not available (ImportError)")
-    except Exception as e:
-        tf = None
-        TENSORFLOW_AVAILABLE = False
-        logger.warning(f"TensorFlow import failed with unexpected error: {e}")
-    
-    return tf, TENSORFLOW_AVAILABLE
-
 logger = logging.getLogger(__name__)
 
 
@@ -770,156 +740,6 @@ class ArrayHandler(FormatHandler):
         return "array"
 
 
-class TensorFlowTensorHandler(FormatHandler):
-    """Handler for TensorFlow tensors using blosc2.save_tensor/load_tensor."""
-
-    @property
-    def payload_format(self) -> str:
-        """Return the native Blosc2 tensor container identifier."""
-        return "blosc2_tensor"
-
-    def can_handle(self, data: Any) -> bool:
-        """Check if data is a TensorFlow tensor that can be cached."""
-        # Quick check for obviously non-tensor types before importing TensorFlow
-        if isinstance(data, (str, int, float, bool, list, tuple, dict)):
-            return False
-        
-        # Also exclude numpy arrays (they have their own handler)
-        if hasattr(data, '__array__') and hasattr(data, 'dtype'):
-            # This is likely a numpy array or similar
-            return False
-        
-        # Only import TensorFlow if we have a potential tensor-like object
-        tf_module, tf_available = _lazy_import_tensorflow()
-        if not tf_available or tf_module is None:
-            return False
-        if not BLOSC2_AVAILABLE or blosc2 is None:
-            return False
-        
-        # Check if it's a TensorFlow tensor (EagerTensor, Variable, etc.)
-        try:
-            return isinstance(data, (tf_module.Tensor, tf_module.Variable))
-        except Exception:
-            return False
-
-    def put(self, data: Any, file_path: Path, config: Any) -> Dict[str, Any]:
-        """Store TensorFlow tensor using blosc2.save_tensor with proper error handling."""
-        tf_module, tf_available = _lazy_import_tensorflow()
-        if not tf_available or tf_module is None:
-            raise CacheWriteError(
-                "TensorFlow not available for storing tensor",
-                handler_type="tensorflow_tensor",
-                data_type=type(data).__name__,
-            )
-            
-        with cache_operation_context(
-            "store_tensorflow_tensor", 
-            shape=data.shape.as_list() if hasattr(data.shape, 'as_list') else str(data.shape),
-            dtype=str(data.dtype)
-        ):
-            try:
-                # Convert to tensor if it's a Variable
-                if isinstance(data, tf_module.Variable):
-                    tensor_data = data.value()
-                else:
-                    tensor_data = data
-
-                b2tr_path = file_path.with_suffix("").with_suffix(".b2tr")
-                
-                logger.debug(
-                    f"Writing TensorFlow tensor to {b2tr_path} with blosc2 compression"
-                )
-                
-                # Use blosc2.save_tensor for optimized tensor storage
-                blosc2.save_tensor(
-                    tensor_data.numpy(),  # Convert to numpy for blosc2
-                    str(b2tr_path),
-                    cparams={
-                        'clevel': config.compression.blosc2_array_clevel,
-                        'codec': getattr(
-                            blosc2.Codec,
-                            config.compression.blosc2_array_codec.upper(),
-                            blosc2.Codec.LZ4,
-                        ),
-                    }
-                )
-
-                file_size = b2tr_path.stat().st_size
-                logger.debug(
-                    f"TensorFlow tensor written successfully: {file_size} bytes"
-                )
-
-                return {
-                    "storage_format": "blosc2_tensor",
-                    "payload_format": self.payload_format,
-                    "payload_format_version": self.payload_format_version,
-                    "file_size": file_size,
-                    "actual_path": str(b2tr_path),
-                    "metadata": {
-                        "shape": tensor_data.shape.as_list() if hasattr(tensor_data.shape, 'as_list') else list(tensor_data.shape),
-                        "dtype": str(tensor_data.dtype),
-                        "storage_format": "blosc2_tensor",
-                        "compression": config.compression.blosc2_array_codec,
-                        "was_variable": isinstance(data, tf_module.Variable),
-                    },
-                }
-
-            except Exception as e:
-                raise CacheWriteError(
-                    f"Failed to write TensorFlow tensor with blosc2: {e}",
-                    handler_type="tensorflow_tensor",
-                    data_type=type(data).__name__,
-                ) from e
-
-    def get(self, file_path: Path, metadata: Dict[str, Any]) -> Any:
-        """Load TensorFlow tensor from blosc2 tensor file with proper error handling."""
-        tf_module, tf_available = _lazy_import_tensorflow()
-        
-        with cache_operation_context("load_tensorflow_tensor", file_path=str(file_path)):
-            try:
-                if not tf_available or tf_module is None:
-                    raise CacheReadError(
-                        "TensorFlow not available for loading tensor",
-                        handler_type="tensorflow_tensor",
-                    )
-                
-                if not BLOSC2_AVAILABLE or blosc2 is None:
-                    raise CacheReadError(
-                        "blosc2 not available for loading tensor",
-                        handler_type="tensorflow_tensor",
-                    )
-
-                logger.debug(f"Reading TensorFlow tensor from {file_path}")
-                
-                # Load tensor using blosc2.load_tensor
-                numpy_array = blosc2.load_tensor(str(file_path))
-                
-                # Convert numpy array back to TensorFlow tensor
-                tensor = tf_module.constant(numpy_array)
-                
-                # If it was originally a Variable, convert back to Variable
-                if metadata.get("metadata", {}).get("was_variable", False):
-                    tensor = tf_module.Variable(tensor)
-                
-                logger.debug(f"Loaded TensorFlow tensor with shape {tensor.shape}")
-                return tensor
-
-            except Exception as e:
-                raise CacheReadError(
-                    f"Failed to load TensorFlow tensor from {file_path}: {e}",
-                    handler_type="tensorflow_tensor",
-                ) from e
-
-    def get_file_extension(self, config: Any) -> str:
-        """Return the file extension for TensorFlow tensor files."""
-        return "b2tr"
-
-    @property
-    def data_type(self) -> str:
-        """Return the data type handled by this handler."""
-        return "tensorflow_tensor"
-
-
 class ObjectHandler(FormatHandler):
     """Handler for general Python objects using compressed pickle."""
 
@@ -1291,14 +1111,6 @@ class HandlerRegistry:
             if PANDAS_AVAILABLE:
                 self.handlers.append(PandasDataFrameHandler())
 
-        # Add other handlers
-        # Note: TensorFlow handler disabled due to system compatibility issues
-        # if self._should_enable_handler("tensorflow_tensors", config):
-        #     # Check availability with lazy loading
-        #     _, tf_available = _lazy_import_tensorflow()
-        #     if tf_available and BLOSC2_AVAILABLE:
-        #         self.handlers.append(TensorFlowTensorHandler())
-
         if self._should_enable_handler("numpy_arrays", config):
             self.handlers.append(ArrayHandler())
 
@@ -1320,10 +1132,6 @@ class HandlerRegistry:
             "pandas_dataframes": lambda: PandasDataFrameHandler()
             if PANDAS_AVAILABLE
             else None,
-            # Note: TensorFlow handler disabled due to system compatibility issues
-            # "tensorflow_tensors": lambda: TensorFlowTensorHandler()
-            # if _lazy_import_tensorflow()[1] and BLOSC2_AVAILABLE
-            # else None,
             "numpy_arrays": lambda: ArrayHandler(),
             "object_pickle": lambda: ObjectHandler(),
         }
@@ -1359,7 +1167,6 @@ class HandlerRegistry:
             "pandas_series": "enable_pandas_series",
             "polars_dataframes": "enable_polars_dataframes",
             "pandas_dataframes": "enable_pandas_dataframes",
-            "tensorflow_tensors": "enable_tensorflow_tensors",
             "numpy_arrays": "enable_numpy_arrays",
             "object_pickle": "enable_object_pickle",
         }
@@ -1602,7 +1409,7 @@ class HandlerRegistry:
         """
         builtin_types = {
             "polars_dataframe", "pandas_dataframe", "polars_series", "pandas_series",
-            "numpy_array", "object", "tensorflow_tensor"
+            "numpy_array", "object"
         }
         
         result = []
