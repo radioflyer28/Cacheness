@@ -83,8 +83,8 @@ PROTECTED_TREE_PATHS = (
 )
 
 
-def _fixture_git(repository: Path, *arguments: str) -> str:
-    """Run Git for an isolated provenance fixture."""
+def _git_output(repository: Path, *arguments: str) -> str:
+    """Run a read-only-or-fixture Git command and return its standard output."""
 
     result = subprocess.run(
         ["git", *arguments],
@@ -100,9 +100,9 @@ def _fixture_git(repository: Path, *arguments: str) -> str:
 def _commit_fixture(repository: Path, message: str) -> str:
     """Commit current fixture changes and return its immutable Git identity."""
 
-    _fixture_git(repository, "add", ".")
-    _fixture_git(repository, "commit", "-qm", message)
-    return _fixture_git(repository, "rev-parse", "HEAD")
+    _git_output(repository, "add", ".")
+    _git_output(repository, "commit", "-qm", message)
+    return _git_output(repository, "rev-parse", "HEAD")
 
 
 def _qualified_fixture(tmp_path: Path) -> tuple[Path, str, str]:
@@ -110,9 +110,9 @@ def _qualified_fixture(tmp_path: Path) -> tuple[Path, str, str]:
 
     repository = tmp_path / "qualified-source"
     repository.mkdir()
-    _fixture_git(repository, "init", "-q")
-    _fixture_git(repository, "config", "user.email", "fixture@example.invalid")
-    _fixture_git(repository, "config", "user.name", "Provenance Fixture")
+    _git_output(repository, "init", "-q")
+    _git_output(repository, "config", "user.email", "fixture@example.invalid")
+    _git_output(repository, "config", "user.name", "Provenance Fixture")
 
     for relative_path in PROTECTED_TREE_PATHS:
         path = repository / relative_path.rstrip("/")
@@ -125,6 +125,78 @@ def _qualified_fixture(tmp_path: Path) -> tuple[Path, str, str]:
     (repository / "README.md").write_text("qualified\n", encoding="utf-8")
     qualified_revision = _commit_fixture(repository, "qualified source tree")
     return repository, base_revision, qualified_revision
+
+
+def _is_protected_tree_path(path: str) -> bool:
+    """Identify source, test, package, and current-map paths a run qualifies."""
+
+    normalized_path = path.removesuffix("/")
+    protected_files = {
+        "README.md",
+        "AGENTS.md",
+        "pyproject.toml",
+        "uv.lock",
+        ".planning/REQUIREMENTS.md",
+    }
+    protected_directories = (
+        "docs/",
+        ".github/workflows/",
+        "src/",
+        "tests/",
+        "tools/",
+        "examples/",
+        ".planning/codebase/",
+    )
+    return normalized_path in protected_files or normalized_path.startswith(
+        protected_directories
+    )
+
+
+def _assert_no_protected_paths(paths: list[str]) -> None:
+    """Reject evidence if any qualified source/test path differs or is dirty."""
+
+    protected_paths = [path for path in paths if _is_protected_tree_path(path)]
+    assert not protected_paths, protected_paths
+
+
+def _assert_qualified_source_tree(repository: Path, revision: str) -> None:
+    """Require an ancestor commit and a clean protected tree for local evidence."""
+
+    assert re.fullmatch(r"[0-9a-f]{40}", revision)
+    assert _git_output(repository, "rev-parse", f"{revision}^{{commit}}") == revision
+
+    ancestor = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", revision, "HEAD"],
+        cwd=repository,
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    assert ancestor.returncode == 0, ancestor.stderr
+
+    _assert_no_protected_paths(
+        _git_output(repository, "diff", "--name-only", f"{revision}..HEAD").splitlines()
+    )
+    _assert_no_protected_paths(
+        _git_output(repository, "diff", "--cached", "--name-only").splitlines()
+    )
+    _assert_no_protected_paths(
+        _git_output(repository, "diff", "--name-only").splitlines()
+    )
+    _assert_no_protected_paths(
+        _git_output(repository, "ls-files", "--others", "--exclude-standard").splitlines()
+    )
+
+
+def _assert_refreshed_audit_provenance(
+    repository: Path,
+    qualified_source_revision: str,
+    audited_head: str,
+) -> None:
+    """Require a refreshed audit to identify exactly the qualified source tree."""
+
+    _assert_qualified_source_tree(repository, qualified_source_revision)
+    assert audited_head == qualified_source_revision
 
 
 def test_qualified_source_provenance_accepts_artifact_only_commit_before_audit(
@@ -171,10 +243,10 @@ def test_qualified_source_provenance_rejects_nonancestor_revision(
     """A syntactically valid commit must still lead to the checked-out tree."""
 
     repository, _base_revision, _qualified_revision = _qualified_fixture(tmp_path)
-    unrelated_revision = _fixture_git(
+    unrelated_revision = _git_output(
         repository,
         "commit-tree",
-        _fixture_git(repository, "write-tree"),
+        _git_output(repository, "write-tree"),
         "-m",
         "unrelated root",
     )
@@ -215,7 +287,7 @@ def test_qualified_source_provenance_rejects_dirty_protected_paths(
         dirty_path = repository / "docs/fixture.txt"
     dirty_path.write_text("dirty\n", encoding="utf-8")
     if state == "staged":
-        _fixture_git(repository, "add", str(dirty_path.relative_to(repository)))
+        _git_output(repository, "add", str(dirty_path.relative_to(repository)))
 
     with pytest.raises(AssertionError):
         _assert_qualified_source_tree(repository, qualified_revision)
@@ -235,6 +307,13 @@ def _frontmatter_value(frontmatter: str, name: str) -> str:
     match = re.search(rf"^{re.escape(name)}: (.+)$", frontmatter, flags=re.MULTILINE)
     assert match is not None
     return match.group(1).strip()
+
+
+def _optional_frontmatter_value(frontmatter: str, name: str) -> str | None:
+    """Read an optional scalar field without making pre-qualification invalid."""
+
+    match = re.search(rf"^{re.escape(name)}: (.+)$", frontmatter, flags=re.MULTILINE)
+    return None if match is None else match.group(1).strip()
 
 
 def _task_row(document: str, task_id: str) -> str:
@@ -422,6 +501,12 @@ def test_phase11_validation_record_matches_final_acceptance_evidence() -> None:
         assert "**Approval:** approved" in validation
         assert "⬜ pending" not in validation
         _assert_explicit_nonclaims(validation)
+        qualified_source_revision = _optional_frontmatter_value(
+            frontmatter,
+            "qualified_source_revision",
+        )
+        if qualified_source_revision is not None:
+            _assert_qualified_source_tree(ROOT, qualified_source_revision)
     else:
         raise AssertionError("Phase 11 validation has an unsupported mixed state")
 
@@ -449,6 +534,16 @@ def test_phase11_refreshed_milestone_audit_is_evidence_derived() -> None:
         validation_frontmatter = _frontmatter(validation)
         assert _frontmatter_value(validation_frontmatter, "status") == "validated"
         assert _frontmatter_value(validation_frontmatter, "nyquist_compliant") == "true"
+        qualified_source_revision = _optional_frontmatter_value(
+            validation_frontmatter,
+            "qualified_source_revision",
+        )
+        if qualified_source_revision is not None:
+            _assert_refreshed_audit_provenance(
+                ROOT,
+                qualified_source_revision,
+                audited_head,
+            )
         assert FROZEN_NON_LIVE_COMMAND in audit
         assert "Phase 11" in audit
         assert "Supplemental guides still contain" not in audit
