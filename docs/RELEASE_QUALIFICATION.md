@@ -35,9 +35,22 @@ release-candidate artifacts bind a candidate SHA and source digest and use a
 30 days retention window; this local-readiness record is not a release asset.
 
 The full Linux core matrix covers Python 3.11 through 3.14; macOS is only the
-Python 3.11/3.14 public-topology boundary smoke. TensorFlow remains an optional
-handler restricted to compatible Linux Python 3.11/3.12 rows. Python 3.15 is
-advisory and cannot qualify or disqualify the stable matrix.
+Python 3.11/3.14 public-topology boundary smoke. Python 3.15 is advisory and
+cannot qualify or disqualify the stable matrix.
+
+## Local regression boundary
+
+Run the complete repository suite in a fresh, lockfile-backed environment:
+
+```bash
+uv run --isolated --all-extras --group dev --frozen pytest -q -o log_cli=false
+```
+
+This command exercises declared optional local integrations and the development
+test group from `uv.lock`. It is a local regression command, not a native
+Windows, controlled-Linux performance, real PostgreSQL/Amazon-S3, or immutable
+publication qualification. Those boundaries remain governed by the evidence
+matrix above.
 
 ## Local-readiness boundary
 

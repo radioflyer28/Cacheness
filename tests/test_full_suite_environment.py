@@ -75,7 +75,7 @@ def test_ruff_gate_executes_the_running_environment_binary_without_uv(monkeypatc
 
 def test_documented_full_suite_command_uses_locked_extras_and_dev_group():
     """The supported command collects optional-feature tests without base expansion."""
-    guide = (PROJECT_ROOT / "docs" / "CROSS_PLATFORM_GUIDE.md").read_text(
+    guide = (PROJECT_ROOT / "docs" / "RELEASE_QUALIFICATION.md").read_text(
         encoding="utf-8"
     )
     pyproject = (PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8")
