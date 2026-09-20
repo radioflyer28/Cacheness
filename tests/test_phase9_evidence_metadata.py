@@ -3,6 +3,7 @@
 from pathlib import Path
 import re
 import subprocess
+import sys
 
 import pytest
 
@@ -222,6 +223,44 @@ def test_qualified_source_provenance_accepts_artifact_only_commit_before_audit(
         qualified_revision,
         qualified_revision,
     )
+
+
+def test_refreshed_audit_rejects_missing_qualified_source_revision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refreshed audit must not bypass provenance when the field is absent."""
+
+    repository, _base_revision, qualified_revision = _qualified_fixture(tmp_path)
+    validation = tmp_path / "11-VALIDATION.md"
+    audit = tmp_path / "MILESTONE-AUDIT.md"
+    validation.write_text(
+        "---\n"
+        "status: validated\n"
+        "nyquist_compliant: true\n"
+        "wave_0_complete: true\n"
+        "---\n",
+        encoding="utf-8",
+    )
+    audit.write_text(
+        "---\n"
+        "audited: 2026-09-19T00:00:00Z\n"
+        f"audited_head: {qualified_revision}\n"
+        "status: passed\n"
+        "---\n"
+        f"{FROZEN_NON_LIVE_COMMAND}\n"
+        "Phase 11\n"
+        "01 03 05 06 07 08 09\n"
+        "BACK-05 QUAL-06 Windows NOT_PUBLISHED\n",
+        encoding="utf-8",
+    )
+    module = sys.modules[__name__]
+    monkeypatch.setattr(module, "PHASE11_VALIDATION", validation)
+    monkeypatch.setattr(module, "MILESTONE_AUDIT", audit)
+    monkeypatch.setattr(module, "ROOT", repository)
+
+    with pytest.raises(AssertionError):
+        test_phase11_refreshed_milestone_audit_is_evidence_derived()
 
 
 @pytest.mark.parametrize("revision", ("not-a-revision", "a" * 39, "a" * 41))
