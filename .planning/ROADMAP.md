@@ -760,9 +760,12 @@ Plans:
 4. Phase 1, 3, 5, 6, 7, 8, 9, and 11 validation records discover canonically with green or explicitly superseded evidence, while BACK-05, QUAL-06, native Windows, and immutable publication remain nonpassing deferrals.
 5. Focused contracts, scoped Ruff, lock freshness, a fresh source-free wheel, and one frozen non-live suite pass before the milestone audit derives and records its current verdict.
 
-**Plans:** 12/12 plans executed
+**Plans:** 13/13 plans executed
 
 Plans:
+
+- [x] 11-13-PLAN.md
+
 **Wave 1**
 
 - [x] 11-01-PLAN.md — Encode the end-to-end negative wheel/document cutover contract.

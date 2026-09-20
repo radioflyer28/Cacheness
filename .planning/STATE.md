@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 11
 current_phase_name: Clean supplemental documentation and normalize validation evidence
 status: executing
-stopped_at: Completed 11-12-PLAN.md
-last_updated: "2026-09-19T23:43:50.322Z"
+stopped_at: Completed 11-13-PLAN.md
+last_updated: "2026-09-20T00:16:39.846Z"
 last_activity: 2026-09-19
 last_activity_desc: Phase 11 execution started
-state_head: 66e48f580ce9925f2ff2adb8c7767518dfc810d2
+state_head: 199f16bf6e7004d5a32261804356b414dbe6e666
 progress:
   total_phases: 12
   completed_phases: 10
-  total_plans: 165
-  completed_plans: 164
+  total_plans: 166
+  completed_plans: 165
 milestone_name: milestone
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-09-17)
 ## Current Position
 
 Phase: 11 (Clean supplemental documentation and normalize validation evidence) — EXECUTING
-Plan: 3 of 12
+Plan: 4 of 12
 Status: Ready to execute
 Last activity: 2026-09-19 — Phase 11 execution started
 
@@ -252,6 +252,7 @@ Raw file counts include superseded plans and therefore are not completion claims
 | Phase 11 P10 | 5m | 2 tasks | 1 files |
 | Phase 11 P11 | 10m | 2 tasks | 2 files |
 | Phase 11 P12 | 7m | 2 tasks | 2 files |
+| Phase 11 P13 | 16m | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -615,6 +616,8 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - [Phase 11]: The post-review acceptance records exit-zero quiet-output evidence without inventing an aggregate frozen-suite pass count.
 - [Phase 11]: The post-review local record preserves PostgreSQL/Amazon S3, controlled-Linux, native-Windows, and immutable-publication nonclaims.
 - [Phase 11]: Phase 11 audit verdicts bind exactly to a qualified source/test revision; later evidence-only artifacts cannot change audit provenance.
+- [Phase 11]: Refreshed milestone audits require a qualified source revision and exact audit-head equality; the historical audit branch remains valid.
+- [Phase 11]: The final local audit binds to e8b4cdf after observed bounded gates; BACK-05, QUAL-06, native Windows, and immutable publication remain nonpassing.
 
 ### Pending Todos
 
@@ -653,6 +656,6 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 
 ## Session Continuity
 
-Last session: 2026-09-19T23:43:49.975Z
-Stopped at: Completed 11-12-PLAN.md
+Last session: 2026-09-20T00:16:39.514Z
+Stopped at: Completed 11-13-PLAN.md
 Resume file: None
