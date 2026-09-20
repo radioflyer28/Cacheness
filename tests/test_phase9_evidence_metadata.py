@@ -573,16 +573,15 @@ def test_phase11_refreshed_milestone_audit_is_evidence_derived() -> None:
         validation_frontmatter = _frontmatter(validation)
         assert _frontmatter_value(validation_frontmatter, "status") == "validated"
         assert _frontmatter_value(validation_frontmatter, "nyquist_compliant") == "true"
-        qualified_source_revision = _optional_frontmatter_value(
+        qualified_source_revision = _frontmatter_value(
             validation_frontmatter,
             "qualified_source_revision",
         )
-        if qualified_source_revision is not None:
-            _assert_refreshed_audit_provenance(
-                ROOT,
-                qualified_source_revision,
-                audited_head,
-            )
+        _assert_refreshed_audit_provenance(
+            ROOT,
+            qualified_source_revision,
+            audited_head,
+        )
         assert FROZEN_NON_LIVE_COMMAND in audit
         assert "Phase 11" in audit
         assert "Supplemental guides still contain" not in audit
