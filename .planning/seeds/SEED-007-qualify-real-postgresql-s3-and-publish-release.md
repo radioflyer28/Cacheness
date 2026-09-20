@@ -5,6 +5,10 @@ planted: 2026-09-15
 planted_during: v1.0 Phase 08
 trigger_when: when preparing the first remotely qualified immutable release
 scope: medium
+audit_acknowledged:
+  milestone: v1.0
+  at: 2026-09-20
+  status: dormant
 ---
 
 # SEED-007: Qualify real PostgreSQL and Amazon S3, then publish an immutable release
@@ -33,20 +37,22 @@ publish the immutable release only after every non-deferred gate passes.
 
 ## Breadcrumbs
 
-- `.planning/phases/08-production-gates-and-performance-stabilization/08-11-PLAN.md`
-- `.planning/phases/08-production-gates-and-performance-stabilization/08-12-PLAN.md`
+- `.planning/milestones/v1.0-phases/08-production-gates-and-performance-stabilization/08-11-PLAN.md`
+- `.planning/milestones/v1.0-phases/08-production-gates-and-performance-stabilization/08-12-PLAN.md`
 - `.github/workflows/live_qualification.yml`
 - `.github/workflows/quality.yml`
 - `tools/run_phase8_qualification.py`
 - `tools/verify_phase8_release.py`
 - `docs/RELEASE_QUALIFICATION.md`
-- `.planning/REQUIREMENTS.md` (`BACK-05`)
+- `.planning/milestones/v1.0-REQUIREMENTS.md` (`BACK-05`)
 
 ## Notes
 
 - Mocked S3, local emulators, and configuration-only preflight are not substitutes
   for real PostgreSQL and Amazon S3 qualification.
+
 - Until this seed is completed, those remote topologies remain `NOT_QUALIFIED` and
   no immutable-release claim may be made.
+
 - Preserve the existing qualification tooling and evidence schemas; this deferral
   changes the milestone gate, not the integrity standard.

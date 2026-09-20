@@ -2,12 +2,14 @@
 
 ## Task 1 — TensorFlow runtime/config/export removal
 
+- **Status:** acknowledged
 - `src/cacheness/storage/handlers/__init__.py` retains three pre-existing Ruff
   `F401` findings for conditional pandas and Polars re-exports. They are outside
   the TensorFlow removal scope and the Task 1 diff does not touch those imports.
 
 ## Plan 11-07 — Cross-plan validation normalization
 
+- **Status:** acknowledged
 - The frozen non-live suite now passes
   `test_phase11_seed_resolution_is_canonical` after SEED-005 was fulfilled, but
   fails `test_phase11_phase_1_5_6_validations_are_canonical`,

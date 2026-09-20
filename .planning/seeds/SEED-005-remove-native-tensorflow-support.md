@@ -16,11 +16,11 @@ removed the native TensorFlow runtime, package, CI/qualification, dedicated
 test, documentation, and current-product-claim surface. It retains no
 compatibility alias, tombstone, dormant branch, or re-enable recipe.
 
-- [Phase 11 Plan 03](../phases/11-clean-supplemental-documentation-and-normalize-validation-ev/11-03-SUMMARY.md)
+- [Phase 11 Plan 03](../milestones/v1.0-phases/11-clean-supplemental-documentation-and-normalize-validation-ev/11-03-SUMMARY.md)
   records the direct runtime, package, lockfile, and installed-wheel cutover.
-- [Phase 11 Plan 04](../phases/11-clean-supplemental-documentation-and-normalize-validation-ev/11-04-SUMMARY.md)
+- [Phase 11 Plan 04](../milestones/v1.0-phases/11-clean-supplemental-documentation-and-normalize-validation-ev/11-04-SUMMARY.md)
   records the core-only CI and qualification-profile cutover.
-- [Phase 11 Plan 05](../phases/11-clean-supplemental-documentation-and-normalize-validation-ev/11-05-SUMMARY.md)
+- [Phase 11 Plan 05](../milestones/v1.0-phases/11-clean-supplemental-documentation-and-normalize-validation-ev/11-05-SUMMARY.md)
   records the current documentation and qualification-claim cutover.
 
 ## Why This Matters
@@ -38,9 +38,9 @@ runtime, qualification, and documentation owners were ready to close it.
   removed by Phase 11 Plan 03.
 - `pyproject.toml` — historical TensorFlow optional dependency groups, removed
   by Phase 11 Plan 03.
-- `.planning/phases/08-production-gates-and-performance-stabilization/08-02-SUMMARY.md`
+- `.planning/milestones/v1.0-phases/08-production-gates-and-performance-stabilization/08-02-SUMMARY.md`
   — Phase 8 packaging qualification history.
-- `.planning/phases/08-production-gates-and-performance-stabilization/08-03-SUMMARY.md`
+- `.planning/milestones/v1.0-phases/08-production-gates-and-performance-stabilization/08-03-SUMMARY.md`
   — Phase 8 platform qualification history.
 
 ## Notes

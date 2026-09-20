@@ -2,7 +2,7 @@
 
 ## What This Is
 
-Cacheness is a Python storage and caching library for arbitrary objects, arrays, dataframes, and function results. Its object-storage path uses a reliable `BlobStore` foundation that `UnifiedCache` consumes as its policy layer. Built-in filesystem, memory, and S3 payload mechanics now share one guarded obstore participant beneath the single lifecycle authority. Catalog customization, cache-policy coverage, explicit offline migration/rebuild tooling, and the direct removal of the unrelated table/range-oriented `SqlCache` subsystem are complete. Phase 8 closes deterministic local readiness while remote-service qualification and immutable release publication remain explicit future work.
+Cacheness is a Python storage and caching library for arbitrary objects, arrays, dataframes, and function results. `BlobStore` is the storage foundation; `UnifiedCache` consumes it as a cache-policy engine. Built-in filesystem, memory, and S3 payload mechanics share one guarded obstore participant beneath the single lifecycle authority. Catalog customization, cache-policy coverage, and explicit offline migration/rebuild tooling are complete. The unrelated `SqlCache` subsystem and dormant TensorFlow integration were removed before the v1.0 local-readiness closeout. Remote-service qualification and immutable release publication remain explicit future work.
 
 The intended audience is Python applications that need local or remote persistence with predictable cache semantics across filesystem, memory, S3, JSON, SQLite, and PostgreSQL backends.
 
@@ -33,14 +33,14 @@ Applications can store and retrieve data reliably through one backend-neutral li
 - ✓ Built-in filesystem, memory, and S3 payload mechanics use one guarded obstore participant while `BlobStore` retains sole lifecycle authority — Phase 07.1; live-service release qualification remains Phase 8
 - ✓ Opaque S3 ETag/version evidence can be cataloged and compared without replacing canonical SHA-256/size verification — Phase 07.1
 - ✓ The unrelated `SqlCache` pull-through subsystem, its public surface, dedicated assets, and orphan dependencies are removed while BlobStore, UnifiedCache, SQL lifecycle authorities, catalog metadata, and dataframe handlers remain intact — Phase 10
+- ✓ Complete generations are published through one catalog transaction; external payload effects use attributable intent/debt and deterministic reconciliation, without cross-resource ACID — v1.0 local scope
+- ✓ Same-key operations preserve integrity and return defined success/conflict/retryable outcomes within declared supported topologies — v1.0 local scope
+- ✓ A minimal supported installation imports and runs; optional dependencies are guarded and tested through source-free wheel qualification — Phase 8 and Phase 11
+- ✓ CI definitions, deterministic backend contracts, scoped lint, coverage, and supported-Python matrices are established, with live-service execution explicitly unqualified — Phase 8 and Phase 11
 
 ### Active
 
 - [ ] Release-qualify real PostgreSQL/Amazon-S3 lifecycle behavior and publish the immutable release — deferred to `SEED-007`; local readiness does not imply this claim
-- [ ] Publish complete generations through one catalog transaction; coordinate external payload effects with attributable intent/debt and deterministic reconciliation when resources are available, not cross-resource ACID or instantaneous orphan-free cleanup
-- [ ] Guarantee same-key integrity and defined success/conflict/retryable-failure outcomes within each explicitly supported backend topology
-- [ ] Correct package dependency and optional-feature detection so a minimal supported installation imports reliably
-- [ ] Establish CI, backend contract tests, lint policy, coverage thresholds, and supported-Python/backend matrices
 - [ ] Establish controlled-Linux performance budgets while prioritizing correctness during migration — deferred to `SEED-006`; Phase 8 retains the benchmark harness and diagnostic measurements without a cross-platform qualification claim
 
 ### Out of Scope
@@ -60,11 +60,11 @@ The codebase began as a disk cache and expanded into direct blob storage, backen
 
 At project initialization, payload writes and metadata writes were separate, without rollback; cleanup and composition were incomplete. Phase 3 now has a SQLite lifecycle authority, immutable native generations, exact publication, and intent/debt recovery. The direct implementation removed the cache's projection-repair/deferred-cleanup orchestration and added supported same-generation entry snapshots and receipts. See [the implementation ledger](../docs/phase3-direct-implementation-2026-09-06.md) and [initialization/failure guide](../docs/STORAGE_INITIALIZATION.md), not the earlier audit alone, for the delivered baseline.
 
-Phases 4 through 7 delivered injected catalog composition, cache-policy reuse of `BlobStore`, and explicit stopped-worker migration/rebuild tooling. Phase 07.1 replaced the separate filesystem/memory/S3 payload mechanics with one guarded obstore participant while preserving the single lifecycle authority and path-based custom-handler seam. Phase 8 closes the deterministic local-use boundary: minimal packaging/import, local lifecycle and cache-policy contracts, coverage/Ruff policy, and structural scale gates. It retains supported-Python, protected PostgreSQL/Amazon-S3, immutable-publication, performance-harness, and macOS diagnostic machinery without treating unrun external evidence as a pass. Controlled-Linux performance qualification is deferred to `SEED-006`; real PostgreSQL/Amazon-S3 qualification and immutable publication are deferred to `SEED-007`. Deterministic adapters or standalone backend implementations are not substitutes for live release claims.
+Phases 4 through 7 delivered injected catalog composition, cache-policy reuse of `BlobStore`, and explicit stopped-worker migration/rebuild tooling. Phase 07.1 replaced the separate filesystem/memory/S3 payload mechanics with one guarded obstore participant while preserving the single lifecycle authority and path-based custom-handler seam. Phases 8 through 11 closed the deterministic local-use, package, public-guidance, and validation-evidence boundary. The v1.0 planning milestone passed its local-scope audit on 2026-09-20 across 12 accepted phases and 42/42 in-scope requirements. Phase 3 remains a user-approved direct local qualification rather than a fresh independent GSD verifier verdict. Controlled-Linux performance qualification is deferred to `SEED-006`; real PostgreSQL/Amazon-S3 qualification and immutable publication are deferred to `SEED-007`. Native Windows remains unqualified. Deterministic adapters or standalone backend implementations are not substitutes for live release claims.
 
 The security model assumes trusted application payloads and a trusted owner for each local store, so pickle/dill remain available and Cacheness lifecycle-control objects must not be deleted or rebound by that owner while the store is live. Persisted metadata and paths are still untrusted inputs: the implementation must eliminate `eval`, contain filesystem paths, bind structured query paths safely, and fail closed when signing, integrity verification, or control-object identity checks fail. Initial Windows local-store coordination supports processes running as one OS user in one interactive or service session; cross-user, cross-service, and cross-session sharing requires a future explicit authority and ACL contract.
 
-Historical baseline (2026-08-29): 777 collected tests, 749 passing, 26 skipped and 2 YAML path-round-trip failures; statement coverage 66% and 137 repository-wide Ruff findings. These are not current measurements. Phase 3 qualification at `5282dca` passed 1,453 tests with 26 skips on Python 3.11, 127 focused tests on Python 3.13, named gates, scoped Ruff, the Phase 3 lint delta and the unchanged lifecycle benchmark. Full coverage, packaging, and supported-Python/service CI remain Phase 8. Controlled-Linux release performance acceptance is explicitly deferred to `SEED-006`; native Windows remains unqualified.
+Historical baseline (2026-08-29): 777 collected tests, 749 passing, 26 skipped and 2 YAML path-round-trip failures; statement coverage 66% and 137 repository-wide Ruff findings. These are not current measurements. Phase 3 qualification at `5282dca` passed 1,453 tests with 26 skips on Python 3.11, 127 focused tests on Python 3.13, named gates, scoped Ruff, the Phase 3 lint delta and the unchanged lifecycle benchmark. Phase 11's local acceptance and fresh-wheel qualification supersede those baseline counts for the v1.0 local-scope milestone; see the archived audit and canonical validation records for exact evidence. Controlled-Linux release performance acceptance is explicitly deferred to `SEED-006`; native Windows remains unqualified.
 
 ## Constraints
 
@@ -125,4 +125,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-09-17 after Phase 10 completed the SqlCache cutover*
+*Last updated: 2026-09-20 after v1.0 local-readiness milestone closeout*

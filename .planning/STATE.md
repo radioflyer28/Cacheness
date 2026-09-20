@@ -1,59 +1,45 @@
 ---
 gsd_state_version: 1.0
 milestone: v1.0
-current_phase: 11
-status: completed
+status: Awaiting next milestone
 stopped_at: Phase 11 complete — all phases complete
-last_updated: "2026-09-20T00:32:19.259Z"
-last_activity: 2026-09-19
-last_activity_desc: Phase 11 complete
-state_head: 004339242ba97c5577e8732f86b5716eff745068
+last_updated: "2026-09-20T15:46:58.537Z"
+last_activity: 2026-09-20
+last_activity_desc: Milestone v1.0 completed and archived
+state_head: 74e7a65d2b604684729d5eea399f23991488b5ba
 progress:
   total_phases: 12
-  completed_phases: 11
-  total_plans: 166
+  completed_phases: 12
+  total_plans: 165
   completed_plans: 165
-milestone_name: milestone
+milestone_name: Local Readiness
+current_phase: null
 ---
 
 # Project State
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-09-17)
+See: .planning/PROJECT.md (updated 2026-09-20)
 
 **Core value:** Applications can store and retrieve data reliably through one backend-neutral lifecycle, with caching policy layered above storage without compromising integrity or cleanup correctness.
-**Current focus:** Phase 11 — Clean supplemental documentation and normalize validation evidence
+**Current focus:** Planning the next milestone; v1.0 local readiness is closed, not published.
 
 ## Current Position
 
-Phase: 11
-Plan: Not started
-Status: All phases complete
-Last activity: 2026-09-19 — Phase 11 complete
+Phase: Milestone v1.0 complete
+Plan: —
+Status: Awaiting next milestone
+Last activity: 2026-09-20 — Milestone v1.0 completed and archived
 
-Current execution chain: **08-18 complete → 08-19 complete → 08-16 complete → independent Phase 08 verification**. No older Phase 8 ordering statement overrides this chain.
-
-Phase 07.1 closed with 11/11 plans summarized and an independent 46/46
-must-have verification pass. Built-in filesystem, memory, and S3 payload
-mechanics now use one guarded `ObstoreGenerationIO`; `BlobStore` still owns the
-single `AuthorityLifecycleEngine`, and `UnifiedCache` remains policy-only.
-
-The security audit closes 47/47 plan threats after a bounded canonical-evidence
-parser repair. ETag/version remain opaque signed transport corroboration;
-canonical SHA-256 plus size remains the integrity decision. Live AWS,
-PostgreSQL, and remote platform/package evidence remain unqualified until their
-eligible gates run. Structural RSS contracts and hash-benchmark capability are
-retained; controlled-Linux performance qualification is deferred to SEED-006 by
-D-23, while real PostgreSQL/Amazon-S3 qualification and immutable publication are
-deferred to SEED-007 by D-24.
-
-Roadmap progress: [███████████░] 11 of 12 phases complete. Phase 9 closed the bounded
-adoption surface; Phase 10 directly removed SqlCache while retaining BlobStore,
-UnifiedCache, SQL lifecycle authorities, and dataframe handlers. Neither phase
-reopened storage lifecycle design. The generated disk plan
-counter still includes the deliberately superseded Phase 03 plan; do not reopen
-that closed phase merely to repair the counter.
+The v1.0 closeout is an explicit **override closeout**. Eleven phases have
+canonical `passed` independent verifier records; Phase 3's independent report
+is `historical_superseded` and its local SQLite/filesystem plus declared memory
+scope was qualified directly at `5282dca` with later regression evidence. The
+milestone audit accepted all 12 scoped closures and 42/42 in-scope
+requirements. `BACK-05` and `QUAL-06` remain unchecked; live remote services,
+controlled-Linux performance, native Windows, and immutable publication remain
+nonpassing claims. See [MILESTONES.md](MILESTONES.md) and the [archived audit](milestones/v1.0-MILESTONE-AUDIT.md).
 
 ## Roadmap Evolution
 
@@ -631,7 +617,6 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 
 | # | Description | Date | Commit | Directory |
 |---|-------------|------|--------|-----------|
-| 260919-saq | Correct Phase 11 milestone audit Nyquist row to final qualified revision | 2026-09-19 | 60c9121 | [260919-saq-correct-phase-11-milestone-audit-nyquist](./quick/260919-saq-correct-phase-11-milestone-audit-nyquist/) |
 
 ### Roadmap Evolution
 
@@ -650,17 +635,38 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 
 ## Deferred Items
 
-| Category | Item | Status | Deferred At |
-|----------|------|--------|-------------|
-| Extensibility | General cache-policy plugin framework | Deferred to v2 | Project initialization |
-| Storage | New backend families, deduplication, and cross-backend physical migration | Deferred to v2 | Project initialization |
-| APIs | Native async storage/cache APIs and distributed coherence | Deferred to v2 | Project initialization |
-| Security | Hostile pickle/dill deserialization | Out of scope; trusted payload boundary | Project initialization |
-| Architecture | `SqlCache` redesign or merger | Out of scope | Project initialization |
-| Remote qualification | Real PostgreSQL/Amazon-S3 exact-SHA qualification and immutable GitHub release publication | Deferred to SEED-007 / NOT_QUALIFIED / NOT_PUBLISHED | Phase 08 D-24 |
+Items acknowledged at v1.0 closeout are recorded below; acknowledgment does
+not change their historical test results or qualify a deferred release gate.
+
+| Category | Item | Status | Deferred At | Milestone |
+|----------|------|--------|-------------|-----------|
+| seeds | SEED-002 streaming handler seam | dormant; future work | 2026-09-20 | v1.0 |
+| seeds | SEED-003 XXH3 canonical hashing investigation | dormant; future work | 2026-09-20 | v1.0 |
+| seeds | SEED-004 byte-preserving file import/export | dormant; future work | 2026-09-20 | v1.0 |
+| seeds | SEED-006 controlled-Linux performance | dormant; QUAL-06 NOT_QUALIFIED | 2026-09-20 | v1.0 |
+| seeds | SEED-007 live PostgreSQL/S3 qualification and publication | dormant; BACK-05 NOT_QUALIFIED; NOT_PUBLISHED | 2026-09-20 | v1.0 |
+| seeds | SEED-008 Narwhals investigation | dormant; future work | 2026-09-20 | v1.0 |
+| deferred_items | Phase 03/deferred-items.md: targeted Ruff baseline | acknowledged; historical Plan 03-10 observation | 2026-09-20 | v1.0 |
+| deferred_items | Phase 03/deferred-items.md: SQLite shutdown warning | acknowledged; historical non-failing observation | 2026-09-20 | v1.0 |
+| deferred_items | Phase 06/deferred-items.md: legacy facade constructor tests | acknowledged; superseded pre-production surface | 2026-09-20 | v1.0 |
+| deferred_items | Phase 07/deferred-items.md: first exact-snapshot concurrency observation | acknowledged; historical ADR 0001 evidence | 2026-09-20 | v1.0 |
+| deferred_items | Phase 07/deferred-items.md: direct-suite exact-snapshot observation | acknowledged; historical ADR 0001 evidence | 2026-09-20 | v1.0 |
+| deferred_items | Phase 07/deferred-items.md: WR-02 handler registration name contract | acknowledged; future API decision | 2026-09-20 | v1.0 |
+| deferred_items | Phase 11/deferred-items.md: conditional re-export Ruff findings | acknowledged; historical scoped-lint observation | 2026-09-20 | v1.0 |
+| deferred_items | Phase 11/deferred-items.md: Plan 11-07 validation status | acknowledged; superseded by Plan 11-08 | 2026-09-20 | v1.0 |
+| Extensibility | General cache-policy plugin framework | Deferred to v2 | Project initialization | — |
+| Storage | New backend families, deduplication, and cross-backend physical migration | Deferred to v2 | Project initialization | — |
+| APIs | Native async storage/cache APIs and distributed coherence | Deferred to v2 | Project initialization | — |
+| Security | Hostile pickle/dill deserialization | Out of scope; trusted payload boundary | Project initialization | — |
+| Architecture | `SqlCache` redesign or merger | Out of scope | Project initialization | — |
+| Remote qualification | Real PostgreSQL/Amazon-S3 exact-SHA qualification and immutable GitHub release publication | Deferred to SEED-007 / NOT_QUALIFIED / NOT_PUBLISHED | Phase 08 D-24 | — |
 
 ## Session Continuity
 
-Last session: 2026-09-20T00:16:39.514Z
-Stopped at: Phase 11 complete — all phases complete
+Last session: 2026-09-20 milestone closeout
+Stopped at: v1.0 local-readiness closeout; next milestone unscoped
 Resume file: None
+
+## Operator Next Steps
+
+- Start the next milestone with /gsd-new-milestone

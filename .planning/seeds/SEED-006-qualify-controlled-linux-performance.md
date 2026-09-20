@@ -5,6 +5,10 @@ planted: 2026-09-15
 planted_during: v1.0 Phase 08 — Production Gates and Performance Stabilization
 trigger_when: when relevant
 scope: unknown
+audit_acknowledged:
+  milestone: v1.0
+  at: 2026-09-20
+  status: dormant
 ---
 
 # SEED-006: Qualify performance on a controlled Linux runner
@@ -28,7 +32,7 @@ This seed will surface during `$gsd-new-milestone` when the milestone scope matc
 - `benchmarks/phase8_benchmarks.py` — controlled-runner preflight and benchmark harness
 - `benchmarks/phase8_workloads.py` — canonical performance workload inventory
 - `.github/workflows/performance.yml` — dedicated Linux performance workflow contract
-- `.planning/phases/08-production-gates-and-performance-stabilization/08-11-PLAN.md` — original release-blocking baseline capture plan
+- `.planning/milestones/v1.0-phases/08-production-gates-and-performance-stabilization/08-11-PLAN.md` — original release-blocking baseline capture plan
 - `docs/RELEASE_QUALIFICATION.md` — current qualification claims and nonclaims
 
 ## Notes
@@ -36,4 +40,3 @@ This seed will surface during `$gsd-new-milestone` when the milestone scope matc
 Deferred from Phase 8 because no eligible `cacheness-perf-linux-x64` runner is
 available. macOS measurements may remain useful diagnostic evidence, but they do
 not establish Linux equivalence or a cross-platform performance guarantee.
-

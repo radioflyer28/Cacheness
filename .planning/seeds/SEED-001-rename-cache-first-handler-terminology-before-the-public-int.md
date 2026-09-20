@@ -1,27 +1,35 @@
 ---
 id: SEED-001
-status: dormant
+status: fulfilled
 planted: 2026-09-09
 planted_during: v1.0 / Phase 7
-trigger_when: when relevant
-scope: unknown
+fulfilled: 2026-09-20
+fulfilled_during: v1.0 / Phase 9 — Adoption and Release Surface Closure
 ---
 
 # SEED-001: Rename cache-first handler terminology before the public interface freezes
 
+## Resolution
+
+**Fulfilled in Phase 9 Plan 01.** The public handler protocol and error base
+were renamed to `FormatHandler` and `FormatHandlerError` without compatibility
+aliases. The store-local registration API remains
+`store.handlers.register_handler(...)`; stable stored handler identities were
+not changed. See
+[09-01-SUMMARY.md](../milestones/v1.0-phases/09-adoption-and-release-surface-closure/09-01-SUMMARY.md).
+
 ## Why This Matters
 
-_To be filled in. Run `$gsd-capture --seed --enrich SEED-001` to add context._
+Cache-first terminology was misleading once `BlobStore` became the storage
+foundation shared with cache-policy instances.
 
 ## When to Surface
 
-**Trigger:** when relevant
-
-This seed will surface during `$gsd-new-milestone` when the milestone scope matches.
+No future trigger: the terminology cutover is complete.
 
 ## Scope Estimate
 
-**Unknown** — run `$gsd-capture --seed --enrich SEED-001` to estimate effort.
+Completed in Phase 9 Plan 01.
 
 ## Breadcrumbs
 
@@ -29,8 +37,8 @@ This seed will surface during `$gsd-new-milestone` when the milestone scope matc
 - `src/cacheness/interfaces.py` — Declares the current cache-named payload handler interface.
 - `src/cacheness/handlers.py` — Implements the current handler registry and payload-contract resolution.
 - `src/cacheness/storage/__init__.py` — Exposes `CacheHandler` and `HandlerRegistry` from the BlobStore-oriented package.
-- `.planning/phases/07-explicit-migration-and-rebuild-cutover/07-CONTEXT.md` — Treats handler-owned payload formats as independently versioned migration contracts.
+- `.planning/milestones/v1.0-phases/07-explicit-migration-and-rebuild-cutover/07-CONTEXT.md` — Treats handler-owned payload formats as independently versioned migration contracts.
 
 ## Notes
 
-_Captured via one-shot seed capture. Enrich with trigger, why, and scope at your convenience._
+Retained as historical context, not promotable future work.
