@@ -1,775 +1,119 @@
 # Cacheness
 
-Fast Python disk cache with key-value store hashing and a "cachetools-like" decorator. Caches NumPy/Pandas/Polars natively; other objects use pickle. Uses Blosc2 for fast compression.
+Cacheness is a Python object-storage library. `BlobStore` owns storage lifecycle;
+`UnifiedCache` adds cache policy over a caller-selected store.
 
-**Key Features:**
-- **Function decorators** for automatic caching with `@cached`
-- **File storage** — `put_file()`/`get_file()` with copy and move semantics, automatic metadata (filename, MIME type, size)
-- **Metadata helpers** — `put_with_meta`/`get_with_meta` eliminate redundant key+metadata passing; `put_with_model`/`get_with_model` for ORM-backed metadata
-- **Multi-format storage** automated, optimized storage format handling (parquet for pandas/polars, blosc/npz for numpy arrays, inline for small blobs)
-- **Key-based caching** using xxhash (XXH3_64) for fast, deterministic cache keys
-- **Advanced compression** using Blosc2 (LZ4) and zstd for fast compression
-- **Multiple backends** with SQLite, Postgres, and JSON metadata support. Local filesystem or S3 for blob/file storage.
-- **Cross-platform** fully compatible with Windows, Linux, and macOS
+> **Status — local-ready development version.** Use this checked-out revision
+> for the qualified local workflows below. It is `NOT_PUBLISHED` and may change
+> before the first supported release. See the
+> [release qualification guide](docs/RELEASE_QUALIFICATION.md) for the detailed
+> evidence matrix and current limits.
 
-## Quick Start
+## Install from a checkout
 
-### Installation
+Clone the repository, then create the minimal local environment:
 
 ```bash
-# Basic installation
-pip install cacheness
-
-# Recommended (includes SQLAlchemy + performance optimizations)
-pip install cacheness[recommended]
-
-# Full installation with DataFrame support
-pip install cacheness[recommended,dataframes]
+uv sync --frozen --no-default-groups
 ```
 
-### Basic Usage
+This is the primary installation path. Task guides introduce an optional
+capability only when that task needs it.
+
+### Local wheel (secondary)
+
+To consume a locally built artifact instead, run `uv build` from the checkout,
+then install the emitted wheel into the target environment with `uv pip install`.
+The checkout workflow above remains the current local-ready path.
+
+## Quick starts
+
+### Quick start: store an object
+
+This same-process memory topology is useful for a direct storage round trip:
 
 ```python
-from cacheness import cacheness
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
-# Create a cache instance
-cache = cacheness()
+from cacheness.storage import BackendRef, BlobStore, StoreTopology
 
-# Store data using keyword arguments as cache keys
-cache.put({"results": [1, 2, 3]}, 
-          model="xgboost", 
-          dataset="customer_data", 
-          version="1.0")
-
-# Retrieve data using the same key parameters
-data = cache.get(model="xgboost", dataset="customer_data", version="1.0")
-print(data)  # {"results": [1, 2, 3]}
-```
-
-### Function Decorators
-
-```python
-from cacheness import cached
-
-@cached(ttl="24h")
-def expensive_computation(n):
-    """This function will be automatically cached."""
-    import time
-    time.sleep(2)  # Simulate expensive work
-    return n ** 2
-
-# First call takes 2 seconds
-result1 = expensive_computation(5)  # Computed and cached
-
-# Second call returns instantly from cache
-result2 = expensive_computation(5)  # Retrieved from cache
-```
-
-## Intelligent Storage & Access Patterns
-
-Cacheness automatically optimizes storage and backend selection based on your data and access patterns.
-
-### UnifiedCache - Intelligent Function Caching
-```python
-from cacheness import cached
-
-# Automatically chooses optimal storage format:
-# • DataFrames → Parquet format
-# • NumPy arrays → Blosc compression  
-# • Custom objects → Pickle serialization
-# • API responses → LZ4 compression
-
-@cached()  # Works with any Python object
-def process_data(df):
-    return df.groupby('category').sum()
-
-@cached.for_api()  # Optimized for API responses
-def fetch_user_data(user_id):
-    return requests.get(f"/api/users/{user_id}").json()
-```
-
-## Convenience Metadata Helpers
-
-`put_with_meta` / `get_with_meta` eliminate the boilerplate of passing the same values twice for key derivation and metadata storage:
-
-```python
-from cacheness import cacheness, CacheConfig
-
-cache = cacheness(CacheConfig(store_full_metadata=True))
-
-# Store — kwargs become both the cache key AND the metadata_dict
-cache.put_with_meta(results_df, experiment="exp_001", model="xgboost", accuracy=0.94)
-
-# Retrieve data + metadata in one call
-result = cache.get_with_meta(experiment="exp_001", model="xgboost")
-if result:
-    data, meta = result
-    print(meta["accuracy"])  # 0.94
-
-# Use on= to create distinct entries with identical metadata
-# (e.g. multiple epochs for the same experiment)
-cache.put_with_meta(epoch5_df, on={"epoch": 5}, experiment="exp_001", model="xgboost")
-cache.put_with_meta(epoch10_df, on={"epoch": 10}, experiment="exp_001", model="xgboost")
-```
-
-For ORM-backed workflows, `put_with_model` / `get_with_model` do the same but store a SQLAlchemy model instance alongside the data. See [Custom Metadata Guide](docs/CUSTOM_METADATA.md) for details.
-
-## Core Concepts
-
-### Key-Based Caching System
-
-The library uses **xxhash (XXH3_64)** to generate deterministic cache keys from your parameters:
-
-```python
-# These are equivalent - parameter order doesn't matter
-cache.put(data, model="xgboost", dataset="train", version="1.0")
-cache.put(data, version="1.0", model="xgboost", dataset="train")  # Same cache key
-
-# Different parameters = different cache entries
-cache.put(data1, model="xgboost", dataset="train")  # Key: abc123...
-cache.put(data2, model="lightgbm", dataset="train") # Key: def456...
-cache.put(data3, model="xgboost", dataset="test")   # Key: ghi789...
-```
-
-### Supported Data Types
-
-| Data Type | Storage Format | Compression | Benefits |
-|-----------|---------------|-------------|----------|
-| NumPy arrays | NPZ or Blosc2 | LZ4/ZSTD | 60-80% size reduction, 4x faster I/O |
-| DataFrames & Series | Parquet | LZ4 | 40-60% size reduction, columnar efficiency |
-| TensorFlow tensors* | Blosc2 | LZ4/ZSTD | Native tensor format, GPU memory efficient |
-| Raw bytes/bytearray | Bytes (inline) | None | Zero-serialization, no file I/O |
-| Python objects | Pickle + Blosc | LZ4 | 30-50% size reduction, universal compatibility |
-| Complex objects** | Dill + Blosc | LZ4 | Functions, lambdas, advanced serialization |
-
-*TensorFlow handler disabled by default due to import overhead  
-**Includes functions, lambdas, closures, and other objects that pickle cannot handle
-
-### Configuration
-
-```python
-from cacheness import cacheness, CacheConfig
-
-# Simple configuration
-config = CacheConfig(
-    cache_dir="./my_cache",
-    metadata_backend="sqlite",     # "sqlite" (production), "json" (dev), or "auto"  
-    default_ttl="2d",              # Duration strings: s, m, h, d, w, mo, y
-    max_cache_size="5gb",          # Size strings: kb, mb, gb, tb
+topology = StoreTopology(
+    payload=BackendRef(name="memory"),
+    authority=BackendRef(name="memory"),
 )
 
-cache = cacheness(config)
-
-# See docs/BACKEND_SELECTION.md for choosing between JSON and SQLite backends
-```
-
-## Quick Examples
-
-### Basic Usage
-
-```python
-import numpy as np
-import pandas as pd
-
-# Cache NumPy arrays (automatically compressed with Blosc2)
-features = np.random.rand(1000, 50)
-cache.put(features, dataset="training", preprocessing="standard_scaled")
-
-# Cache DataFrames (automatically stored as Parquet)
-df = pd.DataFrame({"user_id": range(1000), "amount": np.random.exponential(50, 1000)})
-cache.put(df, source="transactions", date_range="2024_q1")
-
-# Retrieve cached data
-cached_features = cache.get(dataset="training", preprocessing="standard_scaled")
-cached_df = cache.get(source="transactions", date_range="2024_q1")
-```
-
-### Decorator Usage
-
-```python
-# Cache function results with TTL
-@cached(ttl="6h")
-def fetch_weather_data(city, units="metric"):
-    return api_call(f"weather/{city}", units=units)
-
-# Custom cache instance for specific use cases
-ml_cache = cacheness(CacheConfig(cache_dir="./ml_cache", default_ttl="1w"))
-
-@cached(cache_instance=ml_cache)
-def train_model(data, hyperparams):
-    return expensive_model_training(data, hyperparams)
-```
-
-### Advanced Object Serialization
-
-Cacheness supports advanced Python objects using **dill** for enhanced serialization:
-
-> ⚠️ **IMPORTANT WARNINGS**: Dill serialization can execute arbitrary code and may introduce bugs if class definitions change between cache storage and retrieval. See [Security Considerations](#dill-security-considerations) below.
-
-```python
-# Cache complex classes with large datasets (common ML use case)
-from dataclasses import dataclass
-import numpy as np
-
-@dataclass
-class ModelState:
-    weights: np.ndarray
-    metadata: dict
-    preprocessing_func: callable
-    
-    def __post_init__(self):
-        # Complex initialization with closures
-        scale_factor = self.metadata.get('scale_factor', 1.0)
-        self.preprocessing_func = lambda x: x * scale_factor + np.random.normal(0, 0.01)
-
-# Create model state with large data
-model_state = ModelState(
-    weights=np.random.randn(1000, 500),  # Large weight matrix
-    metadata={'epochs': 100, 'scale_factor': 2.5, 'accuracy': 0.94},
-    preprocessing_func=None  # Will be set in __post_init__
-)
-
-# Cache the entire initialized object (not possible with standard pickle)
-cache.put(model_state, model="resnet", checkpoint="epoch_100")
-
-# Retrieve and use - all data and functions preserved
-cached_model = cache.get(model="resnet", checkpoint="epoch_100")
-processed_data = cached_model.preprocessing_func(test_input)
-```
-
-#### Dill Security Considerations
-
-**🚨 Critical Security Risks:**
-- **Code Execution**: Dill can execute arbitrary code during deserialization
-- **Cache Tampering**: Malicious modification of cache files can compromise your application
-- **Version Conflicts**: Class definition changes can cause crashes or silent bugs
-
-**🛡️ Safe Usage Patterns:**
-
-```python
-# ✅ SAFE: Validate cached objects after retrieval
-def safe_cache_get(cache, **kwargs):
+with TemporaryDirectory() as temporary:
+    store = BlobStore(topology, cache_dir=Path(temporary))
     try:
-        cached_obj = cache.get(**kwargs)
-        if cached_obj is None:
-            return None
-            
-        # Validate object type and critical attributes
-        if not isinstance(cached_obj, ModelState):
-            raise ValueError("Cached object has unexpected type")
-        
-        if not hasattr(cached_obj, 'weights') or not hasattr(cached_obj, 'preprocessing_func'):
-            raise ValueError("Cached object missing required attributes")
-            
-        # Test critical functionality
-        test_input = np.array([[1.0, 2.0]])
-        _ = cached_obj.preprocessing_func(test_input)
-        
-        return cached_obj
-    except Exception as e:
-        print(f"⚠️ Cache validation failed: {e}")
-        return None  # Force recreation
-
-# ✅ SAFE: Version your cached classes
-@dataclass 
-class ModelState:
-    _version: str = "1.0"  # Track class version
-    weights: np.ndarray = None
-    # ... other fields
-    
-    def __post_init__(self):
-        if self._version != "1.0":
-            raise ValueError(f"Incompatible class version: {self._version}")
-
-# ❌ UNSAFE: Never cache objects from untrusted sources
-# ❌ UNSAFE: Don't cache in production without validation
-# ❌ UNSAFE: Don't ignore cache retrieval errors
+        store.initialize()
+        receipt = store.put_entry({"owner": "Ada"}, key="profile-ada")
+        assert store.get(receipt.key) == {"owner": "Ada"}
+    finally:
+        store.close()
 ```
 
-**Configuration:**
-```python
-# Enable/disable dill fallback (enabled by default)
-config = CacheConfig(enable_dill_fallback=True)
-cache = cacheness(config)
+Run [the exact memory BlobStore example](examples/memory_blob_store.py), or
+follow the [store objects guide](docs/BLOB_STORE.md) for a durable catalog.
 
-# For production: disable dill for security (recommended)
-config_secure = CacheConfig(enable_dill_fallback=False)
+### Quick start: cache a function result
 
-# When disabled, only standard pickle-compatible objects work
-config_strict = CacheConfig(enable_dill_fallback=False)
-```
-
-> 🔒 **Production Recommendation**: Disable dill in production environments (`enable_dill_fallback=False`) to eliminate code execution risks. Use dill only in trusted development environments with proper validation.
-
-### TensorFlow Tensor Support
-
-Native TensorFlow tensor caching with optimized storage:
+Cache policy is explicit and uses the same store topology:
 
 ```python
-import tensorflow as tf
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
-# Enable TensorFlow handler (disabled by default due to import overhead)
-config = CacheConfig(enable_tensorflow_tensors=True)
-cache = cacheness(config)
+from cacheness import CacheConfig, UnifiedCache, cached
+from cacheness.config import CacheStorageConfig
+from cacheness.storage import BackendRef, StoreTopology
 
-# Cache TensorFlow tensors directly
-tensor = tf.constant([[1, 2], [3, 4]], dtype=tf.float32)
-cache.put(tensor, model="cnn", layer="conv1", weights="initial")
-
-# Retrieve maintains tensor properties
-cached_tensor = cache.get(model="cnn", layer="conv1", weights="initial")
-print(cached_tensor.dtype)  # <dtype: 'float32'>
-print(cached_tensor.shape)  # (2, 2)
-```
-
-**Storage Benefits:**
-- Native tensor format with Blosc2 compression
-- Preserves dtype, shape, and tensor metadata
-- GPU memory efficient loading
-- File extension: `.b2tr` (TensorFlow tensor format)
-
-## Advanced Features
-
-- **Convenience Metadata Helpers**: `put_with_meta(data, **kwargs)` / `get_with_meta(**kwargs)` — kwargs serve as both cache key and `metadata_dict`, eliminating duplicated parameters. `put_with_model` / `get_with_model` for ORM-backed custom metadata. All accept `on=dict` for key-only discriminators.
-- **Inline Blob Storage**: entries ≤ `max_inline_size` bytes stored directly in the metadata row — eliminates blob file I/O for small values. Enable with `CacheConfig(blob=CacheBlobConfig(max_inline_size=4096))`.
-- **Cache Entry Signing**: HMAC-SHA256 signatures for metadata integrity protection, including namespace registry signing
-- **Typed Contracts**: `HandlerResult`, `EntryList`, `WriteBlobResult`, `IntegrityReport` — structured return types instead of raw dicts
-- **Non-destructive get**: `delete_on_error=False` preserves cache entries on deserialization errors
-- **Custom Metadata**: Rich metadata tracking with SQLAlchemy ORM for experiment tracking and data lineage
-- **Path Content Hashing**: Automatic content-based hashing for cache key, using key values that contain file & directory paths
-- **Multi-format Storage**: Optimized formats for different data types (NPZ, Parquet, compressed pickle)
-- **Intelligent Compression**: Automatic codec selection and parallel processing for large datasets
-
-### File Storage
-
-Store and retrieve arbitrary files with automatic metadata tracking (filename, MIME type, size):
-
-```python
-# Copy-in: store a file, keep the original
-key = cache.put_file("data/model.onnx", description="ONNX model v2")
-
-# Move-in: store and delete the source
-key = cache.put_file("output/temp_report.csv", move=True)
-
-# Retrieve as raw bytes
-data = cache.get_file(cache_key=key)
-
-# Copy-out: write to disk (resolves original filename from metadata)
-path = cache.get_file(cache_key=key, dest="./output/")
-# → Path("./output/model.onnx")
-
-# Move-out: write to disk and delete from cache
-path = cache.get_file(cache_key=key, dest="./restored/", move=True)
-
-# Safe write: raise FileExistsError if destination already exists
-path = cache.get_file(cache_key=key, dest="./output/model.onnx", overwrite=False)
-
-# Query stored files by auto-populated metadata
-results = cache.query_meta(mime_type="application/pdf")
-```
-
-### Low-Level Storage API
-
-For direct storage access without caching semantics (TTL, eviction), use the `BlobStore` API:
-
-```python
-from cacheness.storage import BlobStore
-
-# Create a blob store for ML model versioning
-store = BlobStore(cache_dir="./models", backend="sqlite", compression="lz4")
-
-# Store a model with metadata
-key = store.put(
-    model, 
-    key="xgboost_v1", 
-    metadata={"accuracy": 0.95, "author": "ml_team"}
+topology = StoreTopology(
+    payload=BackendRef(name="memory"),
+    authority=BackendRef(name="memory"),
 )
 
-# Store and retrieve arbitrary files
-key = store.put_file("data/report.csv", metadata={"project": "alpha"})
-path = store.get_file(key, dest="./restored/")  # → ./restored/report.csv
+with TemporaryDirectory() as temporary:
+    cache = UnifiedCache(
+        CacheConfig(storage=CacheStorageConfig(cache_dir=Path(temporary))),
+        store=topology,
+    )
+    try:
+        cache.initialize()
 
-# Retrieve by key
-model = store.get("xgboost_v1")
+        @cached(cache=cache)
+        def double(value: int) -> int:
+            return value * 2
 
-# Query by metadata
-high_accuracy_models = store.list(metadata_filter={"accuracy": 0.95})
-
-# Context manager for automatic cleanup
-with BlobStore(cache_dir="./artifacts") as store:
-    store.put(data, key="artifact_1")
+        assert double(21) == 42
+        assert double(21) == 42
+    finally:
+        cache.close()
 ```
 
-See [API_REFERENCE.md](docs/API_REFERENCE.md) for full `BlobStore` documentation.
+Run [the exact UnifiedCache example](examples/unified_cache.py), or follow the
+[cache function results guide](docs/CACHE_POLICY.md) for typed outcomes and
+invalidation.
+
+## Next tasks
+
+- [Store objects and catalog metadata](docs/BLOB_STORE.md)
+- [Cache function results](docs/CACHE_POLICY.md)
+- [Add a file format](docs/PLUGIN_DEVELOPMENT.md)
+- [Operate or migrate a store](docs/STORAGE_INITIALIZATION.md)
 
 ## Security and Integrity
 
-### Cache Entry Signing
-
-Protect cache metadata from tampering with HMAC-SHA256 signatures:
-
-```python
-from cacheness import cacheness, CacheConfig, SecurityConfig
-
-# Default: Signing enabled with enhanced security level
-cache = cacheness()  # Entry signing active by default
-
-# Custom security configuration
-config = CacheConfig(
-    security=SecurityConfig(
-        enable_entry_signing=True,        # Enable/disable signing
-        delete_invalid_signatures=True,   # Auto-cleanup tampered entries
-        use_in_memory_key=False,          # Persistent vs in-memory keys
-        allow_unsigned_entries=True,      # Backward compatibility
-        custom_signed_fields=None         # Custom fields to sign (uses default if None)
-    )
-)
-cache = cacheness(config)
-```
-
-**Default Signed Fields:**
-Signs 11 fields by default: `cache_key`, `data_type`, `prefix`, `file_size`, `file_hash`, `object_type`, `storage_format`, `serializer`, `compression_codec`, `actual_path`, `created_at`
-
-**Custom Field Selection:**
-```python
-# Sign only critical fields for minimal overhead
-config = CacheConfig(
-    security=SecurityConfig(
-        custom_signed_fields=["cache_key", "file_hash", "data_type", "file_size"]
-    )
-)
-
-# Sign all available fields for maximum security
-config = CacheConfig(
-    security=SecurityConfig(
-        custom_signed_fields=["cache_key", "file_hash", "data_type", "file_size", 
-                             "created_at", "prefix", "object_type", "storage_format",
-                             "serializer", "compression_codec", "actual_path"]
-    )
-)
-
-### In-Memory Signing Keys
-
-For enhanced security, use in-memory-only signing keys:
-
-```python
-# High-security configuration
-config = CacheConfig(
-    security=SecurityConfig(
-        use_in_memory_key=True,           # No key files on disk
-        delete_invalid_signatures=True    # Clean up on restart
-    )
-)
-cache = cacheness(config)
-
-# Benefits:
-# ✅ No cryptographic material persisted to disk
-# ✅ Cache entries invalidated on process restart
-# ✅ Ideal for containerized/high-security environments
-# ✅ Perfect for temporary/session-based caching
-```
-
-**Key Management:**
-- **Persistent Keys** (default): Key stored in `cache_signing_key.bin`, cache survives restarts
-- **In-Memory Keys**: Generated per process, cache invalidated on restart, enhanced security
-
-### Automatic Signature Verification
-
-All cache retrievals automatically verify signatures:
-
-```python
-# Signatures verified on every cache hit
-data = cache.get(model="xgboost", dataset="training")
-
-# Invalid signatures are handled based on configuration:
-# delete_invalid_signatures=True  → Entry deleted, cache miss returned
-# delete_invalid_signatures=False → Warning logged, data still returned
-```
-
-**Use Cases:**
-- **Development**: `delete_invalid_signatures=False` for debugging
-- **Production**: `delete_invalid_signatures=True` for automatic cleanup
-- **High Security**: `use_in_memory_key=True` + `delete_invalid_signatures=True`
-
-## Real-World Examples
-
-Comprehensive examples are available in the [`examples/`](examples/) directory:
-
-- **[API Request Caching](examples/api_request_caching.py)** - Intelligent API caching with TTL strategies
-- **[ML Pipeline Caching](examples/ml_pipeline_caching.py)** - Multi-stage ML training pipeline caching
-- **[S3 Caching](examples/s3_caching.py)** - Caching of S3 file downloads with ETag (remote file hash) validation
-- **[Custom Metadata Demo](examples/custom_metadata_demo.py)** - Advanced metadata tracking workflows
-- **[Configurable Serialization](examples/configurable_serialization_demo.py)** - Custom serialization examples
-
-## Cache Management
-
-```python
-# Get cache statistics
-stats = cache.get_stats()
-print(f"Total entries: {stats['total_entries']}")
-print(f"Total size: {stats['total_size_mb']:.2f} MB")
-print(f"Hit rate: {stats.get('hit_rate', 0):.1%}")
-
-# List and manage entries
-entries = cache.list_entries()
-for entry in entries:
-    print(f"{entry['cache_key']}: {entry.get('description', 'No description')} ({entry['size_mb']:.2f}MB)")
-
-# Cleanup operations
-cache.cleanup_expired()                     # Remove expired entries
-cache.invalidate(model="old", version="1")  # Remove specific entry
-cache.clear()                               # Clear all entries
-```
-
-## Performance
-
-### Backend Performance (10k+ entries)
-
-| Backend | `list_entries()` | `get_stats()` | `cleanup_expired()` |
-|---------|------------------|---------------|-------------------|
-| **SQLite** | **2.3ms** | **4.1ms** | **12ms** |
-| **JSON** | 1.2s | 850ms | 1.5s |
-
-*SQLite provides 10-500x performance improvement for large caches*
-
-### Storage Optimizations
-
-- **Intelligent Compression**: Automatic codec selection (LZ4 for dataframe/series, Blosc2 for numpy arrays, ZSTD for objects)
-- **Format Selection**: NPZ for arrays, Parquet for DataFrames, compressed pickle for objects
-- **Graceful Fallbacks**: orjson → json, SQLite → JSON, Blosc2 → NPZ → pickle
-- **Parallel Processing**: Automatic when hashing content of large directories (≥4GB or ≥80 files)
-
-For detailed performance tuning, see the **[Performance Guide](docs/PERFORMANCE.md)**.
-
-## Configuration
-
-### Simple Configuration
-
-```python
-from cacheness import cacheness, CacheConfig
-
-# Simple configuration for most use cases
-config = CacheConfig(
-    cache_dir="./my_cache",
-    metadata_backend="sqlite",    # "sqlite" (recommended) or "json"
-    default_ttl="2d",             # Duration strings: s, m, h, d, w, mo, y
-    max_cache_size="5gb",          # Size strings: kb, mb, gb, tb
-    cleanup_on_init=True          # Clean expired entries on startup
-)
-
-cache = cacheness(config)
-```
-
-### Handler Configuration
-
-Control which data type handlers are enabled:
-
-```python
-# Configure data type handlers
-config = CacheConfig(
-    # Core object handlers
-    enable_object_pickle=True,          # General Python objects (default: True)
-    enable_dill_fallback=True,          # Classes, Functions, lambdas, closures (default: True)
-    
-    # Array and tensor handlers  
-    enable_numpy_arrays=True,           # NumPy arrays (default: True)
-    enable_tensorflow_tensors=False,    # TensorFlow tensors (default: False)
-    
-    # DataFrame handlers
-    enable_pandas_dataframes=True,      # Pandas DataFrames (default: True)
-    enable_polars_dataframes=True,      # Polars DataFrames (default: True)
-    enable_pandas_series=True,          # Pandas Series (default: True)
-    enable_polars_series=True,          # Polars Series (default: True)
-    
-    # Performance options
-    compression_threshold_bytes=1024,   # Only compress objects larger than this (default: 1024)
-    enable_parallel_compression=True,   # Use multiple threads for compression (default: True)
-)
-
-cache = cacheness(config)
-```
-
-### Advanced Configuration
-
-For complex scenarios, use detailed configuration objects:
-
-```python
-from cacheness.config import CacheStorageConfig, CacheMetadataConfig, CompressionConfig
-
-config = CacheConfig(
-    storage=CacheStorageConfig(
-        cache_dir="./advanced_cache",
-        max_cache_size="10gb",
-        cleanup_on_init=True
-    ),
-    metadata=CacheMetadataConfig(
-        backend="sqlite",
-        verify_cache_integrity=True,
-        store_full_metadata=True
-    ),
-    compression=CompressionConfig(
-        pickle_compression_codec="zstd",
-        pickle_compression_level=5,
-        use_blosc2_arrays=True,
-        blosc2_array_codec="lz4"
-    ),
-    default_ttl="2d"
-)
-```
-
-For comprehensive configuration options, see the **[Configuration Guide](docs/CONFIGURATION.md)**.
-
-## Path Content Hashing
-
-Automatic content-based caching for files and directories:
-
-```python
-from pathlib import Path
-
-# Files with same content but different paths share cache entries
-dataset_v1 = Path("data/train.csv")
-dataset_v2 = Path("backup/data/train.csv")  # Same content, different name
-
-cache.put(features, dataset=dataset_v1)
-result = cache.get(dataset=dataset_v2)  # ✓ Cache hit - same content
-
-# Automatic parallel processing for large directories (≥4GB or ≥80 files)
-large_dataset = Path("./datasets/images/")  # 500+ files → parallel hashing
-small_config = Path("./config/")            # 10 files → sequential hashing
-```
-
-## Custom Metadata
-
-For experiment tracking, data lineage, and advanced workflows:
-
-```python
-from cacheness.custom_metadata import custom_metadata_model, CustomMetadataBase
-from cacheness.metadata import Base
-from sqlalchemy import Column, String, Float
-
-@custom_metadata_model("ml_experiments")
-class MLExperimentMetadata(Base, CustomMetadataBase):
-    experiment_id = Column(String(100), nullable=False, unique=True, index=True)
-    model_type = Column(String(50), nullable=False, index=True)
-    accuracy = Column(Float, nullable=False, index=True)
-
-# Store with structured metadata
-experiment_metadata = MLExperimentMetadata(
-    experiment_id="exp_001", model_type="xgboost", accuracy=0.94
-)
-
-cache.put(model, experiment="exp_001", custom_metadata={"ml_experiments": experiment_metadata})
-
-# Simple query - returns list directly
-all_experiments = cache.query_custom("ml_experiments")
-
-# Advanced filtering with context manager (ensures proper session cleanup)
-with cache.query_custom_session("ml_experiments") as query:
-    high_accuracy_models = query.filter(MLExperimentMetadata.accuracy >= 0.9).all()
-```
-
-For detailed metadata workflows, see the **[Custom Metadata Guide](docs/CUSTOM_METADATA.md)**.
-
-## Extending Cacheness
-
-Cacheness is designed to be extensible. Register custom handlers for new data types, or custom backends for specialized storage.
-
-### Custom Data Type Handlers
-
-```python
-from cacheness import register_handler, CacheHandler
-from pathlib import Path
-
-class ParquetHandler(CacheHandler):
-    @property
-    def data_type(self):
-        return "parquet"
-    
-    def can_handle(self, data):
-        import pandas as pd
-        return isinstance(data, pd.DataFrame)
-    
-    def put(self, data, file_path, config):
-        output = file_path.with_suffix(".parquet")
-        data.to_parquet(output, compression="snappy")
-        return {"storage_format": "parquet", "file_path": str(output)}
-    
-    def get(self, file_path, metadata):
-        import pandas as pd
-        return pd.read_parquet(file_path)
-
-# Register with highest priority
-register_handler(ParquetHandler(), priority=0)
-```
-
-### Custom Storage Backends
-
-```python
-from cacheness import register_metadata_backend, register_blob_backend
-
-# Register a custom metadata backend (Redis, DynamoDB, etc.)
-register_metadata_backend(
-    name="redis",
-    backend_class=RedisBackend,
-    description="Redis-based metadata storage",
-)
-
-# Register a custom blob backend (S3, GCS, Azure, etc.)
-register_blob_backend(
-    name="s3",
-    backend_class=S3BlobBackend,
-    description="Amazon S3 blob storage",
-)
-
-# Use in configuration
-config = CacheConfig(
-    metadata=CacheMetadataConfig(backend="redis", connection_url="redis://localhost"),
-    blob=CacheBlobConfig(backend="s3", bucket="my-cache-bucket"),
-)
-```
-
-For complete examples and interface documentation, see the **[Plugin Development Guide](docs/PLUGIN_DEVELOPMENT.md)**.
-
-
-## Requirements
-
-### Core Dependencies
-- **Python**: ≥ 3.11
-- **xxhash**: Fast hashing for cache keys
-
-### Optional Dependencies (Graceful Fallbacks)
-- **blosc2**: High-performance compression (fallback: standard compression)
-- **numpy**: Optimized array handling and storage
-- **sqlalchemy**: SQLite backend (10-500x faster for large caches)
-- **orjson**: High-performance JSON (1.5-5x faster than built-in)
-- **pandas/polars**: DataFrame and Series parquet storage optimization 
-- **pyarrow**: Pandas parquet file support
-
-Missing optional dependencies are handled gracefully with automatic fallbacks.
+Application payloads are trusted application payloads only: pickle and dill are never safe to
+deserialize from a hostile source. Integrity signatures detect modification but
+do not sandbox executable serializers. Read the
+[Security Guide](docs/SECURITY.md) for the canonical boundary.
+
+The detailed payload, topology, platform, and evidence boundaries live in the
+[release qualification guide](docs/RELEASE_QUALIFICATION.md).
 
 ## Documentation
 
-- **[Plugin Development Guide](docs/PLUGIN_DEVELOPMENT.md)** - Extending cacheness with custom handlers and backends
-- **[Security Guide](docs/SECURITY.md)** - Cache entry signing, integrity protection, and security best practices
-- **[Configuration Guide](docs/CONFIGURATION.md)** - Detailed configuration options and use cases
-- **[Backend Selection Guide](docs/BACKEND_SELECTION.md)** - Choosing between JSON, SQLite, and PostgreSQL backends
-- **[Custom Metadata Guide](docs/CUSTOM_METADATA.md)** - Advanced metadata workflows with SQLAlchemy
-- **[Performance Guide](docs/PERFORMANCE.md)** - Optimization strategies and benchmarks
-- **[Cross-Platform Guide](docs/CROSS_PLATFORM_GUIDE.md)** - Development guide for all platforms
-- **[Windows Compatibility](docs/WINDOWS_COMPATIBILITY.md)** - Cross-platform development and Windows-specific considerations
-- **[Local Test Environment Guide](docs/LOCAL_TEST_ENVIRONMENT.md)** - Docker Compose setup for PostgreSQL and S3 integration testing
-- **[API Reference](docs/API_REFERENCE.md)** - Complete API documentation
-
-## Platform Verification
-
-Verify Cacheness works on your platform:
-
-```bash
-python verify_platform.py
-```
-
-This script tests core functionality, SQLite backend, and resource cleanup on your system.
-
-## License
-
-GPLv3 License - see LICENSE file for details.
+The [task-first documentation index](docs/README.md) links the current store,
+cache, format, and maintenance journeys. Component reference and qualification
+material live there rather than duplicating lifecycle or release claims here.

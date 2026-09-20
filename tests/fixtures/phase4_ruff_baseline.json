@@ -1,0 +1,407 @@
+{
+  "diagnostics": [
+    {
+      "code": "F401",
+      "fingerprint": "054e234bcc84cef31362ecd0e0eb3f527b009793446c0d51af1ea1088cc02c4b",
+      "message": "`.storage.backends.InMemoryBlobBackend` imported but unused; consider using `importlib.util.find_spec` to test for availability",
+      "path": "src/cacheness/__init__.py",
+      "source": "        InMemoryBlobBackend,"
+    },
+    {
+      "code": "F401",
+      "fingerprint": "0823b04ae66c01049d8b19ff94073fbce2edafc0efb8e7ce5f095907127df38d",
+      "message": "`.config.save_config_to_yaml` imported but unused; consider using `importlib.util.find_spec` to test for availability",
+      "path": "src/cacheness/__init__.py",
+      "source": "    from .config import load_config_from_yaml, save_config_to_yaml"
+    },
+    {
+      "code": "F401",
+      "fingerprint": "3eb5b9c61a5f75f85cf4ce46fa7bd37828ad38eab635636204d171e4ef823889",
+      "message": "`.storage.backends.get_blob_backend` imported but unused; consider using `importlib.util.find_spec` to test for availability",
+      "path": "src/cacheness/__init__.py",
+      "source": "        get_blob_backend,"
+    },
+    {
+      "code": "F401",
+      "fingerprint": "46267feed826eddf44b4b15a0e091033c7412187bc0434ac6dded9670532c1b0",
+      "message": "`.storage.backends.register_metadata_backend` imported but unused; consider using `importlib.util.find_spec` to test for availability",
+      "path": "src/cacheness/__init__.py",
+      "source": "        register_metadata_backend,"
+    },
+    {
+      "code": "F401",
+      "fingerprint": "64c65bad6993e7c77d8222dd1fd882e1bb96a858732c476ab0647e9b65ffae59",
+      "message": "`.storage.backends.unregister_metadata_backend` imported but unused; consider using `importlib.util.find_spec` to test for availability",
+      "path": "src/cacheness/__init__.py",
+      "source": "        unregister_metadata_backend,"
+    },
+    {
+      "code": "F401",
+      "fingerprint": "6a74ddc690bbcc58ab884cfb8095caac29098e442d2e98613cf7dcbd4029b816",
+      "message": "`.storage.backends.unregister_blob_backend` imported but unused; consider using `importlib.util.find_spec` to test for availability",
+      "path": "src/cacheness/__init__.py",
+      "source": "        unregister_blob_backend,"
+    },
+    {
+      "code": "F401",
+      "fingerprint": "817264bfdeb937a60c46f4975b9903950435befa61baaaa8b5518f31e7bc52ad",
+      "message": "`.storage.backends.list_blob_backends` imported but unused; consider using `importlib.util.find_spec` to test for availability",
+      "path": "src/cacheness/__init__.py",
+      "source": "        list_blob_backends,"
+    },
+    {
+      "code": "F401",
+      "fingerprint": "8978f0b01a232abeb5098dc43b4d628164cd0ac4c03d51dac2242a839bcdc7d6",
+      "message": "`.storage.BlobStore` imported but unused; consider using `importlib.util.find_spec` to test for availability",
+      "path": "src/cacheness/__init__.py",
+      "source": "    from .storage import BlobStore"
+    },
+    {
+      "code": "F401",
+      "fingerprint": "a7e7b678829cec7e4ba9c820d7c948ebce7771e4f4a2d3a82f23aa1b44b74d99",
+      "message": "`.config.load_config_from_yaml` imported but unused; consider using `importlib.util.find_spec` to test for availability",
+      "path": "src/cacheness/__init__.py",
+      "source": "    from .config import load_config_from_yaml, save_config_to_yaml"
+    },
+    {
+      "code": "F401",
+      "fingerprint": "cebc8be9fb9215bf513e6ecdb432c222f8b4bb1a7605a75cb8b904447d6870c3",
+      "message": "`.storage.backends.FilesystemBlobBackend` imported but unused; consider using `importlib.util.find_spec` to test for availability",
+      "path": "src/cacheness/__init__.py",
+      "source": "        FilesystemBlobBackend,"
+    },
+    {
+      "code": "F401",
+      "fingerprint": "d477701bffcb32e5b11a4f92f57062da0daf68257b0f2a629540dedab5d293e7",
+      "message": "`.storage.backends.list_metadata_backends` imported but unused; consider using `importlib.util.find_spec` to test for availability",
+      "path": "src/cacheness/__init__.py",
+      "source": "        list_metadata_backends,"
+    },
+    {
+      "code": "F401",
+      "fingerprint": "e6e144417b5351988ee04a3214e42e3f76beda29400a4b26eb369411d41a0015",
+      "message": "`.storage.backends.register_blob_backend` imported but unused; consider using `importlib.util.find_spec` to test for availability",
+      "path": "src/cacheness/__init__.py",
+      "source": "        register_blob_backend,"
+    },
+    {
+      "code": "F401",
+      "fingerprint": "f4bf4936152b37eff4dd22a1e28150c72ca99cb0a5a4212769190b12d483420e",
+      "message": "`.storage.backends.get_metadata_backend` imported but unused; consider using `importlib.util.find_spec` to test for availability",
+      "path": "src/cacheness/__init__.py",
+      "source": "        get_metadata_backend,"
+    },
+    {
+      "code": "F401",
+      "fingerprint": "f6cfa397edd3e2613872e4265eaf718058f6282aea8eae4b77d70cd1f0cd6211",
+      "message": "`.storage.backends.MetadataBackend` imported but unused; consider using `importlib.util.find_spec` to test for availability",
+      "path": "src/cacheness/__init__.py",
+      "source": "        MetadataBackend,  # Base class for custom backends"
+    },
+    {
+      "code": "F401",
+      "fingerprint": "fd1e682b1618d0b3be64aed62031e736e34c0c73c340e5550f1e8524fe6656e9",
+      "message": "`.storage.backends.BlobBackend` imported but unused; consider using `importlib.util.find_spec` to test for availability",
+      "path": "src/cacheness/__init__.py",
+      "source": "        BlobBackend,  # Base class for custom blob backends"
+    },
+    {
+      "code": "F401",
+      "fingerprint": "56354c28275962205dcdade97585b9600815572d041efc371ceeb15266cf563f",
+      "message": "`sqlalchemy.Text` imported but unused; consider using `importlib.util.find_spec` to test for availability",
+      "path": "src/cacheness/custom_metadata.py",
+      "source": "        Text,"
+    },
+    {
+      "code": "F401",
+      "fingerprint": "cce57a817cd6c3e5d57d53397310ad3f57e1d3b0f08bc37b73f91586158a2aff",
+      "message": "`sqlalchemy.and_` imported but unused; consider using `importlib.util.find_spec` to test for availability",
+      "path": "src/cacheness/custom_metadata.py",
+      "source": "        and_,"
+    },
+    {
+      "code": "F401",
+      "fingerprint": "d3e0f1dce39d04ec72661376299f3f8ef5f015098c00780d2424ec0f9626fcb4",
+      "message": "`sqlalchemy.create_engine` imported but unused",
+      "path": "src/cacheness/custom_metadata.py",
+      "source": "        from sqlalchemy import create_engine"
+    },
+    {
+      "code": "F401",
+      "fingerprint": "f1636e8654850e9fe08c7ddda60d7964519908627666eaa66b261df20959aafb",
+      "message": "`.metadata.CacheEntry` imported but unused",
+      "path": "src/cacheness/custom_metadata.py",
+      "source": "        from .metadata import CacheEntry"
+    },
+    {
+      "code": "F401",
+      "fingerprint": "f976daca179026d97461eeebd2e6f98653da566da1fcb829b54c4b6d7798b623",
+      "message": "`typing.Any` imported but unused",
+      "path": "src/cacheness/custom_metadata.py",
+      "source": "from typing import Dict, Type, Any, Optional, List"
+    },
+    {
+      "code": "F401",
+      "fingerprint": "0e9f2cde35c7c0758538e5a2a85730a19a385dd047d8648ce6c64dd1afb1f652",
+      "message": "`typing.Any` imported but unused",
+      "path": "src/cacheness/storage/backends/__init__.py",
+      "source": "from typing import Type, Dict, Any, Optional"
+    },
+    {
+      "code": "F401",
+      "fingerprint": "3ccee86a41609d4059810eedb6d99b5ae36cce1e69525d93d8c175d7c3b26b67",
+      "message": "`typing.Optional` imported but unused",
+      "path": "src/cacheness/storage/backends/__init__.py",
+      "source": "from typing import Type, Dict, Any, Optional"
+    },
+    {
+      "code": "F401",
+      "fingerprint": "73e38cea80111e201479c1a6d3604a619bd096b633f8ee61271eb400bacce1be",
+      "message": "`.s3_backend.S3BlobBackend` imported but unused; consider using `importlib.util.find_spec` to test for availability",
+      "path": "src/cacheness/storage/backends/__init__.py",
+      "source": "    from .s3_backend import S3BlobBackend, BOTO3_AVAILABLE"
+    },
+    {
+      "code": "E402",
+      "fingerprint": "fe4f8ebd101ac15163d020e25076dfa7e377c1450d0c1ff3a74b8d37c792f2ab",
+      "message": "Module level import not at top of file",
+      "path": "src/cacheness/storage/backends/__init__.py",
+      "source": "from .blob_backends import ("
+    },
+    {
+      "code": "E402",
+      "fingerprint": "3e554531966df2f1725feece0e5dd135f1800de2a025111e60b298b839b5c1a8",
+      "message": "Module level import not at top of file",
+      "path": "src/cacheness/storage/backends/postgresql_backend.py",
+      "source": "from .base import MetadataBackend"
+    },
+    {
+      "code": "F401",
+      "fingerprint": "73a3b1c9ffda86c747b73f0ab62078ca4342eaa67a33a393d1501d511f482a1a",
+      "message": "`psycopg2` imported but unused; consider using `importlib.util.find_spec` to test for availability",
+      "path": "src/cacheness/storage/backends/postgresql_backend.py",
+      "source": "    import psycopg2"
+    },
+    {
+      "code": "F401",
+      "fingerprint": "7c486d0ef25356855b4b59dc4e7efe92adac23a13f41a97101209a29fd0b22ea",
+      "message": "`psycopg` imported but unused; consider using `importlib.util.find_spec` to test for availability",
+      "path": "src/cacheness/storage/backends/postgresql_backend.py",
+      "source": "        import psycopg"
+    },
+    {
+      "code": "F401",
+      "fingerprint": "87a6e032eaeaf90ca5a6df60a9c3029fc5655bc1046ceb5724cf445ec521260a",
+      "message": "`sqlalchemy.exc.IntegrityError` imported but unused; consider using `importlib.util.find_spec` to test for availability",
+      "path": "src/cacheness/storage/backends/postgresql_backend.py",
+      "source": "    from sqlalchemy.exc import OperationalError, IntegrityError"
+    },
+    {
+      "code": "F401",
+      "fingerprint": "8d8ed009cbaa144b98dd54f842d7944bec75c3a758517cf38e17bb7d9917255a",
+      "message": "`sqlalchemy.exc.OperationalError` imported but unused; consider using `importlib.util.find_spec` to test for availability",
+      "path": "src/cacheness/storage/backends/postgresql_backend.py",
+      "source": "    from sqlalchemy.exc import OperationalError, IntegrityError"
+    },
+    {
+      "code": "F841",
+      "fingerprint": "6ced9bced760cac8a7422b6c0b70f976aaaf63aeaf9bfc9923360f6cd15db8d8",
+      "message": "Local variable `current_schemas` is assigned to but never used",
+      "path": "tests/test_custom_metadata.py",
+      "source": "    current_schemas = list_registered_schemas().copy()"
+    },
+    {
+      "code": "F841",
+      "fingerprint": "972a39d08157c25e3fa9c7e07115a59ef126f9f0cdc499fbd3158120f42d560c",
+      "message": "Local variable `test_data` is assigned to but never used",
+      "path": "tests/test_custom_metadata.py",
+      "source": "        test_data = {\"model\": \"multi_meta_model\"}"
+    },
+    {
+      "code": "F401",
+      "fingerprint": "0f4045e4e0cece168fa05d87fdc2f6aa51663f75b249f65c29e6a6d2a84d0561",
+      "message": "`time` imported but unused",
+      "path": "tests/test_metadata_backend_registry.py",
+      "source": "        import time"
+    },
+    {
+      "code": "F401",
+      "fingerprint": "1a98d3f2eb2f8279be6b9c25ebfda7c4c8a8341e63f5b32d870026be241af6b6",
+      "message": "`unittest.mock.MagicMock` imported but unused",
+      "path": "tests/test_metadata_backend_registry.py",
+      "source": "from unittest.mock import MagicMock"
+    },
+    {
+      "code": "F401",
+      "fingerprint": "84df96fd6f24c81eaadafa3f6eee6a837aa0324132131d107e92dfaf113d2eb5",
+      "message": "`os` imported but unused",
+      "path": "tests/test_metadata_backend_registry.py",
+      "source": "import os"
+    },
+    {
+      "code": "F401",
+      "fingerprint": "0dcdb1acd535128c291c3a1daab781410e198564c373e3c31bca35525d8fd009",
+      "message": "`unittest.mock.patch` imported but unused",
+      "path": "tests/test_postgresql_backend.py",
+      "source": "        from unittest.mock import MagicMock, patch"
+    },
+    {
+      "code": "F401",
+      "fingerprint": "2960d44db7e92a1890ecebf624d7d33615ffe070164bf5a62549d6bf8e00d7ba",
+      "message": "`unittest.mock.MagicMock` imported but unused",
+      "path": "tests/test_postgresql_backend.py",
+      "source": "from unittest.mock import MagicMock, patch"
+    },
+    {
+      "code": "F401",
+      "fingerprint": "4740b1d6078c49bcccdfc9cb8d1474b257fd2d72dd5765fa6088f90bc19e5123",
+      "message": "`cacheness.storage.backends.unregister_metadata_backend` imported but unused",
+      "path": "tests/test_postgresql_backend.py",
+      "source": "    unregister_metadata_backend,"
+    },
+    {
+      "code": "F401",
+      "fingerprint": "76620b5908000528ab5acd2225544124c165a5e046a5406568cb7ee4e382000c",
+      "message": "`cacheness.storage.backends.postgresql_backend` imported but unused",
+      "path": "tests/test_postgresql_backend.py",
+      "source": "            from cacheness.storage.backends import postgresql_backend"
+    },
+    {
+      "code": "F401",
+      "fingerprint": "8cca1d743e6d33bd21e741bebda2bb25e97a8b1f1712d4a9537ea3f316eb8382",
+      "message": "`importlib` imported but unused",
+      "path": "tests/test_postgresql_backend.py",
+      "source": "            import importlib"
+    },
+    {
+      "code": "F401",
+      "fingerprint": "9f0bd70bab6caee2efb33ae22640c28f1db57d15bbeebaaa7318ccfdbb011e15",
+      "message": "`unittest.mock.MagicMock` imported but unused",
+      "path": "tests/test_postgresql_backend.py",
+      "source": "        from unittest.mock import MagicMock, patch"
+    },
+    {
+      "code": "F841",
+      "fingerprint": "b30280ba3e5f223826aba19f659635b67eff45a95a48073ed9ad6e422a7d0c38",
+      "message": "Local variable `backend` is assigned to but never used",
+      "path": "tests/test_postgresql_backend.py",
+      "source": "            backend = create_metadata_backend("
+    },
+    {
+      "code": "F401",
+      "fingerprint": "c707c2ab11c1d24deef07f0ec09df43d085107a4a5f73abbeb495b8bcddc6b01",
+      "message": "`cacheness.storage.backends.register_metadata_backend` imported but unused",
+      "path": "tests/test_postgresql_backend.py",
+      "source": "    register_metadata_backend,"
+    },
+    {
+      "code": "F401",
+      "fingerprint": "d648ebe9e4991e4613181975a05f907ebbe3f996b4309024918c3a85a940b086",
+      "message": "`datetime.datetime` imported but unused",
+      "path": "tests/test_postgresql_backend.py",
+      "source": "from datetime import datetime, timezone"
+    },
+    {
+      "code": "F811",
+      "fingerprint": "e48d071b8d9045882c87e702ae39f7846b04ed8e565454f3f83fe9a44c6e9f57",
+      "message": "Redefinition of unused `MagicMock` from line 16",
+      "path": "tests/test_postgresql_backend.py",
+      "source": "        from unittest.mock import MagicMock, patch"
+    },
+    {
+      "code": "F841",
+      "fingerprint": "ec85b2fbefeeafe455b487d16ef28b659fb1d84fc089b4bb0cfe67db76d39197",
+      "message": "Local variable `cache_key` is assigned to but never used",
+      "path": "tests/test_postgresql_backend.py",
+      "source": "            cache_key = cache.put("
+    },
+    {
+      "code": "F401",
+      "fingerprint": "ff411abdb1bd10044d34a4a59e81d61fa366456f122e0216e9e746419262745d",
+      "message": "`datetime.timezone` imported but unused",
+      "path": "tests/test_postgresql_backend.py",
+      "source": "from datetime import datetime, timezone"
+    }
+  ],
+  "existing_paths": [
+    "src/cacheness/__init__.py",
+    "src/cacheness/config.py",
+    "src/cacheness/core.py",
+    "src/cacheness/custom_metadata.py",
+    "src/cacheness/error_handling.py",
+    "src/cacheness/metadata.py",
+    "src/cacheness/storage/__init__.py",
+    "src/cacheness/storage/backends/__init__.py",
+    "src/cacheness/storage/backends/base.py",
+    "src/cacheness/storage/backends/blob_backends.py",
+    "src/cacheness/storage/backends/postgresql_backend.py",
+    "src/cacheness/storage/blob_store.py",
+    "src/cacheness/storage/lifecycle.py",
+    "src/cacheness/storage/lifecycle_authority.py",
+    "src/cacheness/storage/manifest.py",
+    "src/cacheness/storage/manifest_repository.py",
+    "src/cacheness/storage/memory_lifecycle_authority.py",
+    "src/cacheness/storage/read_contract.py",
+    "src/cacheness/storage/sqlite_lifecycle_authority.py",
+    "tests/_lifecycle_test_support.py",
+    "tests/test_blob_manifest.py",
+    "tests/test_blob_manifest_backends.py",
+    "tests/test_blob_store_atomic_lifecycle.py",
+    "tests/test_blob_store_close_contract.py",
+    "tests/test_blob_store_concurrency.py",
+    "tests/test_blob_store_integrity.py",
+    "tests/test_blob_store_legacy_contract.py",
+    "tests/test_blob_store_read_contract.py",
+    "tests/test_blob_store_reconciliation.py",
+    "tests/test_cached_custom_metadata.py",
+    "tests/test_clear_recovery.py",
+    "tests/test_config_validation.py",
+    "tests/test_custom_metadata.py",
+    "tests/test_filesystem_containment.py",
+    "tests/test_lifecycle_authority_contract.py",
+    "tests/test_manifest_repository_cas.py",
+    "tests/test_metadata.py",
+    "tests/test_metadata_backend_registry.py",
+    "tests/test_phase3_local_workflows.py",
+    "tests/test_phase3_scheduler_retirement.py",
+    "tests/test_phase3_windows_contract.py",
+    "tests/test_postgresql_backend.py",
+    "tests/test_projection_mutation_contract.py",
+    "tests/test_projection_sql_atomicity.py",
+    "tests/test_public_api_contract.py",
+    "tests/test_sqlite_bootstrap_concurrency.py",
+    "tests/test_unified_cache_adversarial_lifecycle.py",
+    "tests/test_unified_cache_lifecycle_authority.py",
+    "tools/verify_phase4_ruff_delta.py"
+  ],
+  "expected_retired_paths": [
+    "metadata.py",
+    "src/cacheness/custom_metadata.py",
+    "src/cacheness/storage/backends/base.py",
+    "src/cacheness/storage/manifest_repository.py"
+  ],
+  "new_paths": [
+    "examples/custom_metadata_demo.py",
+    "metadata.py",
+    "src/cacheness/storage/backends/s3_backend.py",
+    "src/cacheness/storage/catalog.py",
+    "src/cacheness/storage/composition.py",
+    "src/cacheness/storage/projections.py",
+    "tests/test_blob_backend_registry.py",
+    "tests/test_blob_store_composition.py",
+    "tests/test_cached_query_meta.py",
+    "tests/test_catalog_projection.py",
+    "tests/test_catalog_query_contract.py",
+    "tests/test_catalog_schema.py",
+    "tests/test_core.py",
+    "tests/test_metadata_role_contract.py",
+    "tests/test_phase3_gap_acceptance.py",
+    "tests/test_phase4_cutover_verifier.py",
+    "tests/test_s3_blob_backend.py",
+    "tests/test_sqlite_metadata_bootstrap_atomicity.py",
+    "tests/test_stored_compatibility.py",
+    "tests/test_topology_capabilities.py",
+    "tools/verify_phase4_cutover.py"
+  ],
+  "schema_version": 1
+}

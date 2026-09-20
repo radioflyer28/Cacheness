@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "fixture_id": "array-raw-v035-compress",
+  "source_commit": "041c930fb66c7aa23f53d1f9f524e9fafdd20e68",
+  "source_version": "0.3.5",
+  "generator_command": "detached historical writer: ArrayHandler._write_blosc2_array(np.arange(6, dtype=np.int32).reshape(2, 3), payload.b2nd, lz4@5)",
+  "environment": {
+    "cacheness": "0.3.5",
+    "python": "3.13.3",
+    "numpy": "2.3.2",
+    "blosc2": "3.7.0"
+  },
+  "logical_input": {
+    "dtype": "int32",
+    "shape": [2, 3],
+    "values": [0, 1, 2, 3, 4, 5]
+  },
+  "discriminators": {
+    "storage_format": "blosc2",
+    "frame_api": "compress",
+    "shape_text": "(2, 3)",
+    "dtype_text": "int32",
+    "signature_state": "not_applicable"
+  },
+  "files": {
+    "payload.b2nd": {
+      "source_sha256": "b7abe25fe6e6e192d0c6596fd9c30493f9f0a3e58412cc59c8913ccac37ecb46",
+      "copied_sha256": "b7abe25fe6e6e192d0c6596fd9c30493f9f0a3e58412cc59c8913ccac37ecb46"
+    }
+  }
+}

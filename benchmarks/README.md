@@ -1,170 +1,90 @@
 # Cacheness Benchmark Suite
 
-Performance benchmarks for identifying regressions and optimization opportunities
-across cacheness metadata backends, handlers, compression, security, and the decorator API.
+## Current Benchmarks
 
-## Valid Backends
+### `comprehensive_backend_benchmark.py` 🏆
+**Primary benchmark** - Consolidates multiple backend tests into a single comprehensive suite.
 
-| Backend | Config Value | Description |
-|---------|-------------|-------------|
-| JSON | `"json"` | File-per-entry, good for small caches (<500 entries) |
-| SQLite | `"sqlite"` | Dedicated-column schema, best for large caches |
-| SQLite In-Memory | `"sqlite_memory"` | Ephemeral `:memory:` DB, good for tests/CI |
-| PostgreSQL | `"postgresql"` | Production-grade, requires external server |
+**Coverage:**
+- Raw backend performance comparison (Memory, JSON, SQLite)
+- Memory cache layer impact analysis (enabled vs disabled)
+- Realistic workload patterns (Sequential, Random, Hot-Spot)
+- Backend scaling characteristics across cache sizes
+- Detailed memory cache effectiveness analysis
 
-> **Note:** The `"memory"` (InMemoryBackend) metadata backend was removed. Use `"sqlite_memory"` for ephemeral caching.
+**Run with:** `uv run python comprehensive_backend_benchmark.py`
 
-## Benchmark Files
+**Key Results (Updated with Schema Optimizations):**
+- InMemory backend: Ultra-fast (6-21k ops/sec), unified entry structure, no persistence
+- JSON backend: Good for small caches (<500 entries), simple row-based storage
+- SQLite backend: Best for large caches (>500 entries), optimized dedicated columns
+- All backends: Consistent entry schema with backend-optimized storage patterns
+- Memory cache layer provides 15-25% improvement for SQLite, 5-10% for JSON
 
-### `comprehensive_backend_benchmark.py` — Primary Backend Benchmark
-Raw backend performance, memory cache layer impact, realistic workload patterns,
-and scaling characteristics across JSON, SQLite, and SQLite in-memory.
+### `test_memory_backend.py`
+Specialized tests for Memory backend specific functionality.
 
-```bash
-uv run python benchmarks/comprehensive_backend_benchmark.py
-```
+### `test_performance_comparison.py` 
+Cross-language and cross-system performance comparisons.
 
-### `management_ops_benchmark.py` — Management Operations Benchmark
-Benchmarks all management operations: `update_data()`, `touch()`, `touch_batch()`,
-`delete_where()`, `delete_matching()`, `get_batch()`, `delete_batch()`,
-`invalidate()`, and `clear_all()`.
-Measures ops/sec at varying cache sizes across all backends.
+### `threshold_benchmark.py`
+Cache size threshold analysis and optimization recommendations.
 
-```bash
-uv run python benchmarks/management_ops_benchmark.py
-```
+## Deprecated Benchmarks
 
-### `decorator_benchmark.py` — Decorator Overhead Benchmark
-Benchmarks the `@cached` / `@cacheness_it` decorator — the primary user-facing API.
-Measures cache key generation overhead, hit vs miss latency, raw function vs
-decorated function overhead, memory cache layer impact, and TTL expiration cost.
+The following benchmarks have been consolidated into `comprehensive_backend_benchmark.py` and moved to `deprecated_benchmarks/`:
 
-```bash
-uv run python benchmarks/decorator_benchmark.py
-```
-
-### `handler_benchmark.py` — Data Handler Benchmark
-Benchmarks put/get performance per data-type handler: ObjectHandler (dicts),
-ArrayHandler (NumPy), PandasDataFrameHandler, PandasSeriesHandler,
-PolarsDataFrameHandler, PolarsSeriesHandler. Tests small/medium data sizes
-and scaling characteristics.
-
-```bash
-uv run python benchmarks/handler_benchmark.py
-```
-
-### `compression_benchmark.py` — Compression Codec Benchmark
-Benchmarks compression codec impact (lz4, zstd, gzip) on put/get performance
-and file size. Includes raw codec micro-benchmark via `benchmark_codecs()`,
-end-to-end put/get with each codec, and comparison table.
-
-```bash
-uv run python benchmarks/compression_benchmark.py
-```
-
-### `security_benchmark.py` — Security Signing Overhead Benchmark
-Benchmarks HMAC-SHA256 entry signing/verification overhead. Measures raw
-sign/verify micro-cost, field count impact, end-to-end put/get with signing
-enabled vs disabled, and throughput impact at scale.
-
-```bash
-uv run python benchmarks/security_benchmark.py
-```
-
-### `sqlite_metadata_analysis.py` — SQLite Schema Analysis
-Analyzes the dedicated-column SQLite schema: column utilization, storage
-overhead per entry, column query performance, and JSON vs SQLite list comparison.
-
-```bash
-uv run python benchmarks/sqlite_metadata_analysis.py
-```
-
-### `serialization_benchmark.py` — Serialization Key Performance
-Tests `serialize_for_cache_key()` ordering performance with different key
-structures and sizes.
-
-```bash
-uv run python benchmarks/serialization_benchmark.py
-```
-
-### `threshold_benchmark.py` — Directory Hashing Thresholds
-Tests parallel vs sequential directory hashing performance to find the
-optimal switchover threshold for `hash_directory_parallel()`.
-
-```bash
-uv run python benchmarks/threshold_benchmark.py
-```
-
-## Running All Benchmarks
-
-```bash
-# Run one at a time (recommended)
-uv run python benchmarks/comprehensive_backend_benchmark.py
-uv run python benchmarks/management_ops_benchmark.py
-uv run python benchmarks/decorator_benchmark.py
-uv run python benchmarks/handler_benchmark.py
-uv run python benchmarks/compression_benchmark.py
-uv run python benchmarks/security_benchmark.py
-uv run python benchmarks/sqlite_metadata_analysis.py
-uv run python benchmarks/serialization_benchmark.py
-uv run python benchmarks/threshold_benchmark.py
-```
+- `backend_comparison_benchmark.py` - Raw backend comparison
+- `test_entry_caching.py` - Memory cache layer testing  
+- `test_realistic_caching.py` - Realistic workload patterns
+- `quick_backend_demo.py` - Quick backend demonstration
+- `list_performance_analysis.py` - List operation performance analysis
 
 ## Architecture Notes
 
-### SQLite Schema
-The SQLite backend uses **dedicated columns** (not a JSON blob):
+### Memory Cache Layer vs InMemoryBackend
+- **InMemoryBackend**: Pure in-memory storage, no persistence, no internal caching
+- **CachedMetadataBackend**: Optional cachetools LRU wrapper for JSON/SQLite backends
+- **Memory Cache Layer**: Configurable via `enable_memory_cache=True/False`
 
-```
-cache_key, description, data_type, prefix, created_at, accessed_at,
-file_size, file_hash, entry_signature, s3_etag, object_type,
-storage_format, serializer, compression_codec, actual_path,
-cache_key_params (JSON Text), metadata_dict (JSON Text)
-```
+### Performance Characteristics (Post Schema Optimization)
+- **InMemory Backend**: O(1) operations, unified entry structure, no disk I/O
+- **JSON Backend**: Simple {cache_key: entry} storage, eliminated columnar overhead
+- **SQLite Backend**: Dedicated columns for backend metadata, eliminated metadata_json parsing
 
-Benefits:
-- No JSON parsing overhead on `list_entries()` / `get_stats()`
-- SQL aggregates for statistics instead of loading all rows
-- Column-level queries faster than JSON blob scanning
+### Schema Consistency
+- **All Backends**: Return identical entry structures via get_entry(), list_entries()
+- **Storage Optimization**: Each backend uses optimal storage pattern for its type
+- **API Consistency**: Unified schema at the API level, not storage level
 
-### Memory Cache Layer
-- `CachedMetadataBackend`: Optional cachetools LRU wrapper around any backend
-- Enabled via `enable_memory_cache=True`
-- Provides 15-25% improvement for SQLite, 5-10% for JSON
+### Cache Hit Patterns
+- **Sequential access**: Minimal caching benefit
+- **Random access**: Moderate caching benefit  
+- **Hot-spot access (80/20 rule)**: Maximum caching benefit
 
-### Benchmark Coverage Map
+## Benchmark History
 
-| Code Path | Benchmark File |
-|-----------|---------------|
-| `put()` / `get()` | comprehensive_backend_benchmark, handler_benchmark |
-| `list_entries()` | comprehensive_backend_benchmark, sqlite_metadata_analysis |
-| `get_stats()` | comprehensive_backend_benchmark, sqlite_metadata_analysis |
-| `update_data()` | management_ops_benchmark |
-| `touch()` / `touch_batch()` | management_ops_benchmark |
-| `delete_where()` / `delete_matching()` | management_ops_benchmark |
-| `get_batch()` / `delete_batch()` | management_ops_benchmark |
-| `invalidate()` / `clear_all()` | management_ops_benchmark |
-| `@cached` / `@cacheness_it` decorator | decorator_benchmark |
-| Handler dispatch per data type | handler_benchmark |
-| Compression codecs (lz4/zstd/gzip) | compression_benchmark |
-| Entry signing / verification | security_benchmark |
-| `serialize_for_cache_key()` | serialization_benchmark |
-| `hash_directory_parallel()` | threshold_benchmark |
-| Memory cache layer | comprehensive_backend_benchmark, decorator_benchmark |
-| SQLite schema / column queries | sqlite_metadata_analysis |
+### Schema Optimization (August 2025)
+Major performance improvement through schema alignment:
 
-## Regression Thresholds
+1. **Unified Entry Structure**: All backends now return identical entry formats
+2. **SQLite Backend**: Eliminated metadata_json column, uses dedicated columns for backend metadata
+3. **JSON Backend**: Simplified to {cache_key: entry} storage, removed columnar complexity  
+4. **InMemory Backend**: Optimized unified entry structure for maximum speed
+5. **API Consistency**: Schema alignment at entry level, not storage structure level
 
-| Operation | Expected | Warning | Critical |
-|-----------|----------|---------|----------|
-| `put()` | <20ms | >50ms | >100ms |
-| `get()` (hit) | <10ms | >30ms | >50ms |
-| `update_data()` | <20ms | >50ms | >100ms |
-| `touch()` | <5ms | >10ms | >30ms |
-| `invalidate()` | <10ms | >20ms | >50ms |
-| `clear_all()` (100) | <100ms | >300ms | >500ms |
-| `list_entries()` (200) | <50ms | >200ms | >500ms |
-| `get_batch()` (10) | <100ms | >300ms | >500ms |
-| Decorator overhead (hit) | <5ms | >10ms | >30ms |
-| `sign_entry()` | <50μs | >200μs | >500μs |
-| Signing total overhead | <5% | >15% | >30% |
+Performance improvements:
+- JSON Backend: 35% improvement in PUT operations (4,678 vs 3,472 ops/sec at 50 entries)
+- SQLite Backend: Reduced metadata parsing overhead by eliminating JSON column
+- InMemory Backend: Streamlined entry storage for consistent high performance
+- All Backends: Maintained optimal storage patterns while providing consistent APIs
+
+### Previous Optimizations
+This consolidation addressed the following issues discovered during performance analysis:
+
+1. **Fixed InMemoryBackend**: Removed inappropriate internal list result caching
+2. **Clarified Architecture**: Distinguished pure in-memory backend from memory cache layer
+3. **Corrected Benchmarks**: Ensured `enable_memory_cache=False` for fair raw backend comparison
+4. **Identified Performance**: SQLite overhead due to database operations plus metadata processing
+
+The comprehensive benchmark now provides accurate, reproducible performance metrics across all backend types with consistent schema alignment.

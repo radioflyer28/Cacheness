@@ -7,44 +7,41 @@ Each handler implements focused interfaces following the Interface Segregation P
 
 Available handlers:
 - ArrayHandler: NumPy arrays with blosc2 compression
-- BytesHandler: Raw bytes/bytearray/memoryview (no serialization)
 - DataFrameHandler: Pandas/Polars DataFrames in Parquet format
 - ObjectHandler: Generic Python objects via pickle/dill
 - SeriesHandler: Pandas Series
-- TensorHandler: TensorFlow tensors (optional)
 
 Usage:
     from cacheness.storage.handlers import HandlerRegistry, ArrayHandler
-
+    
     # Get a handler for data
     registry = HandlerRegistry()
     handler = registry.get_handler(data)
-
+    
     # Or use specific handler directly
     handler = ArrayHandler()
     if handler.can_handle(my_array):
         metadata = handler.put(my_array, path, config)
 """
 
-# Re-export from parent handlers.py for backward compatibility
+# Re-export implementation handlers from the package handler module.
 from cacheness.handlers import (
     # Handler classes
     ArrayHandler,
-    BytesHandler,
     ObjectHandler,
     HandlerRegistry,
 )
 
 # Re-export from interfaces
 from cacheness.interfaces import (
-    CacheHandler,
+    FormatHandler,
     CacheabilityChecker,
     CacheWriter,
     CacheReader,
     FormatProvider,
     DataFrameHandler,
     SeriesHandler,
-    CacheHandlerError,
+    FormatHandlerError,
     CacheWriteError,
     CacheReadError,
     CacheFormatError,
@@ -52,29 +49,20 @@ from cacheness.interfaces import (
 
 # Optional handlers
 try:
-    from cacheness.handlers import PandasDataFrameHandler, PandasSeriesHandler  # noqa: F401
-
+    from cacheness.handlers import PandasDataFrameHandler, PandasSeriesHandler
     _HAS_PANDAS = True
 except ImportError:
     _HAS_PANDAS = False
 
 try:
-    from cacheness.handlers import PolarsDataFrameHandler  # noqa: F401
-
+    from cacheness.handlers import PolarsDataFrameHandler
     _HAS_POLARS = True
 except ImportError:
     _HAS_POLARS = False
 
-try:
-    from cacheness.handlers import TensorFlowTensorHandler  # noqa: F401
-
-    _HAS_TENSORFLOW = True
-except ImportError:
-    _HAS_TENSORFLOW = False
-
 __all__ = [
     # Base interfaces
-    "CacheHandler",
+    "FormatHandler",
     "CacheabilityChecker",
     "CacheWriter",
     "CacheReader",
@@ -82,22 +70,18 @@ __all__ = [
     "DataFrameHandler",
     "SeriesHandler",
     # Errors
-    "CacheHandlerError",
+    "FormatHandlerError",
     "CacheWriteError",
     "CacheReadError",
     "CacheFormatError",
     # Core handlers
     "ArrayHandler",
-    "BytesHandler",
     "ObjectHandler",
     "HandlerRegistry",
 ]
 
 if _HAS_PANDAS:
-    __all__.extend(["PandasDataFrameHandler", "PandasSeriesHandler"])
+    __all__.extend([PandasDataFrameHandler.__name__, PandasSeriesHandler.__name__])
 
 if _HAS_POLARS:
-    __all__.append("PolarsDataFrameHandler")
-
-if _HAS_TENSORFLOW:
-    __all__.append("TensorFlowTensorHandler")
+    __all__.append(PolarsDataFrameHandler.__name__)

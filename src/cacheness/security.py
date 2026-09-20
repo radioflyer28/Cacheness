@@ -7,9 +7,9 @@ Uses HMAC-SHA256 for fast, secure signatures of critical metadata fields.
 
 Features:
 - HMAC-based signing for metadata integrity
-- Version-based signed field lists for safe evolution
+- Configurable security levels (minimal, enhanced, paranoid)
 - Automatic key generation and management
-- Backward compatibility with unsigned and legacy entries
+- Backward compatibility with unsigned entries
 - Key rotation support
 
 Security Model:
@@ -24,95 +24,101 @@ import hashlib
 import secrets
 import logging
 from pathlib import Path
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from datetime import datetime
-
-from .interfaces import SignableFields
 
 logger = logging.getLogger(__name__)
 
 
+_LEGACY_V038_SIGNED_FIELDS = (
+    "cache_key",
+    "created_at",
+    "data_type",
+    "file_hash",
+    "file_size",
+    "prefix",
+)
+
+
+def verify_legacy_v038_entry(
+    secret_key: bytes, entry_data: Dict[str, Any], stored_signature: str
+) -> bool:
+    """Verify the one historical 0.3.8 six-field HMAC payload.
+
+    This is deliberately separate from the current signer contract.  Values
+    retain the historical empty/datetime/string normalization and comparison
+    stays constant-time, but no other stored layout is a candidate here.
+    """
+    if not isinstance(secret_key, bytes) or not isinstance(stored_signature, str):
+        return False
+    try:
+        values = []
+        for field in _LEGACY_V038_SIGNED_FIELDS:
+            value = entry_data.get(field)
+            if value is None:
+                value = ""
+            elif isinstance(value, datetime):
+                value = value.isoformat()
+            else:
+                value = str(value)
+            values.append(f"{field}:{value}")
+        payload = "|".join(values)
+        expected_signature = hmac.new(
+            secret_key, payload.encode("utf-8"), hashlib.sha256
+        ).hexdigest()
+        return hmac.compare_digest(expected_signature, stored_signature)
+    except (AttributeError, TypeError, ValueError):
+        return False
+
+
 class CacheEntrySigner:
+    """Legacy cache-entry signer retained for compatibility paths only.
+
+    Canonical ``BlobStore`` manifests use the fixed schema-1 HMAC-SHA256 contract
+    in :mod:`cacheness.storage.integrity`. This configurable signer intentionally
+    remains separate because its field subset, automatic key creation, and
+    in-memory fallback are not valid for canonical storage authenticity.
     """
-    HMAC-based cache entry signer for metadata integrity protection.
-
-    Provides cryptographic signatures for cache entry metadata to detect tampering
-    with the SQLite database or JSON metadata files.
-
-    Signed fields are managed internally via version-based field lists.
-    Legacy entries (no stored version) are verified with the v1 field list.
-    """
-
-    # Version-based signed field lists.
-    # Each version defines exactly which fields are included in the signature.
-    # Legacy entries without a stored signature_version use v1.
-    SIGNED_FIELDS_BY_VERSION: Dict[int, List[str]] = {
-        1: [
-            "cache_key",
-            "data_type",
-            "file_size",
-            "file_hash",
-            "object_type",
-            "storage_format",
-            "serializer",
-            "compression_codec",
-            "actual_path",
-            "created_at",
-        ],
-        2: [
-            "cache_key",
-            "data_type",
-            "file_size",
-            "file_hash",
-            "object_type",
-            "storage_format",
-            "serializer",
-            "compression_codec",
-            "created_at",
-        ],
-    }
-
-    # Current version used when signing new entries.
-    CURRENT_SIGNATURE_VERSION: int = 2
-
-    def __init__(
-        self,
-        key_file_path: Path,
-        use_in_memory_key: bool = False,
-    ):
+    
+    # Default enhanced fields (previously "enhanced" security level)
+    DEFAULT_SIGNED_FIELDS = ["cache_key", "data_type", "prefix", "file_size", "file_hash", "object_type", "storage_format", "serializer", "compression_codec", "actual_path", "created_at"]
+    
+    def __init__(self, key_file_path: Path, custom_fields: Optional[List[str]] = None, 
+                 use_in_memory_key: bool = False):
         """
         Initialize the cache entry signer.
-
+        
         Args:
             key_file_path: Path to the signing key file (ignored if use_in_memory_key=True)
+            custom_fields: Custom list of fields to sign (if None, uses default enhanced fields)
             use_in_memory_key: If True, use in-memory key instead of persistent file
         """
         self.key_file_path = key_file_path
         self.use_in_memory_key = use_in_memory_key
+        self.signed_fields = custom_fields or self.DEFAULT_SIGNED_FIELDS
+        self.custom_fields = custom_fields
+        self.use_in_memory_key = use_in_memory_key
         self.secret_key = self._load_or_generate_key()
-
+        
+        # Determine which fields to sign
+        self.signed_fields = custom_fields or self.DEFAULT_SIGNED_FIELDS
+        
         key_type = "in-memory" if use_in_memory_key else "persistent"
-        current_fields = self.SIGNED_FIELDS_BY_VERSION[self.CURRENT_SIGNATURE_VERSION]
-        logger.debug(
-            f"Cache signer initialized: version={self.CURRENT_SIGNATURE_VERSION}, "
-            f"fields={current_fields}, key_type={key_type}"
-        )
-
+        logger.debug(f"Cache signer initialized: fields={self.signed_fields}, key_type={key_type}")
+    
     def _load_or_generate_key(self) -> bytes:
         """Load existing signing key or generate a new one."""
         # If using in-memory key, always generate new one
         if self.use_in_memory_key:
             logger.info("Using in-memory signing key (not persistent)")
             return secrets.token_bytes(32)
-
+        
         try:
             if self.key_file_path.exists():
                 # Load existing key
                 key = self.key_file_path.read_bytes()
                 if len(key) != 32:
-                    logger.warning(
-                        f"Invalid key length ({len(key)} bytes), generating new key"
-                    )
+                    logger.warning(f"Invalid key length ({len(key)} bytes), generating new key")
                     return self._generate_new_key()
                 logger.debug(f"Loaded signing key from {self.key_file_path}")
                 return key
@@ -121,66 +127,54 @@ class CacheEntrySigner:
         except Exception as e:
             logger.warning(f"Failed to load signing key: {e}, generating new key")
             return self._generate_new_key()
-
+    
     def _generate_new_key(self) -> bytes:
         """Generate a new 32-byte signing key and save it (unless using in-memory key)."""
         # Generate 32-byte key for HMAC-SHA256
         key = secrets.token_bytes(32)
-
+        
         # Skip file operations for in-memory keys
         if self.use_in_memory_key:
             logger.debug("Generated in-memory signing key")
             return key
-
+        
         try:
             # Ensure directory exists
             self.key_file_path.parent.mkdir(parents=True, exist_ok=True)
-
+            
             # Save key with restrictive permissions
             self.key_file_path.write_bytes(key)
-
+            
             # Set restrictive file permissions (owner read/write only)
             try:
                 self.key_file_path.chmod(0o600)
             except Exception as e:
-                logger.warning(
-                    f"Failed to set restrictive permissions on key file: {e}"
-                )
-
+                logger.warning(f"Failed to set restrictive permissions on key file: {e}")
+            
             logger.info(f"Generated new signing key: {self.key_file_path}")
             return key
-
+            
         except Exception as e:
             logger.error(f"Failed to generate signing key: {e}")
             # Fallback to in-memory key (not persistent)
             logger.warning("Using in-memory signing key (not persistent)")
             return key
-
-    def _create_signature_payload(
-        self, entry_data: SignableFields, version: int
-    ) -> str:
+    
+    def _create_signature_payload(self, entry_data: Dict[str, Any]) -> str:
         """
         Create deterministic payload string from entry data.
-
+        
         Args:
             entry_data: Complete entry data dictionary
-            version: Signature version determining which fields to sign
-
+            
         Returns:
             Deterministic string representation of signed fields
         """
-        signed_fields = self.SIGNED_FIELDS_BY_VERSION.get(version)
-        if signed_fields is None:
-            raise ValueError(
-                f"Unknown signature version {version}. "
-                f"Known versions: {sorted(self.SIGNED_FIELDS_BY_VERSION.keys())}"
-            )
-
         # Extract values in consistent order (sorted field names)
         values = []
-        for field in sorted(signed_fields):
+        for field in sorted(self.signed_fields):
             value = entry_data.get(field)
-
+            
             # Handle None values
             if value is None:
                 value = ""
@@ -190,235 +184,94 @@ class CacheEntrySigner:
             # Convert to string
             else:
                 value = str(value)
-
+            
             values.append(f"{field}:{value}")
-
+        
         payload = "|".join(values)
-        logger.debug(
-            f"Signature payload: {payload[:100]}..."
-            if len(payload) > 100
-            else f"Signature payload: {payload}"
-        )
+        logger.debug(f"Signature payload: {payload[:100]}..." if len(payload) > 100 else f"Signature payload: {payload}")
         return payload
-
-    def sign_entry(self, entry_data: SignableFields) -> str:
+    
+    def sign_entry(self, entry_data: Dict[str, Any]) -> str:
         """
-        Create HMAC signature for cache entry using the current version.
-
-        The version is embedded in the returned string as ``v{N}:{hex}``.
-        Legacy callers that stored bare hex signatures are treated as v1
-        during verification.
-
+        Create HMAC signature for cache entry.
+        
         Args:
             entry_data: Complete entry data dictionary containing all fields
-
+            
         Returns:
-            Versioned signature string in the format ``v{N}:{hex_signature}``
+            Hex string of HMAC-SHA256 signature
         """
         try:
-            version = self.CURRENT_SIGNATURE_VERSION
-            payload = self._create_signature_payload(entry_data, version)
-
-            hex_sig = hmac.new(
-                self.secret_key, payload.encode("utf-8"), hashlib.sha256
+            # Create deterministic payload
+            payload = self._create_signature_payload(entry_data)
+            
+            # Create HMAC signature
+            signature = hmac.new(
+                self.secret_key,
+                payload.encode('utf-8'),
+                hashlib.sha256
             ).hexdigest()
-
-            versioned = f"v{version}:{hex_sig}"
-
-            logger.debug(
-                f"Created v{version} signature for entry "
-                f"{entry_data.get('cache_key', 'unknown')}"
-            )
-            return versioned
-
+            
+            logger.debug(f"Created signature for entry {entry_data.get('cache_key', 'unknown')}")
+            return signature
+            
         except Exception as e:
             logger.error(f"Failed to create signature: {e}")
             raise
-
-    @staticmethod
-    def parse_versioned_signature(stored_signature: str) -> tuple[int, str]:
-        """
-        Parse a stored signature into (version, hex_signature).
-
-        New-format signatures look like ``v2:abcdef01...``.
-        Legacy signatures are bare hex strings and are treated as v1.
-
-        Returns:
-            Tuple of (version, hex_signature)
-        """
-        if stored_signature and ":" in stored_signature:
-            prefix, _, hex_sig = stored_signature.partition(":")
-            if prefix.startswith("v") and prefix[1:].isdigit():
-                return int(prefix[1:]), hex_sig
-        # Legacy bare-hex signature → v1
-        return 1, stored_signature
-
-    def verify_entry(
-        self,
-        entry_data: SignableFields,
-        stored_signature: str,
-    ) -> bool:
+    
+    def verify_entry(self, entry_data: Dict[str, Any], stored_signature: str) -> bool:
         """
         Verify HMAC signature for cache entry.
-
-        The version is extracted from the stored signature string.
-        Legacy bare-hex signatures are treated as v1.
-
+        
         Args:
             entry_data: Complete entry data dictionary
-            stored_signature: Previously stored signature (``v{N}:{hex}`` or bare hex)
-
+            stored_signature: Previously stored signature to verify against
+            
         Returns:
             True if signature is valid, False otherwise
         """
-        version, hex_sig = self.parse_versioned_signature(stored_signature)
         try:
-            payload = self._create_signature_payload(entry_data, version)
-            expected_signature = hmac.new(
-                self.secret_key, payload.encode("utf-8"), hashlib.sha256
-            ).hexdigest()
-
-            is_valid = hmac.compare_digest(expected_signature, hex_sig)
-
+            # Generate expected signature
+            expected_signature = self.sign_entry(entry_data)
+            
+            # Use constant-time comparison to prevent timing attacks
+            is_valid = hmac.compare_digest(expected_signature, stored_signature)
+            
             if not is_valid:
-                logger.warning(
-                    f"Signature verification failed for entry "
-                    f"{entry_data.get('cache_key', 'unknown')} (v{version})"
-                )
+                logger.warning(f"Signature verification failed for entry {entry_data.get('cache_key', 'unknown')}")
             else:
-                logger.debug(
-                    f"Signature verified for entry "
-                    f"{entry_data.get('cache_key', 'unknown')} (v{version})"
-                )
-
+                logger.debug(f"Signature verified for entry {entry_data.get('cache_key', 'unknown')}")
+            
             return is_valid
-
+            
         except Exception as e:
             logger.error(f"Failed to verify signature: {e}")
             return False
-
-    # ------------------------------------------------------------------
-    # Namespace signing
-    # ------------------------------------------------------------------
-    # Namespace rows are signed on immutable fields only (namespace_id,
-    # display_name, created_at).  schema_version is excluded because it
-    # changes during migrations.
-    # ------------------------------------------------------------------
-
-    NAMESPACE_SIGNED_FIELDS: List[str] = [
-        "created_at",
-        "display_name",
-        "namespace_id",
-    ]
-
-    def _create_namespace_payload(self, namespace_data: Dict[str, Any]) -> str:
-        """Create deterministic payload string from namespace fields."""
-        values = []
-        for field in self.NAMESPACE_SIGNED_FIELDS:  # already sorted
-            value = namespace_data.get(field)
-            if value is None:
-                value = ""
-            elif isinstance(value, datetime):
-                value = value.isoformat()
-            else:
-                value = str(value)
-            values.append(f"{field}:{value}")
-        return "|".join(values)
-
-    def sign_namespace(self, namespace_data: Dict[str, Any]) -> str:
-        """Create HMAC signature for a namespace registry row.
-
-        Only immutable fields are signed (``namespace_id``, ``display_name``,
-        ``created_at``).  ``schema_version`` is deliberately excluded because
-        it changes during migrations.
-
-        Args:
-            namespace_data: Dict with at least the keys in
-                :attr:`NAMESPACE_SIGNED_FIELDS`.
-
-        Returns:
-            Versioned signature string (``ns1:{hex}``).
-        """
-        try:
-            payload = self._create_namespace_payload(namespace_data)
-            hex_sig = hmac.new(
-                self.secret_key, payload.encode("utf-8"), hashlib.sha256
-            ).hexdigest()
-            versioned = f"ns1:{hex_sig}"
-            logger.debug(f"Signed namespace {namespace_data.get('namespace_id', '?')}")
-            return versioned
-        except Exception as e:
-            logger.error(f"Failed to sign namespace: {e}")
-            raise
-
-    def verify_namespace(
-        self, namespace_data: Dict[str, Any], stored_signature: str
-    ) -> bool:
-        """Verify HMAC signature for a namespace registry row.
-
-        Args:
-            namespace_data: Dict with namespace fields.
-            stored_signature: Previously stored signature (``ns1:{hex}``).
-
-        Returns:
-            True if the signature is valid.
-        """
-        if not stored_signature:
-            return False
-        # Parse — expect "ns1:<hex>"
-        prefix, _, hex_sig = stored_signature.partition(":")
-        if not prefix.startswith("ns") or not hex_sig:
-            logger.warning(
-                f"Unrecognised namespace signature format: {stored_signature[:20]}"
-            )
-            return False
-        try:
-            payload = self._create_namespace_payload(namespace_data)
-            expected = hmac.new(
-                self.secret_key, payload.encode("utf-8"), hashlib.sha256
-            ).hexdigest()
-            is_valid = hmac.compare_digest(expected, hex_sig)
-            if not is_valid:
-                logger.warning(
-                    f"Namespace signature verification failed for "
-                    f"{namespace_data.get('namespace_id', '?')}"
-                )
-            return is_valid
-        except Exception as e:
-            logger.error(f"Failed to verify namespace signature: {e}")
-            return False
-
+    
     def get_field_info(self) -> Dict[str, Any]:
         """Get information about the current signing configuration."""
         return {
-            "signature_version": self.CURRENT_SIGNATURE_VERSION,
-            "signed_fields": self.SIGNED_FIELDS_BY_VERSION[
-                self.CURRENT_SIGNATURE_VERSION
-            ],
-            "known_versions": sorted(self.SIGNED_FIELDS_BY_VERSION.keys()),
+            "signed_fields": self.signed_fields,
             "key_file": str(self.key_file_path),
-            "key_exists": self.key_file_path.exists()
-            if not self.use_in_memory_key
-            else False,
-            "use_in_memory_key": self.use_in_memory_key,
+            "key_exists": self.key_file_path.exists() if not self.use_in_memory_key else False,
+            "use_in_memory_key": self.use_in_memory_key
         }
 
 
-def create_cache_signer(
-    cache_dir: Path,
-    key_file: str = "cache_signing_key.bin",
-    use_in_memory_key: bool = False,
-) -> CacheEntrySigner:
+def create_cache_signer(cache_dir: Path, key_file: str = "cache_signing_key.bin",
+                       custom_fields: Optional[List[str]] = None,
+                       use_in_memory_key: bool = False) -> CacheEntrySigner:
     """
     Factory function to create a cache entry signer.
-
+    
     Args:
         cache_dir: Cache directory where key file will be stored
         key_file: Name of the signing key file (ignored if use_in_memory_key=True)
+        custom_fields: Custom list of fields to sign (if None, uses default enhanced fields)
         use_in_memory_key: If True, use in-memory key instead of persistent file
-
+        
     Returns:
         Configured CacheEntrySigner instance
     """
     key_file_path = cache_dir / key_file
-    return CacheEntrySigner(key_file_path, use_in_memory_key)
+    return CacheEntrySigner(key_file_path, custom_fields, use_in_memory_key)

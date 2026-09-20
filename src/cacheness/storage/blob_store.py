@@ -1,1093 +1,1078 @@
-"""
-BlobStore - Low-level Blob Storage Interface
-============================================
+"""Authority-backed object storage with JSON projection compatibility.
 
-A simpler, lower-level API for storing and retrieving binary blobs with metadata.
-This class abstracts away the caching semantics (TTL, eviction) and provides
-pure storage functionality.
-
-The BlobStore is designed to be reusable for non-caching use cases:
-- ML model versioning
-- Artifact storage
-- Data pipeline checkpoints
-
-Features:
-- Content-addressable storage (xxhash or SHA-256 based keys)
-- Pluggable metadata backends (JSON, SQLite)
-- Type-aware serialization via handlers
-- Configurable compression
-- File integrity verification (xxhash-based file hashes)
-- Cryptographic signing (HMAC-SHA256 entry signing)
-- Integrity auditing (orphan/dangling/mismatch detection)
-- Thread-safe operations
-
-Usage:
-    from cacheness.storage import BlobStore
-
-    # Create a blob store
-    store = BlobStore(
-        cache_dir="./blobs",
-        backend="sqlite",
-        compression="lz4"
-    )
-
-    # Store data
-    blob_id = store.put(my_data, metadata={"type": "model", "version": "1.0"})
-
-    # Retrieve data
-    data = store.get(blob_id)
-
-    # Get metadata only (without loading blob)
-    metadata = store.get_metadata(blob_id)
-
-    # List blobs
-    blob_ids = store.list(prefix="model_")
-
-    # Verify integrity
-    report = store.verify_integrity(repair=True)
-
-    # Delete
-    store.delete(blob_id)
+``BlobStore`` chooses one lifecycle authority at construction.  The lifecycle
+engine is the sole payload/manifest reader and writer; the optional JSON
+backend is a revision-bound projection for compatibility, never read-back
+authority or a recovery path.
 """
 
-import glob
+from __future__ import annotations
+
+from contextlib import contextmanager
+import hashlib
 import logging
-import os
-import threading
+import secrets
+import stat
+import uuid
+from functools import wraps
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
-from datetime import datetime, timezone
+from typing import Any, Callable, Dict, List, Optional, Union
 
-import xxhash
-
-from .backends import MetadataBackend, JsonBackend
-from .backends.blob_backends import BlobBackend, FilesystemBlobBackend, get_blob_backend
+from cacheness.config import CacheConfig, CacheStorageConfig, CompressionConfig
+from cacheness.error_handling import (
+    CacheBlobBackendError,
+    CacheBlobLifecycleConflictError,
+    CacheBlobLifecycleTimeoutError,
+    CacheBlobManifestMalformedError,
+    CacheBlobManifestUnauthenticatedError,
+    CacheBlobManifestUnsupportedVersionError,
+    CacheBlobMigrationRequiredError,
+    CacheManifestIntegrityError,
+    CacheManifestUnsupportedVersionError,
+    CacheReason,
+    CacheStorageError,
+)
+from .catalog import (
+    CatalogCursor,
+    CatalogPage,
+    CatalogQuery,
+    CatalogSchema,
+    DEFAULT_PAGE_SIZE,
+    validate_catalog_mapping,
+    validate_catalog_page_request,
+)
+from .composition import (
+    BackendRole,
+    ParticipantCapabilities,
+    PayloadTransportObservationProvider,
+    StoreTopology,
+)
+from .coordination import InstanceAdmission
 from .handlers import HandlerRegistry
-from .compression import read_file
-from .paths import resolve_actual_path, to_relative_path
+from .integrity import (
+    ManifestKeyError,
+    ManifestKeyProvider,
+    ManifestSigningKeyProvider,
+)
+from .legacy_manifest import LegacyManifestIdentity, recognize_legacy_fixture_tree
+from .lifecycle import (
+    AuthorityLifecycleEngine,
+    _DEFAULT_CATALOG_SCHEMA_FINGERPRINT,
+    _DEFAULT_CATALOG_SCHEMA_ID,
+    _DEFAULT_CATALOG_SCHEMA_REVISION,
+)
+from .lifecycle_authority import EntryExpectation
+from .manifest import (
+    BlobManifest,
+    verify_current_manifest,
+)
+from .path_security import encode_physical_name
+from .projections import (
+    ProjectionCapabilityError,
+    ProjectionController,
+    ProjectionOutcome,
+)
+from .reconciliation import ReconciliationReport, _AuthorityReconciler
+from .read_contract import (
+    BlobEntry,
+    BlobReceipt,
+    PayloadTransportComparison,
+    PayloadTransportComparisonStatus,
+)
+from .sqlite_lifecycle_authority import SqliteLifecycleAuthority
+from .transport_evidence import PayloadTransportEvidence, PayloadTransportObservation
 
-# Import CacheConfig for proper handler configuration
-from ..config import CacheConfig, CompressionConfig
-from ..interfaces import BlobReadContext, WriteBlobResult, IntegrityReport
 
 logger = logging.getLogger(__name__)
 
+_IMMUTABLE_METADATA_PATCH_FIELDS = frozenset(
+    {
+        "schema_version",
+        "key",
+        "cache_key",
+        "generation",
+        "state",
+        "locator",
+        "actual_path",
+        "handler_type",
+        "data_type",
+        "payload_format",
+        "payload_format_version",
+        "storage_format",
+        "digest_algorithm",
+        "digest",
+        "byte_size",
+        "file_size",
+        "created_at",
+        "handler_metadata",
+        "user_metadata",
+        "signature_algorithm",
+        "signature",
+    }
+)
+_RETIRED_SCHEDULER_CONTROL_SENTINELS = (
+    (".cacheness-clear-journal-v1.json", stat.S_IFREG),
+    (".cacheness-inventory-v2", stat.S_IFREG),
+    ("operations", stat.S_IFDIR),
+)
+
+
+class _EphemeralManifestKeyProvider:
+    """One process-local signing key for an explicitly memory-only topology."""
+
+    def __init__(self) -> None:
+        self._key = secrets.token_bytes(32)
+
+    def get_key(self) -> bytes:
+        return self._key
+
+    def get_or_initialize_new_store(self) -> bytes:
+        return self._key
+
+    def initialize_new_store(self) -> bytes:
+        return self._key
+
+
+def _retired_scheduler_control(root: Path) -> str | None:
+    """Classify exact retired control evidence without opening it."""
+    try:
+        root_stat = root.lstat()
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISDIR(root_stat.st_mode):
+        return None
+    for name, expected_type in _RETIRED_SCHEDULER_CONTROL_SENTINELS:
+        try:
+            candidate_stat = (root / name).lstat()
+        except FileNotFoundError:
+            continue
+        if stat.S_IFMT(candidate_stat.st_mode) == expected_type:
+            return name
+    return None
+
+
+def _ordinary_admitted(method: Callable) -> Callable:
+    """Order ordinary work locally and reject immutable legacy evidence first."""
+
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        self._require_canonical_store()
+        with self._instance_admission.operation():
+            return method(self, *args, **kwargs)
+
+    return wrapped
+
 
 class BlobStore:
-    """
-    Low-level blob storage with metadata support.
+    """Store typed blobs through one authority-owned lifecycle.
 
-    Provides a simple put/get interface for storing arbitrary Python objects
-    with associated metadata. Unlike the higher-level UnifiedCache, BlobStore
-    does not implement caching semantics like TTL or eviction policies.
-
-    Features:
-    - Content-addressable storage option (xxhash or SHA-256 based keys)
-    - Pluggable metadata backends (JSON, SQLite)
-    - Type-aware serialization via config-aware handlers
-    - Configurable compression
-    - File integrity verification (xxhash-based file hashes)
-    - Cryptographic signing (HMAC-SHA256 entry signing)
-    - Integrity auditing (orphan/dangling/mismatch detection)
-    - Thread-safe operations
-    - Rich, queryable metadata
-
-    Attributes:
-        cache_dir: Root directory for blob storage
-        backend: Metadata backend instance
-        handlers: Handler registry for type detection
-        signer: Optional CacheEntrySigner for metadata integrity
+    Local coordination only bounds same-process ordering and admission/close
+    ownership.  Manifest transitions, snapshot reads, cleanup, and recovery
+    are delegated to the selected ``LifecycleAuthority`` engine.
     """
 
     def __init__(
         self,
+        topology: StoreTopology,
+        *,
         cache_dir: Union[str, Path] = ".blobstore",
-        backend: Optional[Union[str, MetadataBackend]] = None,
         compression: str = "lz4",
         compression_level: int = 3,
         content_addressable: bool = False,
-        blob_backend: Optional[Union[str, BlobBackend]] = None,
-        enable_signing: bool = False,
-        signing_key_file: str = "cache_signing_key.bin",
-        use_in_memory_key: bool = False,
-        config: Optional[CacheConfig] = None,
-        namespace: str = "default",
-    ):
-        """
-        Initialize a BlobStore.
+        config: CacheConfig | None = None,
+        manifest_key_provider: ManifestSigningKeyProvider | None = None,
+    ) -> None:
+        """Create a direct store from one explicit, validated topology."""
+        if not isinstance(topology, StoreTopology):
+            raise TypeError("topology must be a StoreTopology")
+        configured_path = (
+            config.storage.cache_dir
+            if config is not None and cache_dir == ".blobstore"
+            else cache_dir
+        )
+        self.cache_dir = Path(configured_path)
+        self.topology = topology.resolve()
+        self.payload_backend = self.topology.payload
+        self.lifecycle_authority = self.topology.authority
+        self.projections = self.topology.projections
+        self.guarded_handler_io = None
+        self._initialized = False
+        self._guarded_handler_io_released = False
+        try:
+            self._initialize(
+                compression,
+                compression_level,
+                content_addressable,
+                config,
+                manifest_key_provider,
+            )
+        except BaseException:
+            self._close_failed_initialization_resources()
+            raise
+        logger.debug("BlobStore initialized at %s", self.cache_dir)
 
-        Args:
-            cache_dir: Directory for storing blobs and metadata
-            backend: Metadata backend - "json", "sqlite", or a MetadataBackend instance
-            compression: Compression codec (lz4, zstd, gzip, blosclz, etc.)
-            compression_level: Compression level (1-9)
-            content_addressable: If True, use content hash as blob key
-            blob_backend: Blob storage backend for file operations (delete, exists).
-                Can be a string ('filesystem', 'memory') or a BlobBackend instance.
-                Defaults to 'filesystem' if not provided.
-            enable_signing: If True, enable HMAC-SHA256 entry signing
-            signing_key_file: Name of the signing key file
-            use_in_memory_key: If True, use ephemeral in-memory signing key
-            config: Optional CacheConfig for handler configuration. If not provided,
-                a default config is created from compression parameters.
-            namespace: Namespace for blob isolation. Non-default namespaces store
-                blobs in a subdirectory. Defaults to "default".
-        """
-        self.cache_dir = Path(cache_dir)
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
-
+    def _initialize(
+        self,
+        compression: str,
+        compression_level: int,
+        content_addressable: bool,
+        config: CacheConfig | None,
+        manifest_key_provider: ManifestSigningKeyProvider | None,
+    ) -> None:
+        retired_control = _retired_scheduler_control(self.cache_dir)
+        if retired_control is not None:
+            raise CacheBlobMigrationRequiredError(
+                "Retired scheduler control requires an explicit local-store rebuild",
+                context={"control_class": "retired_scheduler_control"},
+                reason=CacheReason.BLOB_MIGRATION_REQUIRED,
+            )
+        self._legacy_identity: LegacyManifestIdentity | None = None
+        if (self.cache_dir / "provenance.json").is_file():
+            self._legacy_identity = recognize_legacy_fixture_tree(self.cache_dir)
         self.compression = compression
         self.compression_level = compression_level
         self.content_addressable = content_addressable
-        self._namespace = namespace
-
-        # Thread safety
-        self._lock = threading.RLock()
-
-        # Create or use provided config for handlers
-        if config is not None:
-            self.config = config
+        self.config = config or CacheConfig(
+            storage=CacheStorageConfig(cache_dir=self.cache_dir),
+            compression=CompressionConfig(
+                pickle_compression_codec=compression,
+                pickle_compression_level=compression_level,
+                blosc2_array_clevel=compression_level,
+            ),
+        )
+        self.lifecycle_limits = self.config.lifecycle_limits
+        self._instance_admission = InstanceAdmission(self.lifecycle_limits)
+        self._immutable_metadata_patch_fields = _IMMUTABLE_METADATA_PATCH_FIELDS
+        self.handlers = HandlerRegistry(self.config)
+        if manifest_key_provider is not None:
+            self._manifest_key_provider = manifest_key_provider
+        elif self._is_memory_topology():
+            self._manifest_key_provider = _EphemeralManifestKeyProvider()
+        elif (
+            self.topology.qualified_profile.requirements.coordination_scope
+            == "multiple_hosts"
+        ):
+            raise CacheBlobBackendError(
+                "A multi-host BlobStore requires an external manifest signing key",
+                context={"operation": "blob_store_composition", "stage": "signing_key"},
+            )
         else:
-            self.config = CacheConfig(
-                cache_dir=self.cache_dir,
-                compression=CompressionConfig(
-                    pickle_compression_codec=compression,
-                    pickle_compression_level=compression_level,
-                    blosc2_array_clevel=compression_level,
+            self._manifest_key_provider = ManifestKeyProvider(
+                self.cache_dir / "blob_manifest_hmac_key.bin",
+                lifecycle_limits=self.lifecycle_limits,
+            )
+        self.capabilities = self.topology.capabilities
+        self.lifecycle = AuthorityLifecycleEngine(self, self.lifecycle_authority)
+        # Kept as a direct engine alias for private timing seams only. It is
+        # never selected conditionally and cannot represent another authority.
+        self._authority_lifecycle = self.lifecycle
+
+        # Only explicit ProjectionSink participants are driven by the generic
+        # controller. A projection never participates in lifecycle authority.
+        self._projection_controllers = self._create_projection_controllers()
+
+    def _create_projection_controllers(self) -> tuple[ProjectionController, ...]:
+        """Build only explicit derived controllers from topology projections."""
+        controllers: list[ProjectionController] = []
+        names: set[str] = set()
+        for projection in self.projections:
+            query = getattr(projection, "projection_query", None)
+            schema = getattr(projection, "projection_schema", None)
+            if query is None and schema is None:
+                continue
+            if query is None or schema is None:
+                raise TypeError(
+                    "ProjectionSink must declare projection_query and projection_schema together"
+                )
+            controller = ProjectionController(
+                self,
+                projection,
+                page_size=getattr(
+                    projection, "projection_page_size", DEFAULT_PAGE_SIZE
+                ),
+                work_cap=getattr(projection, "projection_work_cap", None),
+                query=query,
+                schema=schema,
+                source_store_id=getattr(projection, "source_store_id", None),
+                capabilities=ParticipantCapabilities.from_participant(
+                    projection, BackendRole.PROJECTION.value
                 ),
             )
-
-        # Initialize metadata backend
-        if backend is None or backend == "json":
-            self.backend = JsonBackend(self.cache_dir / "cache_metadata.json")
-        elif backend == "sqlite":
-            from .backends import SqliteBackend
-
-            self.backend = SqliteBackend(self.cache_dir / "cache_metadata.db")
-        elif isinstance(backend, MetadataBackend):
-            self.backend = backend
-        else:
-            raise ValueError(f"Unknown backend type: {backend}")
-
-        # Initialize handler registry with config for proper type detection
-        self.handlers = HandlerRegistry(self.config)
-
-        # Initialize blob backend for file operations (delete, exists)
-        if blob_backend is None or blob_backend == "filesystem":
-            self.blob_backend = FilesystemBlobBackend(
-                self.cache_dir, shard_chars=0, namespace=self._namespace
-            )
-        elif isinstance(blob_backend, str):
-            # Use registry to get backend by name
-            if blob_backend == "memory":
-                self.blob_backend = get_blob_backend(blob_backend)
-            else:
-                # Pass cache_dir for filesystem-like backends
-                self.blob_backend = get_blob_backend(
-                    blob_backend,
-                    base_dir=self.cache_dir,
-                    shard_chars=0,
-                    namespace=self._namespace,
+            if controller.projection_name in names:
+                raise TypeError(
+                    "ProjectionSink names must be unique within one BlobStore"
                 )
-        elif isinstance(blob_backend, BlobBackend):
-            self.blob_backend = blob_backend
-        else:
-            raise ValueError(f"Unknown blob_backend type: {blob_backend}")
+            names.add(controller.projection_name)
+            controllers.append(controller)
+        return tuple(controllers)
 
-        # Initialize entry signer for metadata integrity protection
-        self.signer = None
-        if enable_signing:
-            self._init_signer(signing_key_file, use_in_memory_key)
+    def _receipt_for_result(self, result: Any) -> BlobReceipt:
+        """Freeze the canonical authority result before any derived attempt."""
+        if result.promoted is None:
+            raise CacheBlobLifecycleConflictError(
+                "Committed put lacks an authority entry"
+            )
+        return BlobReceipt(
+            operation_id=result.operation_id,
+            key=result.promoted.key,
+            generation=result.promoted.generation,
+            locator=result.promoted.locator,
+            expectation=result.promoted.expectation,
+            catalog_revision=result.promoted.expectation.revision or 0,
+            projections={},
+        )
 
-        logger.debug(f"BlobStore initialized at {self.cache_dir}")
+    def _run_post_commit_projections(self, receipt: BlobReceipt) -> BlobReceipt:
+        """Attempt derived work after authority commit without any rollback path."""
+        outcomes: dict[str, ProjectionOutcome] = {}
+        for controller in self._projection_controllers:
+            attempt = controller.best_effort(receipt)
+            if attempt.outcome is not None:
+                outcomes[controller.projection_name] = attempt.outcome
+        return receipt.with_projection_outcomes(outcomes)
 
-    # ── Path normalization helpers ────────────────────────────────────
-
-    def _to_relative_path(self, path_str: str) -> str:
-        """Convert an absolute path to a cache-dir-relative, forward-slash path.
-
-        Delegates to :func:`cacheness.storage.paths.to_relative_path`.
-        """
-        return to_relative_path(path_str, self.cache_dir)
-
-    def _resolve_actual_path(self, actual_path_str: str) -> str:
-        """Resolve a stored ``actual_path`` to a backend-usable path string.
-
-        Returns a *string* suitable for ``blob_backend.exists()``,
-        ``blob_backend.delete_blob()``, etc.  Delegates to
-        :func:`cacheness.storage.paths.resolve_actual_path`.
-        """
-        return str(resolve_actual_path(actual_path_str, self.cache_dir))
-
-    def _init_signer(
-        self,
-        signing_key_file: str,
-        use_in_memory_key: bool,
-    ) -> None:
-        """Initialize the cache entry signer."""
+    def _close_failed_initialization_resources(self) -> None:
         try:
-            from ..security import create_cache_signer
+            self.topology.close()
+        except Exception:
+            logger.exception("Failed to close owned topology participants")
+        if self.guarded_handler_io is not None:
+            try:
+                self.guarded_handler_io.close()
+            except Exception:
+                logger.exception("Failed to close BlobStore managed-root descriptor")
 
-            self.signer = create_cache_signer(
-                cache_dir=self.cache_dir,
-                key_file=signing_key_file,
-                use_in_memory_key=use_in_memory_key,
-            )
-            info = self.signer.get_field_info()
-            logger.info(
-                f"Entry signing enabled (v{info['signature_version']}, "
-                f"{len(info['signed_fields'])} fields)"
-            )
-        except Exception as e:
-            logger.warning(f"Failed to initialize entry signer: {e}")
-            self.signer = None
+    @property
+    def legacy_identity(self) -> LegacyManifestIdentity | None:
+        """Expose exact legacy evidence without ever using it as storage truth."""
+        return self._legacy_identity
 
+    @property
+    def projection_store_id(self) -> str:
+        """Return a stable non-path checkpoint identity for this store topology.
+
+        Continuation cursors remain authenticated by the authority's manifest
+        key. This value binds a projection checkpoint before a terminal page
+        has a cursor to carry the authority's opaque store identity.
+        """
+        source = (
+            f"{type(self.lifecycle_authority).__module__}."
+            f"{type(self.lifecycle_authority).__qualname__}:"
+            f"{self.cache_dir.absolute()}"
+        )
+        return hashlib.sha256(source.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def inspect_legacy_fixture_tree(root: str | Path) -> LegacyManifestIdentity:
+        """Inspect known legacy evidence before an explicit future migration."""
+        return recognize_legacy_fixture_tree(root)
+
+    @_ordinary_admitted
+    def initialize(self) -> None:
+        """Initialize once before workers start; never upgrade existing schemas.
+
+        Ordinary single-process first writes call this same path. Concurrent
+        first initialization is not a supported availability guarantee.
+        """
+        if self._initialized:
+            self.lifecycle_authority.preflight_mutation()
+            return
+        initializer = getattr(self.lifecycle_authority, "initialize", None)
+        if callable(initializer):
+            initializer()
+        # The explicit authority initializer creates only a fresh, current
+        # layout.  Validate it afterwards so a new PostgreSQL authority is
+        # provisioned through this public boundary, while existing layouts
+        # remain read-only validation failures rather than implicit upgrades.
+        self.lifecycle_authority.preflight_mutation()
+        # The decorator's early admission check may have observed the
+        # PostgreSQL authority before it loaded its persisted identity. Re-read
+        # the canonical worker fence before any payload or key material work.
+        self._require_canonical_store()
+        self._materialize_authority_store()
+        if (
+            self.topology.qualified_profile.requirements.coordination_scope
+            == "multiple_hosts"
+        ):
+            # A remote authority must not materialize its catalog merely to
+            # decide whether an application-owned shared key exists. The
+            # injected provider is already an explicit topology prerequisite.
+            self._authority_manifest_key()
+        else:
+            empty = not self.lifecycle_authority.list_entries()
+            self._authority_manifest_key(initialize_new_store=empty)
+        self._initialized = True
+
+    @contextmanager
+    def open_entry(self, key: str):
+        """Acquire one verified entry; policy can inspect metadata before read()."""
+        self._require_canonical_store()
+        with self._instance_admission.operation():
+            with self.lifecycle.open_entry(key) as entry:
+                yield entry
+
+    @_ordinary_admitted
+    def get_entry_info(self, key: str) -> BlobEntry | None:
+        """Inspect authenticated metadata without reading/deserializing payloads."""
+        return self.lifecycle.get_entry_info(key)
+
+    @_ordinary_admitted
+    def compare_transport_evidence(self, key: str) -> PayloadTransportComparison | None:
+        """Compare signed transport evidence with one exact participant observation.
+
+        The authority selects the committed generation before any participant
+        I/O.  A match is report-only transport corroboration and never replaces
+        the canonical SHA-256 verification performed by :meth:`get`.
+        """
+        entry = self.lifecycle_authority.read_entry(key)
+        if entry is None:
+            return None
+        manifest = self.lifecycle._entry_manifest(entry)
+        unavailable = PayloadTransportComparison(
+            key=entry.key,
+            generation=entry.generation,
+            locator=entry.locator,
+            status=PayloadTransportComparisonStatus.UNAVAILABLE,
+        )
+        if entry.transport_evidence is None:
+            return unavailable
+
+        signing_key = self._authority_manifest_key()
+        expected = PayloadTransportEvidence.from_canonical_bytes(
+            entry.transport_evidence
+        ).verify(
+            store_identity=self.lifecycle._transport_store_identity(signing_key),
+            key=manifest.key,
+            generation=manifest.generation,
+            locator=manifest.locator,
+            payload_sha256=manifest.digest,
+            payload_byte_size=manifest.byte_size,
+            signing_key=signing_key,
+        )
+        participant = self._materialize_authority_store()
+        if not isinstance(participant, PayloadTransportObservationProvider):
+            return unavailable
+        try:
+            observed = participant.observe_transport(manifest.locator)
+        except FileNotFoundError:
+            return PayloadTransportComparison(
+                key=entry.key,
+                generation=entry.generation,
+                locator=entry.locator,
+                status=PayloadTransportComparisonStatus.ABSENT,
+            )
+        except CacheBlobBackendError:
+            raise
+        except (OSError, TypeError, ValueError) as exc:
+            raise CacheBlobBackendError(
+                "Payload transport observation failed",
+                context={"operation": "transport_comparison", "key": entry.key},
+            ) from exc
+        if not isinstance(observed, PayloadTransportObservation):
+            raise CacheBlobBackendError(
+                "Payload participant returned an invalid transport observation",
+                context={"operation": "transport_comparison", "key": entry.key},
+            )
+        return PayloadTransportComparison(
+            key=entry.key,
+            generation=entry.generation,
+            locator=entry.locator,
+            status=(
+                PayloadTransportComparisonStatus.MATCH
+                if observed == expected
+                else PayloadTransportComparisonStatus.MISMATCH
+            ),
+        )
+
+    @_ordinary_admitted
+    def put_entry(
+        self,
+        data: Any,
+        key=None,
+        metadata=None,
+        *,
+        catalog_schema: CatalogSchema | None = None,
+        catalog_values: Dict[str, Any] | None = None,
+    ) -> BlobReceipt:
+        """Commit an entry and own its cleanup, returning the exact receipt."""
+        result = self._put_with_result_admitted(
+            data,
+            key=key,
+            metadata=metadata,
+            catalog_schema=catalog_schema,
+            catalog_values=catalog_values,
+        )
+        return self._run_post_commit_projections(self._receipt_for_result(result))
+
+    def _put_entry_canonical_for_maintenance(
+        self,
+        data: Any,
+        key: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        *,
+        catalog_schema: CatalogSchema | None = None,
+        catalog_values: dict[str, Any] | None = None,
+        operation_id: str,
+    ) -> BlobReceipt:
+        """Commit one replayable maintenance mutation without derived effects.
+
+        Offline rebuild recovery needs the canonical BlobStore lifecycle, but
+        projection work remains an explicit post-acceptance operation.  This
+        narrow internal seam is deliberately separate from ordinary public
+        writes so callers cannot suppress projections as a general policy.
+        """
+        if not isinstance(operation_id, str):
+            raise TypeError("operation_id must be a string")
+        if key is None and not self.content_addressable:
+            raise ValueError("Maintenance canonical puts require an explicit key")
+        self._require_canonical_store()
+        with self._instance_admission.operation():
+            result = self._put_with_result_admitted(
+                data,
+                key=key,
+                metadata=metadata,
+                catalog_schema=catalog_schema,
+                catalog_values=catalog_values,
+                operation_id=operation_id,
+            )
+        return self._receipt_for_result(result)
+
+    @_ordinary_admitted
     def put(
         self,
         data: Any,
         key: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
-    ) -> str:
-        """
-        Store a blob with optional metadata.
-
-        Args:
-            data: The data to store (any Python object)
-            key: Optional key for the blob. If None, generates a unique key.
-                 If content_addressable=True, key is ignored and content hash is used.
-            metadata: Optional dictionary of metadata to store with the blob
-
-        Returns:
-            The blob key (can be used to retrieve the blob)
-        """
-        with self._lock:
-            # Generate key
-            if self.content_addressable:
-                # Use xxhash content hash as key
-                blob_key = self._compute_content_hash(data)
-            elif key:
-                blob_key = self._sanitize_key(key)
-            else:
-                blob_key = self._generate_unique_key()
-
-            # Get appropriate handler
-            handler = self.handlers.get_handler(data)
-
-            # Determine file path
-            base_path = self.cache_dir / blob_key
-
-            # Store the data using the handler (writes to local filesystem)
-            result = handler.put(data, base_path, self.config)
-
-            # Persist through blob_backend (may rename, upload, etc.)
-            handler_path = Path(result.actual_path)
-            final_path = self.blob_backend.write_blob_from_path(
-                str(handler_path), handler_path.name
-            )
-            # Capture any backend-specific write metadata (e.g. s3_etag)
-            write_meta = self.blob_backend.get_write_metadata()
-            if write_meta:
-                result.extra.update(write_meta)
-
-            actual_path = Path(final_path) if "://" not in final_path else None
-
-            # Calculate file hash for integrity verification
-            if actual_path is not None:
-                file_hash = self._calculate_file_hash(actual_path)
-            else:
-                file_hash = self._calculate_blob_hash(final_path)
-
-            # Build entry metadata
-            # Note: JsonBackend stores custom fields in nested 'metadata' dict
-            # We store file_hash and entry_signature in nested metadata too so
-            # JsonBackend preserves them (it only keeps specific top-level fields).
-            custom_metadata = metadata or {}
-            custom_metadata["actual_path"] = self._to_relative_path(final_path)
-            custom_metadata["storage_format"] = result.storage_format
-            custom_metadata["compression_codec"] = self.compression
-            if file_hash:
-                custom_metadata["file_hash"] = file_hash
-
-            entry_data = {
-                "cache_key": blob_key,
-                "data_type": handler.data_type,
-                "file_size": result.file_size,
-                "file_hash": file_hash,
-                "created_at": datetime.now(timezone.utc).isoformat(),
-                "metadata": custom_metadata,
-            }
-
-            # Sign entry if signer is available
-            if self.signer is not None:
-                # Build signable data (flatten for signing)
-                signable = {**entry_data, **custom_metadata}
-                signature = self.signer.sign_entry(signable)
-                entry_data["entry_signature"] = signature
-                # Also store in nested metadata so JsonBackend preserves it
-                custom_metadata["entry_signature"] = signature
-
-            # Store metadata
-            self.backend.put_entry(blob_key, entry_data)
-
-            logger.debug(
-                f"Stored blob {blob_key}: {handler.data_type}, "
-                f"{entry_data['file_size']} bytes"
-            )
-
-            return blob_key
-
-    def get(self, key: str) -> Optional[Any]:
-        """
-        Retrieve a blob by key.
-
-        Verifies entry signature if signing is enabled.
-
-        Args:
-            key: The blob key
-
-        Returns:
-            The stored data, or None if not found
-        """
-        with self._lock:
-            entry = self.backend.get_entry(key)
-            if entry is None:
-                logger.debug(f"Blob not found: {key}")
-                return None
-
-            # Verify entry signature if signer is available
-            if self.signer is not None:
-                nested_meta = entry.get("metadata", {})
-                stored_signature = entry.get("entry_signature") or nested_meta.get(
-                    "entry_signature"
-                )
-                if stored_signature:
-                    # Reconstruct signable data matching what was signed on put()
-                    signable = {**entry, **nested_meta, "cache_key": key}
-                    if not self.signer.verify_entry(signable, stored_signature):
-                        logger.warning(f"Signature verification failed for blob {key}")
-                        return None
-
-            # Get the file path - may be in top-level or nested metadata
-            nested_meta = entry.get("metadata", {})
-            actual_path_str = entry.get("actual_path") or nested_meta.get("actual_path")
-
-            if actual_path_str:
-                resolved = self._resolve_actual_path(actual_path_str)
-                actual_path = Path(resolved)
-            else:
-                # Fallback: try common extensions
-                for ext in [".pkl", ".b2nd", ".parquet", ".npz", ""]:
-                    candidate = self.cache_dir / f"{key}{ext}"
-                    if candidate.exists():
-                        actual_path = candidate
-                        break
-                else:
-                    actual_path = self.cache_dir / key
-
-            if not self.blob_backend.exists(str(actual_path)):
-                logger.warning(f"Blob file missing: {actual_path}")
-                return None
-
-            # Get the handler based on data type
-            data_type = entry.get("data_type", "object")
-            handler = self.handlers.get_handler_by_type(data_type)
-
-            # Build handler metadata by merging entry with nested metadata
-            nested_meta = entry.get("metadata", {})
-            handler_metadata = {
-                **entry,
-                **nested_meta,  # Flatten nested metadata to top level
-            }
-
-            if handler is None:
-                # Fall back to generic read
-                return read_file(actual_path)
-
-            # Read using handler
-            data = handler.get(actual_path, handler_metadata)
-
-            # Update access time
-            self.backend.update_access_time(key)
-
-            return data
-
-    def get_metadata(self, key: str) -> Optional[Dict[str, Any]]:
-        """
-        Get blob metadata without loading the blob content.
-
-        Args:
-            key: The blob key
-
-        Returns:
-            Metadata dictionary, or None if not found
-        """
-        with self._lock:
-            return self.backend.get_entry(key)
-
-    def update_metadata(self, key: str, metadata: Dict[str, Any]) -> bool:
-        """
-        Update metadata for an existing blob.
-
-        Args:
-            key: The blob key
-            metadata: New metadata to merge with existing nested metadata
-
-        Returns:
-            True if successful, False if blob not found
-        """
-        with self._lock:
-            existing = self.backend.get_entry(key)
-            if existing is None:
-                return False
-
-            # Get or create nested metadata dict
-            nested_meta = existing.get("metadata", {})
-            if not isinstance(nested_meta, dict):
-                nested_meta = {}
-
-            # Merge user metadata into nested dict
-            nested_meta.update(metadata)
-
-            # Update the entry
-            updated = {**existing, "metadata": nested_meta}
-
-            self.backend.put_entry(key, updated)
-            return True
-
-    def put_file(
-        self,
-        file_path: str | Path,
         *,
+        catalog_schema: CatalogSchema | None = None,
+        catalog_values: Dict[str, Any] | None = None,
+    ) -> str:
+        """Store one native handler payload through the selected authority."""
+        result = self._put_with_result_admitted(
+            data,
+            key=key,
+            metadata=metadata,
+            catalog_schema=catalog_schema,
+            catalog_values=catalog_values,
+        )
+        self._run_post_commit_projections(self._receipt_for_result(result))
+        return result.key
+
+    def _put_with_result_admitted(
+        self,
+        data: Any,
         key: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
-        move: bool = False,
-    ) -> str:
-        """Store an arbitrary file as a blob.
+        *,
+        catalog_schema: CatalogSchema | None = None,
+        catalog_values: Dict[str, Any] | None = None,
+        operation_id: str | None = None,
+    ):
+        """Store one payload after validation and exactly one public admission."""
+        catalog = self._prepare_catalog_write(catalog_schema, catalog_values)
+        blob_key = (
+            self._compute_content_hash(data)
+            if self.content_addressable
+            else key
+            if key is not None
+            else self._generate_unique_key()
+        )
+        return self.lifecycle.put(
+            data,
+            key=blob_key,
+            metadata=metadata,
+            catalog_schema_id=catalog[0],
+            catalog_schema_revision=catalog[1],
+            catalog_schema_fingerprint=catalog[2],
+            catalog_values=catalog[3],
+            operation_id=operation_id,
+        )
 
-        Reads the file into memory as raw bytes and delegates to
-        :meth:`put`.  File metadata (original filename, MIME type,
-        original size) is merged into the *metadata* dict automatically.
+    @staticmethod
+    def _prepare_catalog_write(
+        catalog_schema: CatalogSchema | None,
+        catalog_values: Dict[str, Any] | None,
+    ) -> tuple[str, int, str, dict[str, Any]]:
+        """Freeze catalog inputs before handlers, authority, or payload I/O run."""
+        supplied = {} if catalog_values is None else catalog_values
+        if catalog_schema is None:
+            values = validate_catalog_mapping(supplied, schema=None)
+            return (
+                _DEFAULT_CATALOG_SCHEMA_ID,
+                _DEFAULT_CATALOG_SCHEMA_REVISION,
+                _DEFAULT_CATALOG_SCHEMA_FINGERPRINT,
+                values,
+            )
+        if not isinstance(catalog_schema, CatalogSchema):
+            raise TypeError("catalog_schema must be a CatalogSchema or None")
+        values = catalog_schema.validate_mapping(supplied, materialize_defaults=True)
+        return (
+            catalog_schema.schema_id,
+            catalog_schema.revision,
+            catalog_schema.fingerprint,
+            values,
+        )
 
-        Args:
-            file_path: Path to the source file.
-            key: Optional explicit blob key.
-            metadata: Optional metadata dict (file metadata is merged in).
-            move: If ``True``, delete the source file after a successful
-                store (move-in semantics).  Defaults to ``False`` (copy-in).
+    @_ordinary_admitted
+    def get(self, key: str) -> Optional[Any]:
+        """Read one authority snapshot, or return ``None`` when absent."""
+        return self.lifecycle.get(key)
 
-        Returns:
-            The blob key.
+    @_ordinary_admitted
+    def get_metadata(self, key: str) -> Optional[Dict[str, Any]]:
+        """Read signed public metadata without deserializing the payload."""
+        return self.lifecycle.get_metadata(key)
 
-        Raises:
-            FileNotFoundError: If *file_path* does not exist.
-            IsADirectoryError: If *file_path* is a directory.
-        """
-        import mimetypes
+    @_ordinary_admitted
+    def update_metadata(self, key: str, metadata: Dict[str, Any]) -> bool:
+        """Promote an authority-owned metadata revision."""
+        return self.lifecycle.update_metadata(key, metadata)
 
-        src = Path(file_path)
-        if not src.exists():
-            raise FileNotFoundError(f"Source file does not exist: {src}")
-        if src.is_dir():
-            raise IsADirectoryError(f"Expected a file, got a directory: {src}")
-
-        data = src.read_bytes()
-        mime_type, _ = mimetypes.guess_type(str(src))
-
-        file_meta: Dict[str, Any] = {
-            "original_filename": src.name,
-            "mime_type": mime_type or "application/octet-stream",
-            "original_size": len(data),
-        }
-        merged = {**file_meta, **(metadata or {})}  # user metadata wins
-        blob_key = self.put(data, key=key, metadata=merged)
-
-        if move:
-            src.unlink()
-
-        return blob_key
-
-    def get_file(
+    @_ordinary_admitted
+    def update_catalog(
         self,
         key: str,
         *,
-        dest: str | Path | None = None,
-        move: bool = False,
-        overwrite: bool = True,
-    ) -> Optional[bytes | Path]:
-        """Retrieve a cached file blob, optionally writing it to disk.
+        catalog_schema: CatalogSchema,
+        catalog_values: Dict[str, Any],
+        expected: EntryExpectation | None = None,
+        replace: bool = False,
+    ) -> BlobReceipt | None:
+        """Patch or replace authenticated catalog values without rewriting bytes.
 
-        Args:
-            key: The blob key.
-            dest: Optional destination path.  Parent directories are
-                created automatically.  If *dest* is a directory, the
-                original filename from metadata is used (falls back to
-                ``<key>.bin``).
-            move: If ``True``, delete the cache entry after a successful
-                write to *dest* (move-out semantics).  Requires *dest*
-                to be set — raises ``ValueError`` otherwise.  Defaults
-                to ``False`` (copy-out).
-            overwrite: If ``False``, raise ``FileExistsError`` when
-                *dest* already exists on disk.  Defaults to ``True``
-                (silently overwrite).
-
-        Returns:
-            * ``bytes`` when *dest* is ``None`` and entry exists.
-            * ``pathlib.Path`` when *dest* is given and entry exists.
-            * ``None`` on miss.
-
-        Raises:
-            ValueError: If *move* is ``True`` but *dest* is ``None``.
-            FileExistsError: If *overwrite* is ``False`` and *dest*
-                already exists.
+        Catalog patches preserve the selected payload generation and use the
+        exact observed authority record as their compare-and-swap precondition.
+        ``replace=True`` records only the supplied stored fields; the default
+        patches the currently stored mapping.
         """
-        if move and dest is None:
-            raise ValueError(
-                "move=True requires dest to be set. "
-                "Without a destination path, use get() + delete() instead."
-            )
-
-        data = self.get(key)
-        if data is None:
+        if not isinstance(catalog_schema, CatalogSchema):
+            raise TypeError("catalog_schema must be a CatalogSchema")
+        if type(replace) is not bool:
+            raise TypeError("replace must be a bool")
+        patch = self._prepare_catalog_patch(
+            catalog_schema, catalog_values, replace=replace
+        )
+        result = self.lifecycle.update_catalog(
+            key,
+            catalog_schema=catalog_schema,
+            catalog_values=patch,
+            expected=expected,
+            replace_values=replace,
+        )
+        if result is None:
             return None
+        return self._run_post_commit_projections(self._receipt_for_result(result))
 
-        if not isinstance(data, (bytes, bytearray, memoryview)):
-            raise TypeError(
-                f"Expected bytes from blob store, got {type(data).__name__}. "
-                "get_file() should only be used with blobs stored via put_file()."
-            )
-        raw = bytes(data) if not isinstance(data, bytes) else data
+    @staticmethod
+    def _prepare_catalog_patch(
+        catalog_schema: CatalogSchema,
+        catalog_values: Dict[str, Any],
+        *,
+        replace: bool,
+    ) -> dict[str, Any]:
+        """Validate a bounded replacement or patch before authority access."""
+        patch = validate_catalog_mapping(catalog_values, schema=None)
+        if replace:
+            return catalog_schema.validate_mapping(patch, materialize_defaults=False)
+        for name, value in patch.items():
+            declared = catalog_schema.field_map.get(name)
+            if declared is not None:
+                declared.validate(value)
+        return patch
 
-        if dest is None:
-            return raw
+    @_ordinary_admitted
+    def delete(self, key: str, *, expected: EntryExpectation | None = None) -> bool:
+        """Tombstone one observed generation and delete its exact payload."""
+        deleted = self.lifecycle.delete(key=key, expected=expected)
+        return deleted
 
-        dest_path = Path(dest)
-        if dest_path.is_dir():
-            entry = self.backend.get_entry(key)
-            name = None
-            if entry:
-                nested = entry.get("metadata", {})
-                name = nested.get("original_filename")
-            dest_path = dest_path / (name or f"{key}.bin")
-
-        if not overwrite and dest_path.exists():
-            raise FileExistsError(
-                f"Destination already exists: {dest_path}. "
-                "Pass overwrite=True to overwrite."
-            )
-
-        dest_path.parent.mkdir(parents=True, exist_ok=True)
-        dest_path.write_bytes(raw)
-
-        if move:
-            self.delete(key)
-
-        return dest_path
-
-    def delete(self, key: str) -> bool:
-        """
-        Delete a blob and its metadata.
-
-        Uses metadata-first ordering: removes the metadata entry before
-        deleting the blob file.  This ensures a crash between the two steps
-        leaves an orphaned blob (harmless) rather than a dangling metadata
-        pointer (dangerous).
-
-        Args:
-            key: The blob key
-
-        Returns:
-            True if deleted, False if not found
-        """
-        with self._lock:
-            entry = self.backend.get_entry(key)
-            if entry is None:
-                return False
-
-            # Resolve blob path BEFORE removing metadata (need entry data)
-            nested_meta = entry.get("metadata", {})
-            actual_path_str = entry.get("actual_path") or nested_meta.get("actual_path")
-            resolved = (
-                self._resolve_actual_path(actual_path_str)
-                if actual_path_str
-                else str(self.cache_dir / key)
-            )
-
-            # Remove metadata first — crash here leaves entry intact (safe)
-            self.backend.remove_entry(key)
-
-            # Delete blob second — crash here leaves orphaned blob (harmless,
-            # cleaned by verify_integrity)
-            try:
-                self.blob_backend.delete_blob(resolved)
-            except Exception as exc:
-                logger.warning(
-                    f"Failed to delete blob file for {key} at {resolved}: {exc}. "
-                    f"Orphaned blob will be cleaned by verify_integrity."
-                )
-
-            logger.debug(f"Deleted blob: {key}")
-            return True
-
+    @_ordinary_admitted
     def exists(self, key: str) -> bool:
+        """Verify a signed payload snapshot exists through the authority."""
+        return self.lifecycle.exists(key)
+
+    @_ordinary_admitted
+    def list(self, prefix: Optional[str] = None) -> List[str]:
+        """List local authority entries by key prefix only.
+
+        The remote reference topology cannot return a complete catalog in one
+        value. Call :meth:`list_page` there and follow its authenticated
+        continuation cursor instead.
         """
-        Check if a blob exists.
+        return self.lifecycle.list(prefix)
 
-        Args:
-            key: The blob key
-
-        Returns:
-            True if the blob exists
-        """
-        with self._lock:
-            entry = self.backend.get_entry(key)
-            if entry is None:
-                return False
-
-            # Also verify the file exists via blob backend
-            nested_meta = entry.get("metadata", {})
-            actual_path_str = entry.get("actual_path") or nested_meta.get("actual_path")
-            resolved = (
-                self._resolve_actual_path(actual_path_str)
-                if actual_path_str
-                else str(self.cache_dir / key)
-            )
-            return self.blob_backend.exists(resolved)
-
-    def list(
+    @_ordinary_admitted
+    def list_page(
         self,
-        prefix: Optional[str] = None,
-        metadata_filter: Optional[Dict[str, Any]] = None,
-    ) -> List[str]:
+        *,
+        schema: CatalogSchema,
+        cursor: str | None = None,
+        limit: int = DEFAULT_PAGE_SIZE,
+        work_cap: int | None = None,
+    ) -> CatalogPage:
+        """Return one bounded committed catalog page for remote enumeration.
+
+        ``CatalogPage`` carries the authority-authenticated continuation cursor,
+        so callers cannot accidentally turn a remote catalog into a silently
+        truncated list. It remains authority membership, never S3 inventory.
         """
-        List blob keys with optional filtering.
+        query = CatalogQuery(page_size=limit, cursor=cursor)
+        return self.query_catalog(
+            query,
+            schema=schema,
+            cursor=cursor,
+            limit=limit,
+            work_cap=work_cap,
+        )
 
-        Args:
-            prefix: Only return keys starting with this prefix
-            metadata_filter: Filter by metadata field values (exact match)
+    @_ordinary_admitted
+    def query_catalog(
+        self,
+        query: CatalogQuery,
+        *,
+        schema: CatalogSchema,
+        cursor: str | None = None,
+        limit: int | None = None,
+        work_cap: int | None = None,
+    ) -> CatalogPage:
+        """Return a bounded portable page from signed current descriptors.
 
-        Returns:
-            List of matching blob keys
+        The authority is the sole membership catalog.  It keyset-enumerates
+        current descriptor bytes; this facade authenticates each descriptor
+        before applying native predicates and exposes their exact expectations,
+        without creating a metadata mirror or claiming an acceleration index.
         """
-        with self._lock:
-            entries = self.backend.list_entries()
-            keys = []
+        if not isinstance(query, CatalogQuery):
+            # Keep the error type and input validation boundary in catalog.py.
+            validate_catalog_page_request(
+                query, schema=schema, cursor=cursor, limit=1, work_cap=1
+            )
+        effective_cursor = query.cursor if cursor is None else cursor
+        effective_limit = query.page_size if limit is None else limit
+        if work_cap is None:
+            effective_work_cap = (
+                max(effective_limit, DEFAULT_PAGE_SIZE)
+                if isinstance(effective_limit, int)
+                and not isinstance(effective_limit, bool)
+                else DEFAULT_PAGE_SIZE
+            )
+        else:
+            effective_work_cap = work_cap
+        validate_catalog_page_request(
+            query,
+            schema=schema,
+            cursor=effective_cursor,
+            limit=effective_limit,
+            work_cap=effective_work_cap,
+        )
+        signing_key = self._authority_manifest_key()
+        if effective_cursor is not None:
+            CatalogCursor.inspect(effective_cursor, signing_key=signing_key)
+        return self.lifecycle_authority.catalog_page(
+            query,
+            effective_cursor,
+            schema=schema,
+            limit=effective_limit,
+            work_cap=effective_work_cap,
+            signing_key=signing_key,
+            manifest_loader=self._authenticated_authority_manifest,
+        )
 
-            for entry in entries:
-                key = entry.get("cache_key", "")
+    @_ordinary_admitted
+    def refresh_projection(self, name: str, receipt: BlobReceipt):
+        """Run one caller-requested bounded derived refresh.
 
-                # Apply prefix filter
-                if prefix and not key.startswith(prefix):
-                    continue
+        A projection failure raises a committed-partial error that carries this
+        exact receipt. No authority row, payload generation, or cleanup debt is
+        changed by the refresh attempt.
+        """
+        return self._projection_controller(name).refresh(receipt)
 
-                # Apply metadata filter
-                if metadata_filter:
-                    match = True
-                    for field, value in metadata_filter.items():
-                        if entry.get(field) != value:
-                            match = False
-                            break
-                    if not match:
-                        continue
+    @_ordinary_admitted
+    def rebuild_projection(
+        self,
+        name: str,
+        *,
+        requested: str = "offline",
+        workers_stopped: bool = False,
+    ):
+        """Explicitly rebuild one derived projection into an isolated destination."""
+        if isinstance(self.lifecycle_authority, SqliteLifecycleAuthority) and (
+            requested != "offline" or workers_stopped is not True
+        ):
+            raise ProjectionCapabilityError(
+                "SQLite projection rebuild requires explicit offline maintenance "
+                "with workers stopped"
+            )
+        return self._projection_controller(name).rebuild(requested=requested)
 
-                keys.append(key)
-
-            return keys
+    def _projection_controller(self, name: str) -> ProjectionController:
+        if not isinstance(name, str) or not name:
+            raise ValueError("Projection name must be a non-empty string")
+        for controller in self._projection_controllers:
+            if controller.projection_name == name:
+                return controller
+        raise KeyError(f"No configured projection named {name!r}")
 
     def clear(self) -> int:
-        """
-        Remove all blobs and their files.
+        """Clear one authority-owned membership snapshot."""
+        with self._instance_admission.clear_operation() as release_snapshot:
+            self._require_canonical_store()
+            try:
+                try:
+                    token = self.lifecycle.begin_clear()
+                finally:
+                    release_snapshot()
+                cleared = self.lifecycle.complete_clear(token)
+            except (CacheBlobBackendError, CacheBlobLifecycleConflictError):
+                raise
+            except (CacheStorageError, OSError) as exc:
+                raise CacheBlobBackendError(
+                    "BlobStore clear lifecycle could not complete",
+                    context={"operation": "clear"},
+                ) from exc
+        return cleared
 
-        Returns:
-            Number of metadata entries removed
-        """
-        with self._lock:
-            files_removed = self._clear_blob_files()
-            count = self.backend.clear_all()
-            logger.debug(
-                f"Cleared {count} entries and removed {files_removed} blob files"
-            )
-            return count
+    def reconcile(
+        self,
+        *,
+        apply: bool = False,
+        resume_token: str | None = None,
+        now: Any | None = None,
+    ) -> ReconciliationReport:
+        """Inspect or settle only authority-recorded lifecycle debt."""
+        with self._instance_admission.operation():
+            self._require_canonical_store()
+            report = _AuthorityReconciler(
+                self, lifecycle_limits=self.lifecycle_limits
+            ).reconcile(apply=apply, resume_token=resume_token, now=now)
+        return report
 
-    def close(self):
-        """Close the blob store and release resources."""
-        with self._lock:
-            self.backend.close()
-            self.blob_backend.close()
+    def close(self) -> None:
+        """Drain local admission and release only resources this store owns."""
+        should_release = self._instance_admission.begin_close()
+        if not should_release:
+            return
+        closed = False
+        try:
+            self._release_owned_resources()
+            closed = True
+        except CacheStorageError:
+            raise
+        except CacheBlobLifecycleTimeoutError:
+            raise
+        except Exception as exc:
+            raise CacheBlobBackendError(
+                "BlobStore close could not release an owned resource",
+                context={"operation": "close"},
+            ) from exc
+        finally:
+            self._instance_admission.finish_close(closed=closed)
+
+    def _release_owned_resources(self) -> None:
+        if (
+            self.guarded_handler_io is not None
+            and not self._guarded_handler_io_released
+        ):
+            # The unified obstore participant is itself the guarded I/O object.
+            # Its close belongs exclusively to StoreTopology's ownership ledger:
+            # closing it here would double-close a store-owned provider or adopt
+            # a caller-owned injected provider.
+            if self.guarded_handler_io is not self.payload_backend:
+                self.guarded_handler_io.close()
+            self._guarded_handler_io_released = True
+        self.topology.close()
 
     def __enter__(self):
+        self._instance_admission.require_open()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
         return False
 
-    # ── Integrity verification ────────────────────────────────────────
-
-    def verify_integrity(
-        self, repair: bool = False, verify_hashes: bool = False
-    ) -> IntegrityReport:
-        """
-        Verify blob store integrity by cross-checking blob files and metadata.
-
-        Detects:
-        - Orphaned blobs: blobs in storage with no metadata entry
-        - Dangling metadata: entries pointing to missing blobs
-        - Size mismatches: metadata file_size != actual size in storage
-        - Hash mismatches: metadata file_hash != actual file hash (if verify_hashes)
-
-        Works with any blob backend (filesystem, S3, in-memory, etc.).
-
-        Args:
-            repair: If True, delete orphaned blobs and remove dangling entries.
-            verify_hashes: If True, also verify file hashes (slower but catches
-                corruption).
-
-        Returns:
-            Dict with keys: orphaned_blobs, dangling_entries, size_mismatches,
-            hash_mismatches (if verify_hashes), repaired (if repair).
-        """
-        with self._lock:
-            # 1. Inventory all blobs in storage (delegates to blob_backend
-            #    which handles sharding / recursive listing automatically)
-            blob_files: set[str] = set(self.blob_backend.list_blobs())
-
-            # 2. Collect metadata entry paths
-            entry_paths: dict[str, dict] = {}
-            for entry in self.backend.iter_entry_summaries():
-                actual_path = entry.get("actual_path")
-                if actual_path:
-                    # Resolve to the same format that list_blobs() produces
-                    # so set-comparison works correctly.
-                    norm_path = self._resolve_actual_path(actual_path)
-                    entry_paths[norm_path] = {
-                        "cache_key": entry.get("cache_key", ""),
-                        "file_size": entry.get("file_size"),
-                        "file_hash": entry.get("file_hash"),
-                        "s3_etag": entry.get("s3_etag"),
-                    }
-
-            # 3. Find orphaned blobs (blobs with no metadata entry)
-            known_paths = set(entry_paths.keys())
-            orphaned_blobs = sorted(blob_files - known_paths)
-
-            # 4. Find dangling metadata (entries pointing to missing blobs)
-            dangling_entries = []
-            for path, info in entry_paths.items():
-                if not self.blob_backend.exists(path):
-                    dangling_entries.append(
-                        {
-                            "cache_key": info["cache_key"],
-                            "expected_path": path,
-                        }
-                    )
-
-            # 5. Check size mismatches
-            size_mismatches = []
-            for path, info in entry_paths.items():
-                if info["file_size"] is None:
-                    continue
-                actual_size = self.blob_backend.get_size(path)
-                if actual_size == -1:
-                    continue
-                if actual_size != info["file_size"]:
-                    size_mismatches.append(
-                        {
-                            "cache_key": info["cache_key"],
-                            "path": path,
-                            "expected_size": info["file_size"],
-                            "actual_size": actual_size,
-                        }
-                    )
-
-            # 6. Check hash mismatches (optional, expensive)
-            #    For remote blobs (S3), use a cheap ETag HEAD check instead
-            #    of downloading the entire blob for xxhash verification.
-            #    A matching ETag confirms the blob hasn't changed since
-            #    upload.  A mismatching ETag is a definitive integrity
-            #    failure — the object was modified or replaced.
-            #    Full download + xxhash is only used when:
-            #      - No stored s3_etag (older entries, non-S3 backends)
-            #      - Non-remote blob (local files always use xxhash)
-            hash_mismatches = []
-            if verify_hashes:
-                for path, info in entry_paths.items():
-                    if not info.get("file_hash"):
-                        continue
-
-                    # Remote blob with stored ETag → cheap HEAD check
-                    if (
-                        "://" in path
-                        and info.get("s3_etag")
-                        and hasattr(self.blob_backend, "verify_etag")
-                    ):
-                        if self.blob_backend.verify_etag(  # type: ignore[call-non-callable]
-                            path, info["s3_etag"]
-                        ):
-                            # ETag matches — blob is unchanged, skip download
-                            continue
-                        # ETag mismatch — object was modified/replaced
-                        actual_etag = None
-                        if hasattr(self.blob_backend, "get_etag"):
-                            actual_etag = self.blob_backend.get_etag(  # type: ignore[call-non-callable]
-                                path
-                            )
-                        logger.warning(
-                            f"S3 ETag mismatch for {path}: "
-                            f"expected {info['s3_etag']}, "
-                            f"got {actual_etag}"
-                        )
-                        hash_mismatches.append(
-                            {
-                                "cache_key": info["cache_key"],
-                                "path": path,
-                                "expected_hash": info["file_hash"],
-                                "actual_hash": f"etag-mismatch:{actual_etag}",
-                            }
-                        )
-                        continue
-
-                    current_hash = self._calculate_blob_hash(path)
-                    if current_hash and current_hash != info["file_hash"]:
-                        hash_mismatches.append(
-                            {
-                                "cache_key": info["cache_key"],
-                                "path": path,
-                                "expected_hash": info["file_hash"],
-                                "actual_hash": current_hash,
-                            }
-                        )
-
-            # 7. Repair if requested
-            repaired = {"orphans_deleted": 0, "dangling_removed": 0}
-            if repair:
-                for blob_path in orphaned_blobs:
-                    try:
-                        self.blob_backend.delete_blob(blob_path)
-                        repaired["orphans_deleted"] += 1
-                    except OSError as e:
-                        logger.warning(
-                            f"Failed to remove orphaned blob {blob_path}: {e}"
-                        )
-
-                for entry in dangling_entries:
-                    try:
-                        self.backend.remove_entry(entry["cache_key"])
-                        repaired["dangling_removed"] += 1
-                    except Exception as e:
-                        logger.warning(
-                            f"Failed to remove dangling entry {entry['cache_key']}: {e}"
-                        )
-
-            report = IntegrityReport(
-                orphaned_blobs=orphaned_blobs,
-                dangling_entries=dangling_entries,
-                size_mismatches=size_mismatches,
-                hash_mismatches=hash_mismatches if verify_hashes else None,
-                repaired=repaired if repair else None,
+    def _materialize_authority_store(self) -> Any:
+        """Materialize guarded generation I/O from the selected payload only."""
+        if self.guarded_handler_io is None:
+            self.guarded_handler_io = self.payload_backend.materialize_handler_io()
+            required_methods = (
+                "stage",
+                "publish_generation",
+                "open_snapshot",
+                "delete_or_prove_absent",
+                "close",
             )
-
-            total_issues = (
-                len(orphaned_blobs)
-                + len(dangling_entries)
-                + len(size_mismatches)
-                + len(hash_mismatches)
-            )
-            if total_issues == 0:
-                logger.info("Blob store integrity check passed — no issues found")
-            else:
-                logger.warning(
-                    f"Blob store integrity check found {total_issues} issue(s): "
-                    f"{len(orphaned_blobs)} orphaned, "
-                    f"{len(dangling_entries)} dangling, "
-                    f"{len(size_mismatches)} size mismatches"
-                    + (
-                        f", {len(hash_mismatches)} hash mismatches"
-                        if verify_hashes
-                        else ""
-                    )
+            if not all(
+                callable(getattr(self.guarded_handler_io, name, None))
+                for name in required_methods
+            ):
+                raise CacheBlobBackendError(
+                    "Payload participant returned incomplete guarded generation I/O"
                 )
+        return self.guarded_handler_io
 
-            return report
-
-    # ── Low-level composition API ─────────────────────────────────────
-    # These methods are used by UnifiedCache to delegate storage operations
-    # without going through the full BlobStore.put/get pipeline.
-
-    def _write_blob(
-        self,
-        data: Any,
-        base_path: Path,
-        config: Optional["CacheConfig"] = None,
-        compute_hash: bool = True,
-    ) -> WriteBlobResult:
-        """
-        Low-level: serialize data to disk via handler, then persist
-        through the blob backend.
-
-        Does NOT acquire the lock — caller is responsible for synchronization.
-        Does NOT write metadata — caller handles metadata storage.
-
-        The handler writes to a local staging path (``base_path`` + extension).
-        The blob backend then persists the file (filesystem rename, S3 upload,
-        in-memory store, etc.).  Any backend-specific write metadata (e.g.
-        ``s3_etag``) is injected into the result dict.
-
-        Args:
-            data: The data to serialize
-            base_path: Base file path (handler adds extension)
-            config: Optional CacheConfig override
-            compute_hash: Whether to compute xxhash file hash
-
-        Returns:
-            WriteBlobResult with handler, result, and optional file hash.
-        """
-        handler = self.handlers.get_handler(data)
-        result = handler.put(data, base_path, config or self.config)
-
-        # Persist through blob_backend (rename, upload, etc.)
-        handler_path = Path(result.actual_path)
-        final_path = self.blob_backend.write_blob_from_path(
-            str(handler_path), handler_path.name
-        )
-
-        # Inject backend write metadata (e.g. s3_etag)
-        write_meta = self.blob_backend.get_write_metadata()
-        if write_meta:
-            result.extra.update(write_meta)
-
-        # Update actual_path to the final storage location (relative)
-        result.actual_path = self._to_relative_path(final_path)
-
-        # Compute file hash from final location
-        file_hash = None
-        if compute_hash:
-            if "://" not in final_path:
-                file_hash = self._calculate_file_hash(Path(final_path))
+    def _authority_manifest_key(self, *, initialize_new_store: bool = False) -> bytes:
+        """Read or initialize the authority trust root at its lifecycle boundary."""
+        context = {
+            "operation": "initialize_manifest_key"
+            if initialize_new_store
+            else "get_manifest_key",
+            "provider": type(self._manifest_key_provider).__name__,
+        }
+        try:
+            initialize_or_get = getattr(
+                self._manifest_key_provider, "get_or_initialize_new_store", None
+            )
+            if initialize_new_store and callable(initialize_or_get):
+                key = initialize_or_get()
             else:
-                file_hash = self._calculate_blob_hash(final_path)
+                try:
+                    key = self._manifest_key_provider.get_key()
+                except ManifestKeyError:
+                    if not initialize_new_store:
+                        raise
+                    initializer = getattr(
+                        self._manifest_key_provider, "initialize_new_store", None
+                    )
+                    if not callable(initializer):
+                        raise
+                    key = initializer()
+        except Exception as exc:
+            raise CacheBlobManifestUnauthenticatedError(
+                "Canonical BlobStore signing key is unavailable",
+                context=context,
+                reason=CacheReason.MANIFEST_SIGNING_KEY_INVALID,
+            ) from exc
+        if type(key) is not bytes or len(key) != 32:
+            raise CacheBlobManifestUnauthenticatedError(
+                "Canonical BlobStore signing key is invalid",
+                context=context,
+                reason=CacheReason.MANIFEST_SIGNING_KEY_INVALID,
+            )
+        return key
 
-        return WriteBlobResult(handler=handler, result=result, file_hash=file_hash)
-
-    def _read_blob(
-        self,
-        path: Path,
-        data_type: str,
-        handler_metadata: BlobReadContext,
-    ) -> Any:
-        """
-        Low-level: deserialize data from disk via handler.
-
-        Does NOT acquire the lock — caller is responsible for synchronization.
-        Does NOT check metadata or verify signatures.
-
-        Args:
-            path: Path to the blob file
-            data_type: Handler data type identifier (e.g. "dataframe", "array")
-            handler_metadata: Metadata dict passed to handler.get()
-
-        Returns:
-            Deserialized data object
-        """
-        handler = self.handlers.get_handler_by_type(data_type)
-        if handler is None:
-            return read_file(path)
-        return handler.get(path, handler_metadata)
-
-    def _clear_blob_files(self) -> int:
-        """
-        Delete all blob files from the cache directory.
-
-        Does NOT acquire the lock — caller is responsible for synchronization.
-
-        Returns:
-            Number of blob files deleted
-        """
-        blob_extensions = ["pkl", "npz", "b2nd", "b2tr", "parquet"]
-        pickle_codecs = ["lz4", "zstd", "gzip", "zst", "gz", "bz2", "xz"]
-
-        patterns = [str(self.cache_dir / f"*.{ext}") for ext in blob_extensions]
-        for codec in pickle_codecs:
-            patterns.append(str(self.cache_dir / f"*.pkl.{codec}"))
-        patterns.append(str(self.cache_dir / "*.pkl.*"))
-
-        processed: set[str] = set()
-        for pattern in patterns:
-            for file_path in glob.glob(pattern):
-                if file_path not in processed:
-                    try:
-                        os.remove(file_path)
-                        processed.add(file_path)
-                    except OSError as e:
-                        logger.warning(f"Failed to remove blob file {file_path}: {e}")
-
-        return len(processed)
-
-    # ── Private helper methods ────────────────────────────────────────
-
-    def _calculate_file_hash(self, file_path: Path) -> Optional[str]:
-        """
-        Calculate XXH3_64 hash of a blob file for integrity verification.
-
-        Args:
-            file_path: Path to the blob file
-
-        Returns:
-            Hex string of the file hash, or None if file doesn't exist or error
-        """
+    def _authenticated_authority_manifest(
+        self, raw: bytes, *, allow_tombstone: bool = False
+    ) -> BlobManifest:
+        """Authenticate canonical authority bytes before trusting any locator."""
         try:
-            if not file_path.exists():
-                return None
-
-            hasher = xxhash.xxh3_64()
-            with open(file_path, "rb") as f:
-                for chunk in iter(lambda: f.read(8192), b""):
-                    hasher.update(chunk)
-            return hasher.hexdigest()
-        except Exception as e:
-            logger.warning(f"Failed to calculate hash for {file_path}: {e}")
-            return None
-
-    def _calculate_blob_hash(self, blob_path: str) -> Optional[str]:
-        """
-        Calculate XXH3_64 hash of a remote blob for integrity verification.
-
-        Downloads the blob via the blob backend and hashes it in chunks.
-
-        Args:
-            blob_path: Blob path/URI understood by the blob backend
-
-        Returns:
-            Hex string of the blob hash, or None on error
-        """
+            manifest = BlobManifest.from_canonical_bytes(raw)
+        except CacheManifestUnsupportedVersionError as exc:
+            raise CacheBlobManifestUnsupportedVersionError(
+                "Authority manifest schema version is unsupported"
+            ) from exc
+        except CacheManifestIntegrityError as exc:
+            raise CacheBlobManifestMalformedError(
+                "Authority manifest is malformed"
+            ) from exc
         try:
-            stream = self.blob_backend.read_blob_stream(blob_path)
-            hasher = xxhash.xxh3_64()
-            for chunk in iter(lambda: stream.read(8192), b""):
-                hasher.update(chunk)
-            return hasher.hexdigest()
-        except Exception as e:
-            logger.warning(f"Failed to calculate hash for {blob_path}: {e}")
-            return None
+            verify_current_manifest(manifest, self._authority_manifest_key())
+        except CacheManifestIntegrityError as exc:
+            raise CacheBlobManifestUnauthenticatedError(
+                "Authority manifest cannot be authenticated"
+            ) from exc
+        if manifest.canonical_bytes() != raw:
+            raise CacheBlobManifestMalformedError("Authority manifest is not canonical")
+        return manifest
+
+    def _storage_id_for_key(self, key: str) -> str:
+        return encode_physical_name(key, namespace="blob-store")
+
+    def _delete_or_prove_absent(self, locator: Path) -> None:
+        """Delegate exact cleanup to the selected payload participant's I/O."""
+        self._materialize_authority_store().delete_or_prove_absent(locator)
+
+    def delete_migration_payload(self, locator: str) -> None:
+        """Delete one authority-correlated retired migration locator idempotently.
+
+        This narrow maintenance-only primitive is intentionally not an ordinary
+        BlobStore deletion path: callers must obtain the exact locator from the
+        selected migration authority before requesting external cleanup.
+        """
+        if not isinstance(locator, str) or not locator:
+            raise ValueError("migration payload locator must be a non-empty string")
+        self._materialize_authority_store().delete_or_prove_absent(locator)
+
+    def _resolve_payload_handler(self, manifest: BlobManifest) -> Any:
+        """Resolve one signed handler/payload contract before opening bytes."""
+        resolver = getattr(self.handlers, "resolve_payload_contract", None)
+        try:
+            if callable(resolver):
+                return resolver(
+                    manifest.handler_type,
+                    manifest.payload_format,
+                    manifest.payload_format_version,
+                )
+            handler = self.handlers.get_handler_by_type(manifest.handler_type)
+            declared_format = manifest.handler_metadata.get("storage_format")
+            if (
+                declared_format != manifest.payload_format
+                or manifest.payload_format_version != 1
+            ):
+                raise CacheManifestUnsupportedVersionError(
+                    "Canonical manifest declares an unsupported native payload contract"
+                )
+            return handler
+        except (CacheManifestUnsupportedVersionError, ValueError) as exc:
+            from cacheness.error_handling import CacheBlobPayloadUnsupportedVersionError
+
+            raise CacheBlobPayloadUnsupportedVersionError(
+                "Canonical BlobStore payload contract is unsupported"
+            ) from exc
+
+    @staticmethod
+    def _handler_metadata(manifest: BlobManifest) -> Dict[str, Any]:
+        return {
+            **dict(manifest.user_metadata),
+            **dict(manifest.handler_metadata),
+            "cache_key": manifest.key,
+            "data_type": manifest.handler_type,
+            "storage_format": manifest.payload_format,
+            "file_size": manifest.byte_size,
+            "created_at": manifest.created_at,
+        }
+
+    def _manifest_entry_data(self, manifest: BlobManifest) -> Dict[str, Any]:
+        return {
+            "cache_key": manifest.key,
+            "data_type": manifest.handler_type,
+            "file_size": manifest.byte_size,
+            "created_at": manifest.created_at,
+            "metadata": {
+                **dict(manifest.user_metadata),
+                **dict(manifest.handler_metadata),
+                "actual_path": manifest.locator,
+            },
+            "catalog": {
+                "schema_id": manifest.catalog_schema_id,
+                "schema_revision": manifest.catalog_schema_revision,
+                "schema_fingerprint": manifest.catalog_schema_fingerprint,
+                "values": dict(manifest.catalog_values),
+                "presence": manifest.catalog_presence,
+            },
+        }
 
     def _compute_content_hash(self, data: Any) -> str:
-        """Compute a content-based hash for the data using xxhash."""
         import pickle
 
         try:
             serialized = pickle.dumps(data)
         except Exception:
-            # Fall back to repr for non-pickleable objects
             serialized = repr(data).encode()
-        return xxhash.xxh3_64(serialized).hexdigest()[:16]
+        return hashlib.sha256(serialized).hexdigest()[:16]
 
-    def _sanitize_key(self, key: str) -> str:
-        """Sanitize a user-provided key."""
-        # Remove problematic characters
-        safe_key = "".join(c for c in key if c.isalnum() or c in "-_.")
-        return safe_key[:64] or self._generate_unique_key()
+    def _require_canonical_store(self) -> None:
+        if self._legacy_identity is not None:
+            self._legacy_identity.require_explicit_migration()
+        require_worker_access = getattr(
+            self.lifecycle_authority, "require_ordinary_worker_access", None
+        )
+        if callable(require_worker_access):
+            require_worker_access()
 
-    def _generate_unique_key(self) -> str:
-        """Generate a unique blob key."""
-        import uuid
+    def _is_memory_topology(self) -> bool:
+        return self.topology.qualified_profile.pair == ("memory", "memory")
 
+    @staticmethod
+    def _generate_unique_key() -> str:
         return uuid.uuid4().hex[:16]

@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "fixture_id": "sqlite-columns-v0314",
+  "source_commit": "a22f4b4575cb8213d9783ed388d2a70727563db1",
+  "source_version": "0.3.14",
+  "generator_command": "At audited commit a22f4b4575cb8213d9783ed388d2a70727563db1, invoked only UnifiedCache.put on np.arange(6, dtype=np.int32).reshape(2, 3) with SQLite metadata, in-memory entry signing, use_blosc2_arrays=False, and params fixture_id=sqlite-columns-v0314; the unified serialization fixture_id:str:sqlite-columns-v0314 produced cache key 701dc06c58be25b7. No Cacheness reader was called. The copied SQLite evidence was inspected only through a temporary read-only URI.",
+  "environment": {
+    "cacheness": "0.3.14",
+    "python": "3.13.3",
+    "numpy": "2.3.2",
+    "blosc2": "3.7.0"
+  },
+  "logical_input": {
+    "dtype": "int32",
+    "shape": [2, 3],
+    "values": [0, 1, 2, 3, 4, 5]
+  },
+  "discriminators": {
+    "metadata_kind": "sqlite",
+    "table": "cache_entries",
+    "sqlite_columns": [
+      "cache_key",
+      "description",
+      "data_type",
+      "prefix",
+      "created_at",
+      "accessed_at",
+      "file_size",
+      "file_hash",
+      "entry_signature",
+      "object_type",
+      "storage_format",
+      "serializer",
+      "compression_codec",
+      "actual_path",
+      "cache_key_params"
+    ],
+    "signature_state": "column_present"
+  },
+  "files": {
+    "metadata.sqlite3": {
+      "source_sha256": "a236b3ad7d00f5121bc5d12a170dc0af26516b5126c7f4bd238c7c57d27f0379",
+      "copied_sha256": "a236b3ad7d00f5121bc5d12a170dc0af26516b5126c7f4bd238c7c57d27f0379"
+    },
+    "payload.npz": {
+      "source_sha256": "400fa42d786ab1e6924e051bbaa61238627909af333de87aab176c280c71fe2f",
+      "copied_sha256": "400fa42d786ab1e6924e051bbaa61238627909af333de87aab176c280c71fe2f"
+    }
+  },
+  "sqlite_inspection": {
+    "table": "cache_entries",
+    "columns": [
+      "cache_key",
+      "description",
+      "data_type",
+      "prefix",
+      "created_at",
+      "accessed_at",
+      "file_size",
+      "file_hash",
+      "entry_signature",
+      "object_type",
+      "storage_format",
+      "serializer",
+      "compression_codec",
+      "actual_path",
+      "cache_key_params"
+    ],
+    "metadata_json_present": false,
+    "source_read_only_data_version_before": 2,
+    "source_read_only_data_version_after": 2
+  }
+}

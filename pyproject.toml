@@ -1,7 +1,7 @@
 [project]
 name = "cacheness"
-version = "0.6.0"
-description = "High-performance disk caching library using Blosc compression, geared toward numpy arrays and dataframes and pickle-ing for everything else."
+version = "0.3.14"
+description = "BlobStore-first Python storage library with cache policy layered through UnifiedCache."
 readme = "README.md"
 authors = [
     { name = "radioflyer28", email = "akgithub.2drwc@aleeas.com" }
@@ -9,6 +9,9 @@ authors = [
 requires-python = ">=3.11"
 dependencies = [
     "cachetools>=6.1.0",
+    "cryptography>=46.0.3",
+    "numpy>=2.0.0",
+    "obstore==0.11.1",
     "xxhash>=3.5.0",
 ]
 
@@ -19,7 +22,6 @@ recommended = [
     "pandas>=2.0.0,<4.0.0",
     "pyarrow>=21.0.0",
     "sqlalchemy>=2.0.0",
-    "duckdb-engine>=0.16.0",
     "orjson>=3.8.0",
     "dill>=0.4.0",
 ]
@@ -28,18 +30,12 @@ dataframes = [
     "polars>=1.30.0",
     "pyarrow>=21.0.0",
 ]
-tensorflow = [
-    "tensorflow>=2.0.0",
-]
-s3 = [
-    "boto3>=1.26.0",
-]
+s3 = []
 postgresql = [
     "psycopg[binary]>=3.1.0",
     "sqlalchemy>=2.0.0",
 ]
 cloud = [
-    "boto3>=1.26.0",
     "psycopg[binary]>=3.1.0",
     "sqlalchemy>=2.0.0",
 ]
@@ -52,13 +48,8 @@ recommended = [
     "pandas>=2.0.0,<4.0.0",
     "pyarrow>=21.0.0",
     "sqlalchemy>=2.0.0",
-    "duckdb-engine>=0.16.0",
     "orjson>=3.8.0",
     "dill>=0.4.0",
-]
-sql = [
-     "duckdb-engine>=0.16.0",
-     "sqlalchemy>=2.0.0",
 ]
 dataframes = [
     "pandas>=2.0.0,<4.0.0",
@@ -69,30 +60,11 @@ dev = [
     "pytest>=8.4.1",
     "pytest-cov>=6.2.1",
     "ruff>=0.12.8",
-    "ty>=0.0.15",
-    "moto[s3]>=5.0.0",
-    "hypothesis>=6.151.5",
-    "beads-mcp>=0.55.4",
-    "pytest-xdist>=3.8.0",
-]
-tensorflow = [
-    "tensorflow>=2.0.0",
-]
-s3 = [
-    "boto3>=1.26.0",
-]
-postgresql = [
-    "psycopg[binary]>=3.1.0",
-    "sqlalchemy>=2.0.0",
-]
-cloud = [
-    "boto3>=1.26.0",
-    "psycopg[binary]>=3.1.0",
-    "sqlalchemy>=2.0.0",
+    "moto[s3,server]>=5.0.0",
 ]
 
 [build-system]
-requires = ["uv_build>=0.10.2,<0.11.0"]
+requires = ["uv_build>=0.9.0,<1.0.0"]
 build-backend = "uv_build"
 
 [tool.pytest.ini_options]
@@ -101,8 +73,6 @@ addopts = [
     "-ra",
     "-q", 
     "--strict-markers",
-    "-n", "auto",
-    "--dist", "loadgroup",
 ]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
@@ -114,13 +84,14 @@ markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "integration: marks tests as integration tests",
     "optional_deps: tests that require optional dependencies like polars/pandas",
-    "xdist_group: group tests to run on the same xdist worker",
+    "live_postgresql: requires an externally configured PostgreSQL service",
+    "live_aws_s3: requires a real Amazon S3 bucket and standard AWS credentials",
+    "live_remote: requires the qualified PostgreSQL/Amazon-S3 topology",
 ]
 
-# Logging configuration — use WARNING to keep test output concise;
-# override with: uv run pytest --log-cli-level=INFO
+# Logging configuration
 log_cli = true
-log_cli_level = "WARNING"
+log_cli_level = "INFO"
 log_cli_format = "%(asctime)s [%(levelname)8s] %(name)s: %(message)s"
 log_cli_date_format = "%Y-%m-%d %H:%M:%S"
 
@@ -132,6 +103,7 @@ filterwarnings = [
 
 [tool.coverage.run]
 source = ["cacheness"]
+branch = true
 omit = [
     "*/tests/*",
     "*/test_*",
@@ -146,7 +118,7 @@ exclude_lines = [
 ]
 
 [tool.ruff]
-target-version = "py312"
+target-version = "py311"
 line-length = 88
 # lint.select = [
 #     "E",  # pycodestyle errors
@@ -161,11 +133,3 @@ lint.ignore = [
     "B008", # do not perform function calls in argument defaults
     "C901", # too complex
 ]
-
-[tool.ruff.lint.per-file-ignores]
-"tests/**" = ["F401", "F841", "E721"]   # availability checks, side-effect assigns, exact type comparisons
-"benchmarks/**" = ["F841"]              # timing measurements discard return values
-"examples/**" = ["F401", "E402"]        # availability checks, late imports in scripts
-
-[tool.ty.src]
-exclude = ["tests/", "benchmarks/", "examples/"]

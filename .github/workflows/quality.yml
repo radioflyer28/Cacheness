@@ -1,0 +1,243 @@
+name: Phase 8 deterministic quality
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: Exact 40-character lowercase candidate SHA to qualify
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  linux-stable:
+    if: github.event_name != 'workflow_dispatch'
+    name: Linux stable ${{ matrix.python }} core
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install frozen project dependencies
+        run: uv sync --all-extras --group dev --frozen
+      - name: Run exact Linux platform row
+        run: |
+          uv run --isolated --all-extras --group dev --frozen python \
+            tools/run_phase8_local_gates.py platform \
+            --expected-os Linux --python-minor ${{ matrix.python }} \
+            --feature-profile core --output build/phase8/platform.json
+      - name: Run local evidence classes once on the primary stable row
+        if: matrix.python == '3.13'
+        run: |
+          uv run --isolated --all-extras --group dev --frozen python \
+            tools/run_phase8_local_gates.py core --output-dir build/phase8/evidence
+      - name: Run retained five-extra wheel qualification on the primary stable row
+        if: matrix.python == '3.13'
+        run: |
+          uv run --isolated --all-extras --group dev --frozen python \
+            tools/run_phase8_local_gates.py packaging \
+            --output build/phase8/evidence/packaging.json
+      - name: Run exact Phase 9 published examples
+        if: matrix.python == '3.13'
+        run: |
+          uv run --isolated --all-extras --group dev --frozen pytest \
+            -q -o log_cli=false tests/test_phase9_examples.py
+
+  macos-boundary:
+    if: github.event_name != 'workflow_dispatch'
+    name: macOS boundary ${{ matrix.python }}
+    runs-on: macos-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.14"]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install frozen project dependencies
+        run: uv sync --all-extras --group dev --frozen
+      - name: Run macOS public boundary smoke
+        run: |
+          uv run --isolated --all-extras --group dev --frozen python \
+            tools/run_phase8_local_gates.py platform \
+            --expected-os Darwin --python-minor ${{ matrix.python }} \
+            --feature-profile core --output build/phase8/platform-macos.json
+
+  prerelease-advisory:
+    if: github.event_name != 'workflow_dispatch'
+    name: Linux prerelease advisory
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.15-dev"
+          allow-prereleases: true
+      - name: Install frozen project dependencies
+        run: uv sync --all-extras --group dev --frozen
+      - name: Record advisory platform result
+        run: |
+          uv run --isolated --all-extras --group dev --frozen python \
+            tools/run_phase8_local_gates.py platform \
+            --expected-os Linux --python-minor 3.15 \
+            --feature-profile core --advisory --output build/phase8/platform-prerelease.json
+
+  release-candidate:
+    if: github.event_name == 'workflow_dispatch'
+    name: exact-SHA deterministic release-candidate quality
+    environment: release-qualification
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Validate candidate SHA
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+        run: |
+          if [[ ! "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "candidate_sha must be one lowercase 40-character Git SHA" >&2
+            exit 1
+          fi
+      - name: Check out the exact candidate detached
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ inputs.candidate_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Prove detached source identity
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+        run: |
+          ACTUAL_SHA="$(git rev-parse HEAD)"
+          if [ "$ACTUAL_SHA" != "$CANDIDATE_SHA" ]; then
+            echo "checked-out revision differs from candidate_sha" >&2
+            exit 1
+          fi
+          if git symbolic-ref --quiet HEAD; then
+            echo "candidate checkout must be detached" >&2
+            exit 1
+          fi
+      - name: Set up pinned Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.13"
+      - name: Install frozen project dependencies
+        run: uv sync --all-extras --group dev --frozen
+      - name: Run release-candidate quality gates
+        run: |
+          uv run --isolated --all-extras --group dev --frozen python \
+            tools/run_phase8_local_gates.py core --output-dir build/phase8/evidence
+          uv run --isolated --all-extras --group dev --frozen python \
+            tools/run_phase8_local_gates.py platform \
+            --expected-os Linux --python-minor 3.13 \
+            --feature-profile core --output build/phase8/evidence/platform.json
+          printf 'exact quality workflow run ID: %s\n' "$GITHUB_RUN_ID"
+      - name: Upload deterministic envelope
+        if: always()
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808
+        with:
+          name: phase8-deterministic-envelope
+          path: build/phase8/evidence/deterministic.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Upload platform envelope
+        if: always()
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808
+        with:
+          name: phase8-platform-envelope
+          path: build/phase8/evidence/platform.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Upload coverage envelope
+        if: always()
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808
+        with:
+          name: phase8-coverage-envelope
+          path: build/phase8/evidence/coverage.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Upload structural envelope
+        if: always()
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808
+        with:
+          name: phase8-structural-envelope
+          path: build/phase8/evidence/structural.json
+          if-no-files-found: error
+          retention-days: 30
+
+  release-candidate-packaging:
+    if: github.event_name == 'workflow_dispatch'
+    name: exact-SHA compatible-wheel release-candidate packaging
+    environment: release-qualification
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Validate candidate SHA
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+        run: |
+          if [[ ! "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "candidate_sha must be one lowercase 40-character Git SHA" >&2
+            exit 1
+          fi
+      - name: Check out the exact candidate detached
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ inputs.candidate_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Prove detached source identity
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+        run: |
+          ACTUAL_SHA="$(git rev-parse HEAD)"
+          if [ "$ACTUAL_SHA" != "$CANDIDATE_SHA" ]; then
+            echo "checked-out revision differs from candidate_sha" >&2
+            exit 1
+          fi
+          if git symbolic-ref --quiet HEAD; then
+            echo "candidate checkout must be detached" >&2
+            exit 1
+          fi
+      - name: Set up pinned packaging Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.13"
+      - name: Install frozen project dependencies
+        run: uv sync --all-extras --group dev --frozen
+      - name: Run release-candidate wheel qualification
+        run: |
+          uv run --isolated --all-extras --group dev --frozen python \
+            tools/run_phase8_local_gates.py packaging \
+            --output build/phase8/evidence/packaging.json
+          printf 'exact packaging workflow run ID: %s\n' "$GITHUB_RUN_ID"
+      - name: Upload packaging envelope
+        if: always()
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808
+        with:
+          name: phase8-packaging-envelope
+          path: build/phase8/evidence/packaging.json
+          if-no-files-found: error
+          retention-days: 30

@@ -1,227 +1,76 @@
-"""
-Tests for cache file integrity verification functionality.
-"""
+"""Integrity outcomes retained by the canonical BlobStore-backed cache API."""
+
+from __future__ import annotations
+
+from contextlib import contextmanager
 
 import pytest
-import tempfile
-from pathlib import Path
-import numpy as np
 
-from cacheness import cacheness, CacheConfig
+from cacheness.cache_policy import CacheOutcome
+from cacheness.config import CacheConfig, CacheMetadataConfig, CacheStorageConfig
+from cacheness.core import UnifiedCache
+from cacheness.error_handling import CacheBlobPayloadTamperedError
+from cacheness.storage.composition import BackendRef, StoreTopology
 
 
-@pytest.fixture
-def temp_cache():
-    """Fixture to create a temporary cache for testing."""
-    with tempfile.TemporaryDirectory() as temp_dir:
-        config = CacheConfig(cache_dir=temp_dir, verify_cache_integrity=True)
-        cache = cacheness(config)
-        yield cache
+def _cache(tmp_path, *, verify: bool = True) -> UnifiedCache:
+    """Create one explicit composition with the requested integrity observer policy."""
+
+    cache = UnifiedCache(
+        CacheConfig(
+            storage=CacheStorageConfig(cache_dir=tmp_path),
+            metadata=CacheMetadataConfig(verify_cache_integrity=verify),
+        ),
+        store=StoreTopology(
+            payload=BackendRef(name="memory"), authority=BackendRef(name="memory")
+        ),
+    )
+    cache.initialize()
+    return cache
+
+
+def test_integrity_verification_is_enabled_by_default(tmp_path) -> None:
+    """The nested metadata policy retains the secure default explicitly."""
+
+    cache = _cache(tmp_path)
+    try:
+        assert cache.config.metadata.verify_cache_integrity is True
+        key = cache.put({"trusted": "payload"}, request_id="integrity").receipt.key
+        assert cache.lookup(cache_key=key).outcome is CacheOutcome.HIT
+    finally:
         cache.close()
 
 
-@pytest.fixture
-def temp_cache_no_integrity():
-    """Fixture to create a temporary cache with integrity verification disabled."""
-    with tempfile.TemporaryDirectory() as temp_dir:
-        config = CacheConfig(cache_dir=temp_dir, verify_cache_integrity=False)
-        cache = cacheness(config)
-        yield cache
+def test_tampered_payload_evidence_becomes_a_typed_corrupt_outcome(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Policy does not reinterpret an integrity failure as a cache miss."""
+
+    cache = _cache(tmp_path)
+    error = CacheBlobPayloadTamperedError("payload digest does not match manifest")
+
+    @contextmanager
+    def tampered_open_entry(_key):
+        raise error
+        yield None
+
+    monkeypatch.setattr(cache.store, "open_entry", tampered_open_entry)
+    try:
+        result = cache.lookup(cache_key="tampered")
+
+        assert result.outcome is CacheOutcome.CORRUPT
+        assert result.cause is error
+    finally:
         cache.close()
 
 
-class TestCacheIntegrity:
-    """Test cache file integrity verification."""
+def test_integrity_observer_policy_stays_separate_from_payload_authority(tmp_path) -> None:
+    """Disabling the observer setting does not create an alternate lifecycle store."""
 
-    def test_cache_integrity_verification_enabled_by_default(self):
-        """Test that cache integrity verification is enabled by default."""
-        config = CacheConfig()
-        assert config.verify_cache_integrity is True
-
-    def test_cache_integrity_verification_can_be_disabled(self):
-        """Test that cache integrity verification can be disabled."""
-        config = CacheConfig(verify_cache_integrity=False)
-        assert config.verify_cache_integrity is False
-
-    def test_file_hash_calculation(self, temp_cache):
-        """Test that file hash is calculated correctly."""
-        cache = temp_cache
-
-        # Create a test file in the cache directory
-        test_file = Path(cache.cache_dir) / "test_file.txt"
-        test_content = b"Hello, World!"
-        test_file.write_bytes(test_content)
-
-        # Calculate hash
-        calculated_hash = cache._calculate_file_hash(test_file)
-        assert calculated_hash is not None
-        assert isinstance(calculated_hash, str)
-        assert len(calculated_hash) == 16  # XXH3_64 produces 16-character hex strings
-
-    def test_file_hash_stored_in_metadata(self, temp_cache):
-        """Test that file hash is stored in metadata when caching."""
-        cache = temp_cache
-
-        # Cache some data
-        test_data = {"message": "Hello, World!"}
-        cache.put(test_data, description="Test data", test_key="value")
-
-        # Check that metadata contains file hash
-        cache_key = cache._create_cache_key({"test_key": "value"})
-        entry = cache.metadata_backend.get_entry(cache_key)
-        assert entry is not None
-
-        metadata = entry.get("metadata", {})
-        assert "file_hash" in metadata
-        assert metadata["file_hash"] is not None
-        assert isinstance(metadata["file_hash"], str)
-
-    def test_file_hash_not_stored_when_disabled(self, temp_cache_no_integrity):
-        """Test that file hash is not stored when verification is disabled."""
-        cache = temp_cache_no_integrity
-
-        # Cache some data
-        test_data = {"message": "Hello, World!"}
-        cache.put(test_data, description="Test data", test_key="value")
-
-        # Check that metadata doesn't contain file hash
-        cache_key = cache._create_cache_key({"test_key": "value"})
-        entry = cache.metadata_backend.get_entry(cache_key)
-        assert entry is not None
-
-        metadata = entry.get("metadata", {})
-        assert metadata.get("file_hash") is None
-
-    def test_successful_integrity_verification(self, temp_cache):
-        """Test that valid cache files pass integrity verification."""
-        cache = temp_cache
-
-        # Cache some data
-        test_data = np.array([1, 2, 3, 4, 5])
-        cache.put(test_data, description="Test array", test_key="array")
-
-        # Retrieve data - should succeed with integrity verification
-        retrieved_data = cache.get(test_key="array")
-        assert retrieved_data is not None
-        np.testing.assert_array_equal(retrieved_data, test_data)
-
-    def test_corrupted_cache_file_detection(self, temp_cache):
-        """Test that corrupted cache files are detected and removed."""
-        cache = temp_cache
-
-        # Cache some data
-        test_data = {"message": "Hello, World!"}
-        cache.put(test_data, description="Test data", test_key="value")
-
-        # Get the cache file path and corrupt it
-        cache_key = cache._create_cache_key({"test_key": "value"})
-        entry = cache.metadata_backend.get_entry(cache_key)
-        assert entry is not None, "Cache entry should exist"
-        file_path = cache._resolve_actual_path(entry["metadata"]["actual_path"])
-
-        # Corrupt the file by appending some bytes
-        with open(file_path, "ab") as f:
-            f.write(b"CORRUPTED")
-
-        # Try to retrieve data - should detect corruption and return None
-        retrieved_data = cache.get(test_key="value")
-        assert retrieved_data is None
-
-        # Verify that the corrupted entry was removed from metadata
-        entry_after = cache.metadata_backend.get_entry(cache_key)
-        assert entry_after is None
-
-    def test_missing_file_hash_allows_retrieval(self):
-        """Test that missing file hash (legacy entries) still allows retrieval."""
-        with tempfile.TemporaryDirectory() as temp_dir:
-            # Disable entry signing for this legacy compatibility test
-            from cacheness.config import SecurityConfig
-
-            config = CacheConfig(
-                cache_dir=temp_dir,
-                verify_cache_integrity=True,
-                security=SecurityConfig(
-                    enable_entry_signing=False
-                ),  # Test legacy behavior without signing
-            )
-            cache = cacheness(config)
-
-            # Cache some data first
-            test_data = {"message": "Hello, World!"}
-            cache.put(test_data, description="Test data", test_key="value")
-
-            # Manually remove the file_hash from metadata to simulate legacy entry
-            cache_key = cache._create_cache_key({"test_key": "value"})
-            entry = cache.metadata_backend.get_entry(cache_key)
-            assert entry is not None, "Cache entry should exist"
-            metadata = entry["metadata"]
-            del metadata["file_hash"]
-
-            # Update the metadata without file_hash
-            entry_data = {
-                "description": entry["description"],
-                "data_type": entry["data_type"],
-                "file_size": entry["file_size"],
-                "metadata": metadata,
-            }
-            cache.metadata_backend.put_entry(cache_key, entry_data)
-
-            # Should still be able to retrieve the data (no verification for legacy entries)
-            retrieved_data = cache.get(test_key="value")
-            assert retrieved_data is not None
-            assert retrieved_data == test_data
-
-            cache.close()
-
-    def test_integrity_verification_disabled_skips_check(self):
-        """Test that disabling verification skips integrity check completely."""
-        with tempfile.TemporaryDirectory() as temp_dir:
-            # First cache with verification enabled
-            config_enabled = CacheConfig(
-                cache_dir=temp_dir, verify_cache_integrity=True
-            )
-            cache_enabled = cacheness(config_enabled)
-
-            test_data = {"message": "Hello, World!"}
-            cache_enabled.put(test_data, description="Test data", test_key="value")
-
-            # Get the cache file path and corrupt it
-            cache_key = cache_enabled._create_cache_key({"test_key": "value"})
-            entry = cache_enabled.metadata_backend.get_entry(cache_key)
-            assert entry is not None, "Cache entry should exist"
-            file_path = cache_enabled._resolve_actual_path(
-                entry["metadata"]["actual_path"]
-            )
-
-            with open(file_path, "ab") as f:
-                f.write(b"CORRUPTED")
-
-            # Create new cache instance with verification disabled
-            config_disabled = CacheConfig(
-                cache_dir=temp_dir, verify_cache_integrity=False
-            )
-            cache_disabled = cacheness(config_disabled)
-
-            # Should still return data (though corrupted) because verification is disabled
-            # Note: This might fail at the handler level due to actual corruption,
-            # but it won't fail due to hash verification
-            try:
-                _ = cache_disabled.get(test_key="value")
-                # If we get here, verification was truly skipped
-                # The data might be None due to handler-level corruption detection
-            except Exception:
-                # Expected - the handler will likely fail to parse corrupted data
-                # But the important thing is we didn't fail due to hash verification
-                pass
-
-            cache_enabled.close()
-            cache_disabled.close()
-
-    def test_file_hash_calculation_error_handling(self, temp_cache):
-        """Test that file hash calculation handles errors gracefully."""
-        cache = temp_cache
-
-        # Test with non-existent file
-        non_existent_file = Path(cache.cache_dir) / "does_not_exist.txt"
-        hash_result = cache._calculate_file_hash(non_existent_file)
-        assert hash_result is None
+    cache = _cache(tmp_path, verify=False)
+    try:
+        assert cache.config.metadata.verify_cache_integrity is False
+        assert cache.store is cache._cache_blob_store
+        assert cache.store.topology.qualified_profile.pair == ("memory", "memory")
+    finally:
+        cache.close()

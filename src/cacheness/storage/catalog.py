@@ -1,0 +1,866 @@
+"""Native, bounded catalog schema and portable query contracts.
+
+The catalog describes application metadata attached to a BlobStore descriptor.
+It is intentionally independent from a persistence adapter: schemas define
+validation and portable query meaning, while the lifecycle authority remains
+the sole visibility and transactional boundary.
+"""
+
+from __future__ import annotations
+
+import base64
+import binascii
+import hashlib
+import hmac
+import json
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
+from types import MappingProxyType
+from typing import Any, Final
+
+from cacheness.error_handling import (
+    CacheCatalogCursorError,
+    CacheCatalogQueryValidationError,
+    CacheCatalogStaleCursorError,
+    CacheCatalogValidationError,
+    CacheMigrationOrRebuildRequiredError,
+)
+
+
+STORE_FORMAT_VERSION: Final[int] = 2
+MIN_SIGNED_64: Final[int] = -(2**63)
+MAX_SIGNED_64: Final[int] = 2**63 - 1
+MAX_CATALOG_FIELDS: Final[int] = 64
+MAX_CATALOG_NAME_BYTES: Final[int] = 128
+MAX_METADATA_DEPTH: Final[int] = 8
+MAX_METADATA_ENTRIES: Final[int] = 256
+MAX_METADATA_BYTES: Final[int] = 65_536
+MAX_QUERY_PREDICATES: Final[int] = 32
+MAX_MEMBERSHIP_VALUES: Final[int] = 128
+DEFAULT_PAGE_SIZE: Final[int] = 100
+MAX_PAGE_SIZE: Final[int] = 256
+MAX_WORK_CAP: Final[int] = 4_096
+STORE_EPOCH: Final[int] = 1
+# Cursor fields carry exactly six caller-controlled identities: the store,
+# schema, schema/query fingerprints, and key/generation keyset identity.  The
+# 512-byte checkpoint identity bound is deliberately reused here.  JSON may
+# expand one input byte to a six-byte ``\\u00XX`` escape, so envelope bounds
+# account for the closed record's worst valid representation rather than its
+# happy-path ASCII encoding.
+MAX_CURSOR_FIELD_BYTES: Final[int] = 512
+MAX_CURSOR_SIGNATURE_BYTES: Final[int] = 64
+
+_SUPPORTED_FIELD_KINDS: Final[frozenset[str]] = frozenset(
+    {"string", "integer", "boolean"}
+)
+_QUERY_OPERATORS: Final[frozenset[str]] = frozenset(
+    {"eq", "lt", "lte", "gt", "gte", "in", "exists"}
+)
+
+
+class _Missing:
+    """Internal marker separating an absent stored field from a null value."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "MISSING"
+
+
+MISSING: Final = _Missing()
+
+
+CatalogValidationError = CacheCatalogValidationError
+CatalogQueryValidationError = CacheCatalogQueryValidationError
+CatalogCursorError = CacheCatalogCursorError
+CatalogStaleCursorError = CacheCatalogStaleCursorError
+CatalogMigrationRequiredError = CacheMigrationOrRebuildRequiredError
+
+
+def _canonical_json(value: Any) -> bytes:
+    """Encode a validated native catalog value deterministically."""
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+
+
+_MAX_CURSOR_FIELD_VALUE: Final[str] = "\x00" * MAX_CURSOR_FIELD_BYTES
+_MAX_CURSOR_RECORD: Final[dict[str, object]] = {
+    "format_version": STORE_FORMAT_VERSION,
+    "last_identity": [_MAX_CURSOR_FIELD_VALUE, _MAX_CURSOR_FIELD_VALUE],
+    "query_fingerprint": _MAX_CURSOR_FIELD_VALUE,
+    "revision": MAX_SIGNED_64,
+    "schema_fingerprint": _MAX_CURSOR_FIELD_VALUE,
+    "schema_id": _MAX_CURSOR_FIELD_VALUE,
+    "signature": "0" * MAX_CURSOR_SIGNATURE_BYTES,
+    "store_epoch": MAX_SIGNED_64,
+    "store_id": _MAX_CURSOR_FIELD_VALUE,
+}
+MAX_CURSOR_DECODED_BYTES: Final[int] = len(_canonical_json(_MAX_CURSOR_RECORD))
+MAX_CURSOR_ENCODED_BYTES: Final[int] = len(
+    base64.urlsafe_b64encode(b"\0" * MAX_CURSOR_DECODED_BYTES).rstrip(b"=")
+)
+
+
+def _freeze_value(value: Any) -> Any:
+    """Recursively freeze metadata retained by an immutable catalog result."""
+    if isinstance(value, Mapping):
+        return MappingProxyType({key: _freeze_value(item) for key, item in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_value(item) for item in value)
+    return value
+
+
+def _validate_metadata_value(value: Any, *, depth: int, entries: list[int]) -> Any:
+    """Validate the finite JSON-like scalar and container vocabulary."""
+    if depth > MAX_METADATA_DEPTH:
+        raise CatalogValidationError("Catalog metadata nesting limit exceeded")
+    entries[0] += 1
+    if entries[0] > MAX_METADATA_ENTRIES:
+        raise CatalogValidationError("Catalog metadata entry limit exceeded")
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        if not MIN_SIGNED_64 <= value <= MAX_SIGNED_64:
+            raise CatalogValidationError("Catalog integer exceeds the signed-64 range")
+        return value
+    if isinstance(value, str):
+        if len(value.encode("utf-8")) > MAX_METADATA_BYTES:
+            raise CatalogValidationError("Catalog string byte limit exceeded")
+        return value
+    if isinstance(value, Mapping):
+        if len(value) > MAX_METADATA_ENTRIES:
+            raise CatalogValidationError("Catalog metadata entry limit exceeded")
+        copied: dict[str, Any] = {}
+        for key, item in value.items():
+            if not isinstance(key, str) or not key:
+                raise CatalogValidationError("Catalog metadata keys must be non-empty strings")
+            if len(key.encode("utf-8")) > MAX_CATALOG_NAME_BYTES:
+                raise CatalogValidationError("Catalog metadata key byte limit exceeded")
+            copied[key] = _validate_metadata_value(
+                item, depth=depth + 1, entries=entries
+            )
+        return copied
+    if isinstance(value, (list, tuple)):
+        if len(value) > MAX_METADATA_ENTRIES:
+            raise CatalogValidationError("Catalog metadata entry limit exceeded")
+        return [
+            _validate_metadata_value(item, depth=depth + 1, entries=entries)
+            for item in value
+        ]
+    raise CatalogValidationError("Catalog metadata is not serializable")
+
+
+def validate_catalog_mapping(
+    values: Mapping[str, Any], *, schema: CatalogSchema | None
+) -> dict[str, Any]:
+    """Validate a metadata mapping with an optional native declaration."""
+    if schema is not None:
+        return schema.validate_mapping(values)
+    if not isinstance(values, Mapping):
+        raise CatalogValidationError("Catalog metadata must be a mapping")
+    validated = _validate_metadata_value(values, depth=1, entries=[0])
+    if not isinstance(validated, dict):  # Defensive: the top-level input was a Mapping.
+        raise CatalogValidationError("Catalog metadata must be a mapping")
+    if len(_canonical_json(validated)) > MAX_METADATA_BYTES:
+        raise CatalogValidationError("Catalog metadata byte limit exceeded")
+    return validated
+
+
+def inspect_store_layout(root: Any) -> Any:
+    """Classify an existing layout without creating or changing any artifact."""
+    # The catalog exposes the classification boundary while manifest owns its
+    # implementation. Deferring this import avoids a format-constant cycle.
+    from .manifest import inspect_store_layout as inspect
+
+    return inspect(root)
+
+
+@dataclass(frozen=True, slots=True)
+class CatalogField:
+    """One declared scalar field in a native catalog schema."""
+
+    name: str
+    kind: str
+    required: bool = False
+    default: Any = MISSING
+    nullable: bool = False
+    queryable: bool = False
+    indexed: bool = False
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.name, str) or not self.name:
+            raise CatalogValidationError("Catalog field names must be non-empty strings")
+        if len(self.name.encode("utf-8")) > MAX_CATALOG_NAME_BYTES:
+            raise CatalogValidationError("Catalog field name byte limit exceeded")
+        if self.kind not in _SUPPORTED_FIELD_KINDS:
+            raise CatalogValidationError("Catalog field kind is unsupported")
+        if not all(
+            isinstance(value, bool)
+            for value in (self.required, self.nullable, self.queryable, self.indexed)
+        ):
+            raise CatalogValidationError("Catalog field flags must be booleans")
+        if self.default is not MISSING:
+            self.validate(self.default, field_name=self.name)
+
+    def validate(self, value: Any, *, field_name: str | None = None) -> Any:
+        """Validate one exact declared scalar without coercion."""
+        name = field_name or self.name
+        if value is None:
+            if self.nullable:
+                return value
+            raise CatalogValidationError(f"Catalog field {name!r} cannot be null")
+        if self.kind == "string" and isinstance(value, str):
+            if len(value.encode("utf-8")) > MAX_METADATA_BYTES:
+                raise CatalogValidationError("Catalog string byte limit exceeded")
+            return value
+        if self.kind == "integer" and isinstance(value, int) and not isinstance(value, bool):
+            if MIN_SIGNED_64 <= value <= MAX_SIGNED_64:
+                return value
+            raise CatalogValidationError("Catalog integer exceeds the signed-64 range")
+        if self.kind == "boolean" and isinstance(value, bool):
+            return value
+        raise CatalogValidationError(
+            f"Catalog field {name!r} must be an exact {self.kind} value"
+        )
+
+    def to_mapping(self) -> dict[str, Any]:
+        """Return the canonical declaration used for schema fingerprinting."""
+        result: dict[str, Any] = {
+            "indexed": self.indexed,
+            "kind": self.kind,
+            "name": self.name,
+            "nullable": self.nullable,
+            "queryable": self.queryable,
+            "required": self.required,
+        }
+        if self.default is not MISSING:
+            result["default"] = self.default
+        return result
+
+
+@dataclass(frozen=True, slots=True)
+class CatalogSchema:
+    """Immutable native declaration for portable catalog values and queries."""
+
+    fields: tuple[CatalogField, ...]
+    schema_id: str = "catalog"
+    revision: int = 1
+    _by_name: Mapping[str, CatalogField] = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.fields, tuple) or not self.fields:
+            raise CatalogValidationError("Catalog schemas require a non-empty field tuple")
+        if len(self.fields) > MAX_CATALOG_FIELDS:
+            raise CatalogValidationError("Catalog schema field limit exceeded")
+        if not isinstance(self.schema_id, str) or not self.schema_id:
+            raise CatalogValidationError("Catalog schema ID must be a non-empty string")
+        if not isinstance(self.revision, int) or isinstance(self.revision, bool) or self.revision < 1:
+            raise CatalogValidationError("Catalog schema revision must be a positive integer")
+        by_name = {item.name: item for item in self.fields}
+        if len(by_name) != len(self.fields):
+            raise CatalogValidationError("Catalog schemas cannot repeat field names")
+        object.__setattr__(self, "_by_name", MappingProxyType(by_name))
+
+    @property
+    def fingerprint(self) -> str:
+        """Return the stable fingerprint bound into current catalog manifests."""
+        record = {
+            "fields": [item.to_mapping() for item in self.fields],
+            "revision": self.revision,
+            "schema_id": self.schema_id,
+        }
+        return hashlib.sha256(_canonical_json(record)).hexdigest()
+
+    @property
+    def field_map(self) -> Mapping[str, CatalogField]:
+        """Expose an immutable lookup for declared field semantics."""
+        return self._by_name
+
+    def validate_mapping(
+        self, values: Mapping[str, Any], *, materialize_defaults: bool = True
+    ) -> dict[str, Any]:
+        """Validate declared fields and preserve bounded undeclared metadata."""
+        if not isinstance(values, Mapping):
+            raise CatalogValidationError("Catalog metadata must be a mapping")
+        candidate = _validate_metadata_value(values, depth=1, entries=[0])
+        if not isinstance(candidate, dict):
+            raise CatalogValidationError("Catalog metadata must be a mapping")
+        validated: dict[str, Any] = {}
+        for name, value in candidate.items():
+            declared = self._by_name.get(name)
+            validated[name] = declared.validate(value) if declared else value
+        for declared in self.fields:
+            if declared.name in validated:
+                continue
+            if materialize_defaults and declared.default is not MISSING:
+                validated[declared.name] = declared.default
+                continue
+            if declared.required:
+                raise CatalogValidationError(
+                    f"Catalog required field {declared.name!r} is missing"
+                )
+        if len(_canonical_json(validated)) > MAX_METADATA_BYTES:
+            raise CatalogValidationError("Catalog metadata byte limit exceeded")
+        return validated
+
+    def read_mapping(self, values: Mapping[str, Any]) -> dict[str, Any]:
+        """Read an older stored mapping without rewriting it for additive defaults."""
+        result = self.validate_mapping(values, materialize_defaults=False)
+        for declared in self.fields:
+            if declared.name not in result and declared.default is not MISSING:
+                result[declared.name] = declared.default
+        return result
+
+
+@dataclass(frozen=True, slots=True)
+class CatalogPredicate:
+    """One finite portable predicate; schemas validate its semantic details."""
+
+    field: str
+    operator: str
+    value: Any = MISSING
+
+
+@dataclass(frozen=True, slots=True)
+class CatalogQuery:
+    """An AND-only, bounded portable query over declared catalog fields."""
+
+    predicates: tuple[CatalogPredicate, ...] = ()
+    page_size: int = DEFAULT_PAGE_SIZE
+    cursor: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.predicates, tuple):
+            raise CatalogQueryValidationError("Catalog predicates must be an immutable tuple")
+        if len(self.predicates) > MAX_QUERY_PREDICATES:
+            raise CatalogQueryValidationError("Catalog predicate limit exceeded")
+        if any(not isinstance(item, CatalogPredicate) for item in self.predicates):
+            raise CatalogQueryValidationError("Catalog predicates must be native values")
+        if (
+            not isinstance(self.page_size, int)
+            or isinstance(self.page_size, bool)
+            or not 1 <= self.page_size <= MAX_PAGE_SIZE
+        ):
+            raise CatalogQueryValidationError("Catalog query page size is out of bounds")
+        if self.cursor is not None and (not isinstance(self.cursor, str) or not self.cursor):
+            raise CatalogQueryValidationError("Catalog query cursor must be an opaque string")
+
+    @property
+    def fingerprint(self) -> str:
+        """Return a deterministic fingerprint excluding pagination resume state."""
+        predicates = [
+            {"field": item.field, "operator": item.operator, "value": item.value}
+            for item in self.predicates
+        ]
+        return hashlib.sha256(_canonical_json({"predicates": predicates})).hexdigest()
+
+
+def _validate_predicate(predicate: CatalogPredicate, schema: CatalogSchema) -> None:
+    if not isinstance(predicate.field, str) or not predicate.field:
+        raise CatalogQueryValidationError("Catalog predicate field must be a non-empty string")
+    if predicate.operator not in _QUERY_OPERATORS:
+        raise CatalogQueryValidationError("Catalog predicate operator is unsupported")
+    declared = schema.field_map.get(predicate.field)
+    if declared is None or not declared.queryable:
+        raise CatalogQueryValidationError("Catalog predicate field is not queryable")
+    if predicate.operator == "exists":
+        if not isinstance(predicate.value, bool):
+            raise CatalogQueryValidationError("Catalog existence predicate needs a boolean")
+        return
+    if predicate.value is MISSING:
+        raise CatalogQueryValidationError("Catalog predicate requires a value")
+    if predicate.operator == "in":
+        if isinstance(predicate.value, (str, bytes)) or not isinstance(
+            predicate.value, Sequence
+        ):
+            raise CatalogQueryValidationError("Catalog membership predicate needs a sequence")
+        if not 1 <= len(predicate.value) <= MAX_MEMBERSHIP_VALUES:
+            raise CatalogQueryValidationError("Catalog membership predicate is out of bounds")
+        try:
+            for value in predicate.value:
+                declared.validate(value)
+        except CatalogValidationError as exc:
+            raise CatalogQueryValidationError("Catalog membership value is invalid") from exc
+        return
+    if predicate.operator in {"lt", "lte", "gt", "gte"}:
+        if declared.kind == "boolean" or predicate.value is None:
+            raise CatalogQueryValidationError("Catalog comparison predicate is invalid")
+    try:
+        declared.validate(predicate.value)
+    except CatalogValidationError as exc:
+        raise CatalogQueryValidationError("Catalog predicate value is invalid") from exc
+
+
+def validate_catalog_query(
+    query: CatalogQuery, *, schema: CatalogSchema, authority: Any | None = None
+) -> CatalogQuery:
+    """Validate every query input before an authority is eligible for dispatch."""
+    del authority  # Validation deliberately performs no storage operation.
+    if not isinstance(query, CatalogQuery):
+        raise CatalogQueryValidationError("Catalog query must be a native value")
+    if not isinstance(schema, CatalogSchema):
+        raise CatalogQueryValidationError("Catalog query requires a native schema")
+    for predicate in query.predicates:
+        _validate_predicate(predicate, schema)
+    return query
+
+
+def validate_catalog_page_request(
+    query: CatalogQuery,
+    *,
+    schema: CatalogSchema,
+    cursor: str | None,
+    limit: int,
+    work_cap: int,
+) -> CatalogQuery:
+    """Validate finite query and page inputs before opening an authority session.
+
+    ``work_cap`` bounds authenticated descriptor examinations, rather than just
+    returned matches.  This makes sparse queries resumable without treating an
+    empty page as authority exhaustion.
+    """
+    validate_catalog_query(query, schema=schema)
+    if cursor is not None and (not isinstance(cursor, str) or not cursor):
+        raise CatalogCursorError("Catalog cursor must be an opaque non-empty string")
+    for value, name, maximum in (
+        (limit, "limit", MAX_PAGE_SIZE),
+        (work_cap, "work cap", MAX_WORK_CAP),
+    ):
+        if (
+            not isinstance(value, int)
+            or isinstance(value, bool)
+            or not 1 <= value <= maximum
+        ):
+            raise CatalogQueryValidationError(
+                f"Catalog {name} is outside the portable bound"
+            )
+    return query
+
+
+def evaluate_predicates(
+    predicates: tuple[CatalogPredicate, ...],
+    stored_values: Mapping[str, Any],
+    *,
+    schema: CatalogSchema,
+) -> bool:
+    """Evaluate AND-composed predicates using raw stored presence only."""
+    query = CatalogQuery(predicates=predicates)
+    validate_catalog_query(query, schema=schema)
+    if not isinstance(stored_values, Mapping):
+        raise CatalogQueryValidationError("Stored catalog values must be a mapping")
+    for predicate in predicates:
+        present = predicate.field in stored_values
+        value = stored_values.get(predicate.field, MISSING)
+        if predicate.operator == "exists":
+            if present is not predicate.value:
+                return False
+        elif not present:
+            return False
+        elif predicate.operator == "eq" and value != predicate.value:
+            return False
+        elif predicate.operator == "lt" and not value < predicate.value:
+            return False
+        elif predicate.operator == "lte" and not value <= predicate.value:
+            return False
+        elif predicate.operator == "gt" and not value > predicate.value:
+            return False
+        elif predicate.operator == "gte" and not value >= predicate.value:
+            return False
+        elif predicate.operator == "in" and value not in predicate.value:
+            return False
+    return True
+
+
+def _require_signing_key(signing_key: bytes) -> None:
+    if not isinstance(signing_key, bytes) or len(signing_key) != 32:
+        raise CatalogCursorError("Catalog cursor signing key must be exactly 32 bytes")
+
+
+@dataclass(frozen=True, slots=True)
+class CatalogCursor:
+    """Authenticated opaque keyset resume state for one catalog snapshot."""
+
+    @staticmethod
+    def create(
+        *,
+        store_id: str,
+        format_version: int,
+        store_epoch: int = STORE_EPOCH,
+        schema_id: str,
+        schema_fingerprint: str | None = None,
+        query_fingerprint: str,
+        revision: int,
+        last_identity: tuple[str, str],
+        signing_key: bytes,
+    ) -> str:
+        """Create an opaque cursor bound to every semantic snapshot dimension."""
+        _require_signing_key(signing_key)
+        record = {
+            "format_version": format_version,
+            "last_identity": list(last_identity),
+            "query_fingerprint": query_fingerprint,
+            "revision": revision,
+            "schema_fingerprint": schema_fingerprint or schema_id,
+            "schema_id": schema_id,
+            "store_epoch": store_epoch,
+            "store_id": store_id,
+        }
+        _validate_cursor_record(record)
+        unsigned = _canonical_json(record)
+        record["signature"] = hmac.new(signing_key, unsigned, hashlib.sha256).hexdigest()
+        raw = _canonical_json(record)
+        if len(raw) > MAX_CURSOR_DECODED_BYTES:
+            raise CatalogCursorError("Catalog cursor exceeds the decoded size bound")
+        encoded = base64.urlsafe_b64encode(raw).rstrip(b"=")
+        if len(encoded) > MAX_CURSOR_ENCODED_BYTES:
+            raise CatalogCursorError("Catalog cursor exceeds the encoded size bound")
+        return encoded.decode("ascii")
+
+    @staticmethod
+    def parse(
+        cursor: str,
+        *,
+        store_id: str,
+        format_version: int,
+        store_epoch: int = STORE_EPOCH,
+        schema_id: str,
+        schema_fingerprint: str | None = None,
+        query_fingerprint: str,
+        revision: int,
+        signing_key: bytes,
+    ) -> tuple[str, str]:
+        """Authenticate a cursor and reject every mismatched snapshot binding."""
+        record = CatalogCursor.inspect(cursor, signing_key=signing_key)
+        expected_context = {
+            "store_id": store_id,
+            "format_version": format_version,
+            "store_epoch": store_epoch,
+            "schema_id": schema_id,
+            "schema_fingerprint": schema_fingerprint or schema_id,
+            "query_fingerprint": query_fingerprint,
+        }
+        if any(record[name] != value for name, value in expected_context.items()):
+            raise CatalogCursorError("Catalog cursor does not match this snapshot")
+        require_current_revision(
+            cursor_revision=record["revision"], authority_revision=revision
+        )
+        identity = record["last_identity"]
+        return identity[0], identity[1]
+
+    @staticmethod
+    def inspect(cursor: str, *, signing_key: bytes) -> dict[str, Any]:
+        """Authenticate cursor syntax before a caller opens an authority session."""
+        _require_signing_key(signing_key)
+        if not isinstance(cursor, str) or not cursor:
+            raise CatalogCursorError("Catalog cursor must be a non-empty string")
+        try:
+            encoded = cursor.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise CatalogCursorError("Catalog cursor is malformed") from exc
+        if len(encoded) > MAX_CURSOR_ENCODED_BYTES:
+            raise CatalogCursorError("Catalog cursor exceeds the encoded size bound")
+        try:
+            encoded.decode("ascii")
+            raw = base64.b64decode(
+                encoded + b"=" * (-len(encoded) % 4), altchars=b"-_", validate=True
+            )
+        except (UnicodeDecodeError, binascii.Error, ValueError) as exc:
+            raise CatalogCursorError("Catalog cursor is malformed") from exc
+        if len(raw) > MAX_CURSOR_DECODED_BYTES:
+            raise CatalogCursorError("Catalog cursor exceeds the decoded size bound")
+        try:
+            record = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError, json.JSONDecodeError) as exc:
+            raise CatalogCursorError("Catalog cursor is malformed") from exc
+        if not isinstance(record, dict):
+            raise CatalogCursorError("Catalog cursor is malformed")
+        signature = record.pop("signature", None)
+        if not _is_cursor_signature(signature):
+            raise CatalogCursorError("Catalog cursor signature is malformed")
+        _validate_cursor_record(record)
+        expected = hmac.new(signing_key, _canonical_json(record), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(signature, expected):
+            raise CatalogCursorError("Catalog cursor authentication failed")
+        return dict(record)
+
+
+def _validate_cursor_record(record: Mapping[str, Any]) -> None:
+    required = {
+        "format_version",
+        "last_identity",
+        "query_fingerprint",
+        "revision",
+        "schema_fingerprint",
+        "schema_id",
+        "store_epoch",
+        "store_id",
+    }
+    if set(record) != required:
+        raise CatalogCursorError("Catalog cursor has an invalid shape")
+    if (
+        not isinstance(record["format_version"], int)
+        or isinstance(record["format_version"], bool)
+        or not 1 <= record["format_version"] <= STORE_FORMAT_VERSION
+        or not isinstance(record["store_epoch"], int)
+        or isinstance(record["store_epoch"], bool)
+        or record["store_epoch"] < 1
+        or record["store_epoch"] > MAX_SIGNED_64
+        or not isinstance(record["revision"], int)
+        or isinstance(record["revision"], bool)
+        or record["revision"] < 0
+        or record["revision"] > MAX_SIGNED_64
+    ):
+        raise CatalogCursorError("Catalog cursor numeric fields are invalid")
+    if any(
+        not _is_bounded_cursor_field(record[name])
+        for name in ("store_id", "schema_id", "schema_fingerprint", "query_fingerprint")
+    ):
+        raise CatalogCursorError("Catalog cursor string fields are invalid")
+    identity = record["last_identity"]
+    if (
+        not isinstance(identity, list)
+        or len(identity) != 2
+        or any(not _is_bounded_cursor_field(value) for value in identity)
+    ):
+        raise CatalogCursorError("Catalog cursor identity is invalid")
+
+
+def _is_bounded_cursor_field(value: object) -> bool:
+    """Return whether one opaque cursor text field is non-empty and finite."""
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and len(value.encode("utf-8")) <= MAX_CURSOR_FIELD_BYTES
+    )
+
+
+def _is_cursor_signature(value: object) -> bool:
+    """Return whether the fixed SHA-256 HMAC representation is well formed."""
+    return (
+        isinstance(value, str)
+        and len(value.encode("utf-8")) == MAX_CURSOR_SIGNATURE_BYTES
+        and all("0" <= character <= "9" or "a" <= character <= "f" for character in value)
+    )
+
+
+def require_current_revision(*, cursor_revision: int, authority_revision: int) -> None:
+    """Raise a retryable outcome rather than return a partial stale page."""
+    if cursor_revision != authority_revision:
+        raise CatalogStaleCursorError("Catalog cursor revision is stale")
+
+
+@dataclass(frozen=True, slots=True)
+class CatalogEntry:
+    """One immutable catalog entry in the portable key/generation ordering."""
+
+    key: str
+    generation: str
+    values: Mapping[str, Any]
+    expectation: Any | None = None
+    byte_size: int | None = None
+    created_at: str | None = None
+    schema_id: str | None = None
+    schema_revision: int | None = None
+
+    def __post_init__(self) -> None:
+        if any(not isinstance(value, str) or not value for value in (self.key, self.generation)):
+            raise CatalogValidationError("Catalog entry identity must be non-empty strings")
+        if self.expectation is not None and (
+            getattr(self.expectation, "generation", None) != self.generation
+        ):
+            raise CatalogValidationError(
+                "Catalog entry expectation must corroborate its generation"
+            )
+        if self.byte_size is not None and (
+            not isinstance(self.byte_size, int)
+            or isinstance(self.byte_size, bool)
+            or self.byte_size < 0
+        ):
+            raise CatalogValidationError("Catalog entry byte size is invalid")
+        if self.created_at is not None and (
+            not isinstance(self.created_at, str) or not self.created_at
+        ):
+            raise CatalogValidationError("Catalog entry creation time is invalid")
+        if self.schema_id is not None and (
+            not isinstance(self.schema_id, str) or not self.schema_id
+        ):
+            raise CatalogValidationError("Catalog entry schema identifier is invalid")
+        if self.schema_revision is not None and (
+            not isinstance(self.schema_revision, int)
+            or isinstance(self.schema_revision, bool)
+            or self.schema_revision < 1
+        ):
+            raise CatalogValidationError("Catalog entry schema revision is invalid")
+        validated = validate_catalog_mapping(self.values, schema=None)
+        object.__setattr__(self, "values", _freeze_value(validated))
+
+
+@dataclass(frozen=True, slots=True)
+class CatalogPage:
+    """A bounded, revision-complete page ordered by key then generation."""
+
+    entries: tuple[CatalogEntry, ...]
+    revision: int
+    cursor: str | None
+    exhausted: bool
+    examined_identity: tuple[str, str] | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.entries, tuple) or len(self.entries) > MAX_PAGE_SIZE:
+            raise CatalogQueryValidationError("Catalog page exceeds the portable bound")
+        if any(not isinstance(entry, CatalogEntry) for entry in self.entries):
+            raise CatalogQueryValidationError("Catalog pages require native entries")
+        identities = [(entry.key, entry.generation) for entry in self.entries]
+        if identities != sorted(identities) or len(set(identities)) != len(identities):
+            raise CatalogQueryValidationError("Catalog pages must be ordered by key and generation")
+        if not isinstance(self.revision, int) or isinstance(self.revision, bool) or self.revision < 0:
+            raise CatalogQueryValidationError("Catalog page revision is invalid")
+        if not isinstance(self.exhausted, bool):
+            raise CatalogQueryValidationError("Catalog page exhaustion flag is invalid")
+        if self.exhausted:
+            if self.cursor is not None:
+                raise CatalogQueryValidationError("Exhausted catalog pages cannot carry a cursor")
+        elif not isinstance(self.cursor, str) or not self.cursor:
+            raise CatalogQueryValidationError("Incomplete catalog pages need an opaque cursor")
+        if self.examined_identity is not None and (
+            not isinstance(self.examined_identity, tuple)
+            or len(self.examined_identity) != 2
+            or any(not isinstance(value, str) or not value for value in self.examined_identity)
+        ):
+            raise CatalogQueryValidationError("Catalog examined identity is invalid")
+
+
+def page_from_canonical_scan(
+    snapshots: Sequence[Any],
+    *,
+    query: CatalogQuery,
+    schema: CatalogSchema,
+    revision: int,
+    store_id: str,
+    cursor_identity: tuple[str, str] | None,
+    limit: int,
+    work_cap: int,
+    signing_key: bytes,
+    manifest_loader: Any,
+) -> CatalogPage:
+    """Build one portable page from a bounded, authority-owned keyset scan.
+
+    Callers provide at most ``work_cap + 1`` snapshots ordered by
+    ``(key, generation)``.  The look-ahead snapshot establishes exhaustion but
+    is deliberately not decoded: cursor progress always describes the last
+    authenticated descriptor actually examined.
+    """
+    del cursor_identity  # The authority applies the keyset predicate before scan.
+    if len(snapshots) > work_cap + 1:
+        raise CatalogQueryValidationError("Catalog authority scan exceeds the work cap")
+    entries: list[CatalogEntry] = []
+    examined_identity: tuple[str, str] | None = None
+    stopped_for_limit = False
+    examined_count = 0
+    for snapshot in snapshots[:work_cap]:
+        identity = (snapshot.key, snapshot.generation)
+        if examined_identity is not None and identity <= examined_identity:
+            raise CatalogQueryValidationError("Catalog authority scan is not keyset ordered")
+        manifest = manifest_loader(snapshot.manifest)
+        if manifest.key != snapshot.key or manifest.generation != snapshot.generation:
+            raise CatalogValidationError("Authority descriptor identity does not match entry")
+        if manifest.state != "committed":
+            raise CatalogValidationError("Authority catalog scan found a non-committed descriptor")
+        if manifest.versions.store_epoch != STORE_EPOCH:
+            raise CatalogMigrationRequiredError(
+                "Catalog descriptor store epoch requires explicit migration or rebuild"
+            )
+        examined_identity = identity
+        examined_count += 1
+        if (
+            manifest.catalog_schema_id != schema.schema_id
+            or manifest.catalog_schema_revision != schema.revision
+            or manifest.catalog_schema_fingerprint != schema.fingerprint
+        ):
+            continue
+        stored_values = {
+            name: manifest.catalog_values[name]
+            for name in manifest.catalog_presence
+        }
+        if evaluate_predicates(query.predicates, stored_values, schema=schema):
+            entries.append(
+                CatalogEntry(
+                    identity[0],
+                    identity[1],
+                    stored_values,
+                    expectation=snapshot.expectation,
+                    byte_size=manifest.byte_size,
+                    created_at=manifest.created_at,
+                    schema_id=manifest.catalog_schema_id,
+                    schema_revision=manifest.catalog_schema_revision,
+                )
+            )
+            if len(entries) == limit:
+                stopped_for_limit = True
+                break
+
+    authority_exhausted = examined_count == len(snapshots)
+    exhausted = authority_exhausted and not (
+        stopped_for_limit and examined_count < len(snapshots)
+    )
+    if exhausted:
+        return CatalogPage(
+            entries=tuple(entries),
+            revision=revision,
+            cursor=None,
+            exhausted=True,
+            examined_identity=examined_identity,
+        )
+    if examined_identity is None:
+        raise CatalogQueryValidationError("Incomplete catalog page has no examined identity")
+    next_cursor = CatalogCursor.create(
+        store_id=store_id,
+        format_version=STORE_FORMAT_VERSION,
+        store_epoch=STORE_EPOCH,
+        schema_id=schema.schema_id,
+        schema_fingerprint=schema.fingerprint,
+        query_fingerprint=query.fingerprint,
+        revision=revision,
+        last_identity=examined_identity,
+        signing_key=signing_key,
+    )
+    return CatalogPage(
+        entries=tuple(entries),
+        revision=revision,
+        cursor=next_cursor,
+        exhausted=False,
+        examined_identity=examined_identity,
+    )
+
+
+__all__ = [
+    "CatalogCursor",
+    "CatalogCursorError",
+    "CatalogEntry",
+    "CatalogField",
+    "CatalogMigrationRequiredError",
+    "CatalogPage",
+    "CatalogPredicate",
+    "CatalogQuery",
+    "CatalogQueryValidationError",
+    "CatalogSchema",
+    "CatalogStaleCursorError",
+    "CatalogValidationError",
+    "DEFAULT_PAGE_SIZE",
+    "MAX_PAGE_SIZE",
+    "MAX_WORK_CAP",
+    "STORE_EPOCH",
+    "STORE_FORMAT_VERSION",
+    "evaluate_predicates",
+    "inspect_store_layout",
+    "page_from_canonical_scan",
+    "require_current_revision",
+    "validate_catalog_mapping",
+    "validate_catalog_page_request",
+    "validate_catalog_query",
+]

@@ -1,0 +1,278 @@
+{
+  "schema_version": 1,
+  "fixtures": {
+    "array-raw-v035-compress": {
+      "source_commit": "041c930fb66c7aa23f53d1f9f524e9fafdd20e68",
+      "source_version": "0.3.5",
+      "variant": "raw-array",
+      "logical_input": {
+        "dtype": "int32",
+        "shape": [2, 3],
+        "values": [0, 1, 2, 3, 4, 5]
+      },
+      "discriminators": {
+        "storage_format": "blosc2",
+        "frame_api": "compress",
+        "shape_text": "(2, 3)",
+        "dtype_text": "int32",
+        "signature_state": "not_applicable"
+      },
+      "files": {
+        "payload.b2nd": {
+          "sha256": "b7abe25fe6e6e192d0c6596fd9c30493f9f0a3e58412cc59c8913ccac37ecb46"
+        },
+        "provenance.json": {
+          "sha256": "5d0589d6ceae1f5d493898efa947d9a95f9b7fcf25c2632b00e71ed46657f1d9"
+        }
+      },
+      "production_reader": "legacy_raw_blosc2"
+    },
+    "array-raw-v037-compress2": {
+      "source_commit": "a756d70c858cec13ff1c885e2316c0fe725c4949",
+      "source_version": "0.3.7",
+      "variant": "raw-array",
+      "logical_input": {
+        "dtype": "int32",
+        "shape": [2, 3],
+        "values": [0, 1, 2, 3, 4, 5]
+      },
+      "discriminators": {
+        "storage_format": "blosc2",
+        "frame_api": "compress2",
+        "shape_text": "(2, 3)",
+        "dtype_text": "int32",
+        "signature_state": "not_applicable"
+      },
+      "files": {
+        "payload.b2nd": {
+          "sha256": "b7abe25fe6e6e192d0c6596fd9c30493f9f0a3e58412cc59c8913ccac37ecb46"
+        },
+        "provenance.json": {
+          "sha256": "44f84c2044677ef254f2577c7324390f66af3f0b2b4f823ce8d725bda0d14ed1"
+        }
+      },
+      "production_reader": "legacy_raw_blosc2"
+    },
+    "json-split-unsigned-v037": {
+      "source_commit": "a756d70c858cec13ff1c885e2316c0fe725c4949",
+      "source_version": "0.3.7",
+      "variant": "json-split-npz",
+      "logical_input": {
+        "dtype": "int32",
+        "shape": [2, 3],
+        "values": [0, 1, 2, 3, 4, 5]
+      },
+      "discriminators": {
+        "metadata_kind": "json_split",
+        "json_top_level_keys": [
+          "entries",
+          "access_times",
+          "creation_times",
+          "file_sizes",
+          "data_types",
+          "cache_key_params",
+          "cache_hits",
+          "cache_misses"
+        ],
+        "signature_state": "absent"
+      },
+      "files": {
+        "metadata.json": {
+          "sha256": "0f1c7c772b0768c6287e63e82185cf0803f7e10e83243e685ed3bf537b9fd315"
+        },
+        "payload.npz": {
+          "sha256": "400fa42d786ab1e6924e051bbaa61238627909af333de87aab176c280c71fe2f"
+        },
+        "provenance.json": {
+          "sha256": "08091f60fcf1d57e3fc0388740c0f23e9a986e02cc82e879ffd99e2960dc89cf"
+        }
+      },
+      "production_reader": "legacy_split_json_metadata"
+    },
+    "json-split-signed-v038": {
+      "source_commit": "71e4ba04cbcd7dfbcf74e5651f131213b7d45ab9",
+      "source_version": "0.3.8",
+      "variant": "json-split-npz",
+      "logical_input": {
+        "dtype": "int32",
+        "shape": [2, 3],
+        "values": [0, 1, 2, 3, 4, 5]
+      },
+      "discriminators": {
+        "metadata_kind": "json_split",
+        "json_top_level_keys": [
+          "entries",
+          "access_times",
+          "creation_times",
+          "file_sizes",
+          "data_types",
+          "cache_key_params",
+          "cache_hits",
+          "cache_misses",
+          "entry_signature"
+        ],
+        "signature_state": "present"
+      },
+      "files": {
+        "metadata.json": {
+          "sha256": "b8ebfb9bcc52b72a90e333dc2093273863cdad3c83fe5b3e50a9e5e032a2cb30"
+        },
+        "payload.npz": {
+          "sha256": "400fa42d786ab1e6924e051bbaa61238627909af333de87aab176c280c71fe2f"
+        },
+        "provenance.json": {
+          "sha256": "870f24839abc70f7d265cf9ea84aea48949d6403fcc3f593458f3a2bf458f172"
+        }
+      },
+      "production_reader": "legacy_split_json_metadata"
+    },
+    "sqlite-metadata-json-v039": {
+      "source_commit": "6e2f9933a9aa66fb6629aec0125f84a0c114c35f",
+      "source_version": "0.3.9",
+      "variant": "sqlite-metadata-json-npz",
+      "logical_input": {
+        "dtype": "int32",
+        "shape": [2, 3],
+        "values": [0, 1, 2, 3, 4, 5]
+      },
+      "discriminators": {
+        "metadata_kind": "sqlite",
+        "table": "cache_entries",
+        "sqlite_columns": [
+          "cache_key",
+          "description",
+          "data_type",
+          "prefix",
+          "created_at",
+          "accessed_at",
+          "file_size",
+          "file_hash",
+          "entry_signature",
+          "cache_key_params",
+          "metadata_json"
+        ],
+        "signature_state": "column_present"
+      },
+      "files": {
+        "metadata.sqlite3": {
+          "sha256": "913ce4d06825544637ff5f44985518ef5cc8cb07a63505f3e76831ec71572734"
+        },
+        "payload.npz": {
+          "sha256": "400fa42d786ab1e6924e051bbaa61238627909af333de87aab176c280c71fe2f"
+        },
+        "provenance.json": {
+          "sha256": "225a337377a1d9e64249e46b205feaa42d5885a26473ce31f77cd41a4488bfb2"
+        }
+      },
+      "production_reader": "legacy_sqlite_metadata_json"
+    },
+    "decorator-key-v0313": {
+      "source_commit": "76a469f3e090a99d9f9c119c3190a97b11a5e68a",
+      "source_version": "0.3.13",
+      "variant": "decorator-key-json-npz",
+      "logical_input": {
+        "dtype": "int32",
+        "shape": [2, 3],
+        "values": [0, 1, 2, 3, 4, 5]
+      },
+      "discriminators": {
+        "metadata_kind": "json_nested",
+        "json_top_level_keys": [
+          "entries",
+          "cache_hits",
+          "cache_misses"
+        ],
+        "signature_state": "entry_present",
+        "key_scheme": "decorator_pre_unified"
+      },
+      "files": {
+        "metadata.json": {
+          "sha256": "73a9bfb8e36c1f846d6dd7d3a26e74131a4175112ea9ef202f80757adefc35fb"
+        },
+        "payload.npz": {
+          "sha256": "400fa42d786ab1e6924e051bbaa61238627909af333de87aab176c280c71fe2f"
+        },
+        "provenance.json": {
+          "sha256": "eb1319074752d15b117bc49cbe8ee2fea38253ef257dc74a25be1edd774812d6"
+        }
+      },
+      "production_reader": "legacy_decorator_key"
+    },
+    "json-nested-v0314": {
+      "source_commit": "a22f4b4575cb8213d9783ed388d2a70727563db1",
+      "source_version": "0.3.14",
+      "variant": "json-nested-npz",
+      "logical_input": {
+        "dtype": "int32",
+        "shape": [2, 3],
+        "values": [0, 1, 2, 3, 4, 5]
+      },
+      "discriminators": {
+        "metadata_kind": "json_nested",
+        "json_top_level_keys": [
+          "entries",
+          "cache_hits",
+          "cache_misses"
+        ],
+        "signature_state": "entry_present",
+        "key_scheme": "unified"
+      },
+      "files": {
+        "metadata.json": {
+          "sha256": "3358f00e27b58a34d03e46ff33bbafe881f4e1dbf2ebf236a9a95272502888dd"
+        },
+        "payload.npz": {
+          "sha256": "400fa42d786ab1e6924e051bbaa61238627909af333de87aab176c280c71fe2f"
+        },
+        "provenance.json": {
+          "sha256": "da496e309fa3ae5d6b347459cbce5fd6d4a04cf14634ca437970f7ecc6b18474"
+        }
+      },
+      "production_reader": "current_json_metadata"
+    },
+    "sqlite-columns-v0314": {
+      "source_commit": "a22f4b4575cb8213d9783ed388d2a70727563db1",
+      "source_version": "0.3.14",
+      "variant": "sqlite-columns-npz",
+      "logical_input": {
+        "dtype": "int32",
+        "shape": [2, 3],
+        "values": [0, 1, 2, 3, 4, 5]
+      },
+      "discriminators": {
+        "metadata_kind": "sqlite",
+        "table": "cache_entries",
+        "sqlite_columns": [
+          "cache_key",
+          "description",
+          "data_type",
+          "prefix",
+          "created_at",
+          "accessed_at",
+          "file_size",
+          "file_hash",
+          "entry_signature",
+          "object_type",
+          "storage_format",
+          "serializer",
+          "compression_codec",
+          "actual_path",
+          "cache_key_params"
+        ],
+        "signature_state": "column_present"
+      },
+      "files": {
+        "metadata.sqlite3": {
+          "sha256": "a236b3ad7d00f5121bc5d12a170dc0af26516b5126c7f4bd238c7c57d27f0379"
+        },
+        "payload.npz": {
+          "sha256": "400fa42d786ab1e6924e051bbaa61238627909af333de87aab176c280c71fe2f"
+        },
+        "provenance.json": {
+          "sha256": "ee95c6288298a2b55c58858d0eed39518713408580dbeee615ce39bcdb6cda75"
+        }
+      },
+      "production_reader": "current_sqlite_columns"
+    }
+  }
+}

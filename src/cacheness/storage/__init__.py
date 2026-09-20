@@ -2,11 +2,9 @@
 Storage Layer
 =============
 
-Low-level blob storage infrastructure providing:
-- Pluggable metadata backends (JSON, SQLite)
-- Type-aware serialization handlers (DataFrames, arrays, objects)
-- Compression support (blosc2, lz4, zstd, gzip)
-- Security features (HMAC signing, integrity verification)
+Direct object storage is composed from one ``StoreTopology`` and owned by
+``BlobStore``.  Catalog authority is not selected independently from the
+payload lifecycle.
 
 This layer is designed to be reusable beyond caching use cases, such as:
 - ML model versioning
@@ -16,28 +14,22 @@ This layer is designed to be reusable beyond caching use cases, such as:
 Usage:
     # Direct storage layer access
     from cacheness.storage import BlobStore
-
-    store = BlobStore(backend="sqlite", compression="lz4")
+    
+    store = BlobStore(topology, compression="lz4")
     blob_id = store.put(data, metadata={"type": "model", "version": "1.0"})
     data = store.get(blob_id)
-
-    # Access backends directly
-    from cacheness.storage.backends import SqliteBackend, JsonBackend, MemoryBackend
-
-    # Access handlers directly
+    
+    # Access handlers directly  
     from cacheness.storage.handlers import HandlerRegistry, ArrayHandler, ObjectHandler
 """
 
 # Import from backends subpackage
-from .backends import (
-    MetadataBackend,
-    JsonBackend,
-    create_metadata_backend,
-)
-
 # Import from handlers subpackage
+from importlib.util import find_spec
+
 from .handlers import (
-    CacheHandler,
+    FormatHandler,
+    FormatHandlerError,
     HandlerRegistry,
     ArrayHandler,
     ObjectHandler,
@@ -57,24 +49,215 @@ from .security import CacheEntrySigner
 
 # Import BlobStore
 from .blob_store import BlobStore
+from .catalog import (
+    CatalogCursor,
+    CatalogCursorError,
+    CatalogEntry,
+    CatalogField,
+    CatalogPage,
+    CatalogPredicate,
+    CatalogQuery,
+    CatalogQueryValidationError,
+    CatalogSchema,
+    CatalogStaleCursorError,
+    CatalogValidationError,
+    STORE_FORMAT_VERSION,
+    evaluate_predicates,
+    require_current_revision,
+    validate_catalog_mapping,
+    validate_catalog_query,
+)
+from .read_contract import (
+    BlobEntry,
+    BlobReceipt,
+    PayloadTransportComparison,
+    PayloadTransportComparisonStatus,
+)
+from .manifest import BlobManifest
+from .migration import (
+    AbortReceipt,
+    CompatibilityDimension,
+    CompatibilityIdentity,
+    CompatibilityMatrix,
+    CompatibilityOutcome,
+    CompatibilityResult,
+    MigrationCompatibilityEdge,
+    MigrationDisposition,
+    MigrationEntryAssessment,
+    MigrationInspection,
+    MigrationPlan,
+    MigrationPlanKind,
+    MigrationPlanState,
+    MigrationReason,
+    MigrationStepResult,
+    MigrationTotals,
+    OfflineMigrationService,
+    PurgeReceipt,
+    RebuildExclusion,
+    ReleaseWindow,
+    VersionEdge,
+    render_migration_report,
+)
+from .migration_authority import (
+    ActivationReceipt,
+    AuthorityIdentitySnapshot,
+    AuthorityPublicationState,
+    FinalizeReceipt,
+    PriorStoreReceipt,
+    RollbackReceipt,
+    VerifiedCandidateReceipt,
+)
+from .migration_evidence import (
+    MaintenanceEvidenceState,
+    MaintenanceRunEvidence,
+    StoppedWorkerAcknowledgement,
+)
+from .reconciliation import (
+    ReconciliationAction,
+    ReconciliationFinding,
+    ReconciliationReport,
+    ReconciliationStatus,
+)
+from cacheness.error_handling import (
+    CacheBlobBackendError,
+    CacheBlobCloseTimeoutError,
+    CacheBlobLifecycleTimeoutError,
+    CacheBlobLockReleaseError,
+    CacheBlobManifestMalformedError,
+    CacheBlobManifestUnauthenticatedError,
+    CacheBlobManifestUnsupportedVersionError,
+    CacheBlobLifecycleConflictError,
+    CacheBlobMigrationCleanupError,
+    CacheBlobMigrationConfirmationError,
+    CacheBlobMigrationEvidenceError,
+    CacheBlobMigrationEvidenceMismatchError,
+    CacheBlobMigrationOfflineDecisionRequiredError,
+    CacheBlobMigrationPlanStaleError,
+    CacheBlobMigrationRequiredError,
+    CacheBlobPayloadMissingError,
+    CacheBlobPayloadTamperedError,
+    CacheBlobPayloadUnsupportedVersionError,
+    CacheManifestIntegrityError,
+    CacheManifestUnsupportedVersionError,
+    CacheMigrationOrRebuildRequiredError,
+    CacheBlobReconciliationCheckpointError,
+    CacheBlobReconciliationConflictError,
+    CacheBlobReconciliationError,
+    CacheBlobStoreClosedError,
+)
 
-# Conditionally import SqliteBackend
+from .composition import BackendRef, BackendRole, RoleRegistry, StoreTopology
+from .obstore_generation_io import (
+    ObstoreGenerationIO,
+    ObstoreInventoryPage,
+    ObstoreObjectEvidence,
+)
+
 try:
-    from .backends import SqliteBackend  # noqa: F401
-
-    _HAS_SQLITE = True
+    if find_spec("psycopg") is None:
+        raise ImportError
+    from .backends.postgresql_lifecycle_authority import PostgresqlLifecycleAuthority
 except ImportError:
-    _HAS_SQLITE = False
+    POSTGRESQL_AVAILABLE = False
+else:
+    POSTGRESQL_AVAILABLE = True
 
 __all__ = [
     # Main API
     "BlobStore",
-    # Backends
-    "MetadataBackend",
-    "JsonBackend",
-    "create_metadata_backend",
+    "BackendRef",
+    "BackendRole",
+    "RoleRegistry",
+    "StoreTopology",
+    "ObstoreGenerationIO",
+    "ObstoreInventoryPage",
+    "ObstoreObjectEvidence",
+    "BlobManifest",
+    "BlobReceipt",
+    "CatalogCursor",
+    "CatalogCursorError",
+    "CatalogEntry",
+    "CatalogField",
+    "CatalogPage",
+    "CatalogPredicate",
+    "CatalogQuery",
+    "CatalogQueryValidationError",
+    "CatalogSchema",
+    "CatalogStaleCursorError",
+    "CatalogValidationError",
+    "STORE_FORMAT_VERSION",
+    "evaluate_predicates",
+    "require_current_revision",
+    "validate_catalog_mapping",
+    "validate_catalog_query",
+    "BlobEntry",
+    "PayloadTransportComparison",
+    "PayloadTransportComparisonStatus",
+    "CacheBlobManifestMalformedError",
+    "CacheBlobManifestUnauthenticatedError",
+    "CacheBlobPayloadMissingError",
+    "CacheBlobPayloadTamperedError",
+    "CacheBlobManifestUnsupportedVersionError",
+    "CacheBlobPayloadUnsupportedVersionError",
+    "CacheManifestIntegrityError",
+    "CacheManifestUnsupportedVersionError",
+    "CacheBlobLifecycleConflictError",
+    "CacheBlobBackendError",
+    "CacheBlobLockReleaseError",
+    "CacheBlobCloseTimeoutError",
+    "CacheBlobLifecycleTimeoutError",
+    "CacheBlobStoreClosedError",
+    "CacheBlobMigrationRequiredError",
+    "CacheMigrationOrRebuildRequiredError",
+    "CacheBlobMigrationPlanStaleError",
+    "CacheBlobMigrationEvidenceError",
+    "CacheBlobMigrationEvidenceMismatchError",
+    "CacheBlobMigrationConfirmationError",
+    "CacheBlobMigrationOfflineDecisionRequiredError",
+    "CacheBlobMigrationCleanupError",
+    "CacheBlobReconciliationError",
+    "CacheBlobReconciliationConflictError",
+    "CacheBlobReconciliationCheckpointError",
+    "ReconciliationStatus",
+    "ReconciliationAction",
+    "ReconciliationFinding",
+    "ReconciliationReport",
+    # Explicit offline migration and rebuild API
+    "OfflineMigrationService",
+    "ReleaseWindow",
+    "CompatibilityDimension",
+    "CompatibilityOutcome",
+    "CompatibilityIdentity",
+    "CompatibilityResult",
+    "CompatibilityMatrix",
+    "VersionEdge",
+    "MigrationCompatibilityEdge",
+    "MigrationDisposition",
+    "MigrationReason",
+    "MigrationEntryAssessment",
+    "MigrationInspection",
+    "RebuildExclusion",
+    "MigrationPlanKind",
+    "MigrationPlanState",
+    "MigrationTotals",
+    "MigrationPlan",
+    "MigrationStepResult",
+    "AbortReceipt",
+    "PurgeReceipt",
+    "AuthorityPublicationState",
+    "AuthorityIdentitySnapshot",
+    "VerifiedCandidateReceipt",
+    "PriorStoreReceipt",
+    "ActivationReceipt",
+    "RollbackReceipt",
+    "FinalizeReceipt",
+    "MaintenanceEvidenceState",
+    "StoppedWorkerAcknowledgement",
+    "MaintenanceRunEvidence",
+    "render_migration_report",
     # Handlers
-    "CacheHandler",
+    "FormatHandler",
+    "FormatHandlerError",
     "HandlerRegistry",
     "ArrayHandler",
     "ObjectHandler",
@@ -88,5 +271,5 @@ __all__ = [
     "CacheEntrySigner",
 ]
 
-if _HAS_SQLITE:
-    __all__.append("SqliteBackend")
+if POSTGRESQL_AVAILABLE:
+    __all__.append(PostgresqlLifecycleAuthority.__name__)

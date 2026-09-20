@@ -8,11 +8,68 @@ This module provides consistent error handling patterns and logging across all c
 import functools
 import logging
 import traceback
+from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Type, Union
 from contextlib import contextmanager
 
 logger = logging.getLogger(__name__)
+
+
+class CacheReason(str, Enum):
+    """Stable machine-readable reasons for public cache boundary failures."""
+
+    PATH_TRAVERSAL = "path_traversal"
+    PATH_ABSOLUTE = "path_absolute"
+    PATH_DRIVE = "path_drive"
+    PATH_UNC = "path_unc"
+    PATH_ROOTED = "path_rooted"
+    PATH_OUTSIDE_ROOT = "path_outside_root"
+    PATH_RACE = "path_race"
+    INVALID_IDENTIFIER = "invalid_identifier"
+    INVALID_QUERY_FIELD = "invalid_query_field"
+    INVALID_QUERY_VALUE = "invalid_query_value"
+    INVALID_LEGACY_ARRAY = "invalid_legacy_array"
+    UNSAFE_OBJECT_ARRAY = "unsafe_object_array"
+    UNSUPPORTED_LEGACY_LAYOUT = "unsupported_legacy_layout"
+    READ_ONLY_LEGACY_STORE = "read_only_legacy_store"
+    INVALID_LEGACY_SIGNATURE = "invalid_legacy_signature"
+    MANIFEST_INVALID = "manifest_invalid"
+    MANIFEST_BOUNDS = "manifest_bounds"
+    MANIFEST_UNSUPPORTED_VERSION = "manifest_unsupported_version"
+    MANIFEST_SIGNATURE_INVALID = "manifest_signature_invalid"
+    MANIFEST_SIGNING_KEY_INVALID = "manifest_signing_key_invalid"
+    BLOB_MANIFEST_MALFORMED = MANIFEST_INVALID
+    BLOB_MANIFEST_UNAUTHENTICATED = MANIFEST_SIGNATURE_INVALID
+    BLOB_PAYLOAD_MISSING = MANIFEST_INVALID
+    BLOB_PAYLOAD_TAMPERED = MANIFEST_INVALID
+    BLOB_MANIFEST_UNSUPPORTED_VERSION = MANIFEST_UNSUPPORTED_VERSION
+    BLOB_PAYLOAD_UNSUPPORTED_VERSION = MANIFEST_UNSUPPORTED_VERSION
+    BLOB_LIFECYCLE_CONFLICT = "blob_lifecycle_conflict"
+    BLOB_BACKEND_FAILURE = "blob_backend_failure"
+    BLOB_BACKEND_CAPABILITY_UNSUPPORTED = "blob_backend_capability_unsupported"
+    BLOB_MIGRATION_REQUIRED = "blob_migration_required"
+    BLOB_RECOVERABLE_CLEANUP = "blob_recoverable_cleanup"
+    BLOB_COMMITTED_PARTIAL = "blob_committed_partial"
+    BLOB_RECONCILIATION_BLOCKED = "blob_reconciliation_blocked"
+    BLOB_RECONCILIATION_CONFLICT = "blob_reconciliation_conflict"
+    BLOB_RECONCILIATION_CHECKPOINT_INVALID = "blob_reconciliation_checkpoint_invalid"
+    BLOB_STORE_CLOSED = "blob_store_closed"
+    BLOB_CLOSE_TIMEOUT = "blob_close_timeout"
+    BLOB_LIFECYCLE_TIMEOUT = "blob_lifecycle_timeout"
+    BLOB_LOCK_RELEASE_FAILURE = "blob_lock_release_failure"
+    METADATA_CORRUPT = "metadata_corrupt"
+    CATALOG_VALIDATION_FAILED = "catalog_validation_failed"
+    CATALOG_QUERY_INVALID = "catalog_query_invalid"
+    CATALOG_CURSOR_INVALID = "catalog_cursor_invalid"
+    CATALOG_CURSOR_STALE = "catalog_cursor_stale"
+    MIGRATION_OR_REBUILD_REQUIRED = "migration_or_rebuild_required"
+    BLOB_MIGRATION_PLAN_STALE = "blob_migration_plan_stale"
+    BLOB_MIGRATION_EVIDENCE_INVALID = "blob_migration_evidence_invalid"
+    BLOB_MIGRATION_EVIDENCE_MISMATCH = "blob_migration_evidence_mismatch"
+    BLOB_MIGRATION_CONFIRMATION_REQUIRED = "blob_migration_confirmation_required"
+    BLOB_MIGRATION_OFFLINE_DECISION_REQUIRED = "blob_migration_offline_decision_required"
+    BLOB_MIGRATION_CLEANUP_REQUIRED = "blob_migration_cleanup_required"
 
 
 class CacheError(Exception):
@@ -47,10 +104,36 @@ class CacheSerializationError(CacheError):
     pass
 
 
-class CacheHandlerError(CacheError):
-    """Raised when cache handler operations fail."""
+class FormatHandlerError(CacheError):
+    """Raised when format handler operations fail."""
 
-    pass
+    def __init__(
+        self,
+        message: str,
+        handler_type: Optional[str] | Dict[str, Any] = None,
+        data_type: Optional[str] = None,
+        context: Optional[Dict[str, Any]] = None,
+    ):
+        # ``CacheError`` historically accepted context as its second positional
+        # argument.  Preserve that call shape while also carrying the focused
+        # handler fields used by CacheWriteError/CacheReadError.
+        if isinstance(handler_type, dict) and data_type is None and context is None:
+            context = handler_type
+            handler_type = None
+        self.handler_type = handler_type
+        self.data_type = data_type
+        error_context = dict(context or {})
+        if handler_type is not None:
+            error_context["handler_type"] = handler_type
+        if data_type is not None:
+            error_context["data_type"] = data_type
+        super().__init__(message, error_context)
+        logger.error(
+            "Cache handler error: %s (handler=%s, data_type=%s)",
+            message,
+            handler_type,
+            data_type,
+        )
 
 
 class CacheIntegrityError(CacheError):
@@ -63,6 +146,487 @@ class CacheMetadataError(CacheError):
     """Raised when cache metadata operations fail."""
 
     pass
+
+
+def _context_with_reason(
+    context: Optional[Dict[str, Any]], reason: CacheReason
+) -> Dict[str, Any]:
+    """Return error context with its public reason code made authoritative."""
+    error_context = dict(context or {})
+    error_context["reason"] = reason.value
+    return error_context
+
+
+class CacheUnsafePathError(CacheStorageError):
+    """Raised when a filesystem path or persisted locator is unsafe."""
+
+    def __init__(
+        self,
+        message: str,
+        context: Optional[Dict[str, Any]] = None,
+        *,
+        reason: CacheReason,
+    ):
+        super().__init__(message, _context_with_reason(context, reason))
+
+
+class CacheQueryValidationError(CacheMetadataError):
+    """Raised when public metadata query input is invalid."""
+
+    def __init__(
+        self,
+        message: str,
+        context: Optional[Dict[str, Any]] = None,
+        *,
+        reason: CacheReason,
+    ):
+        super().__init__(message, _context_with_reason(context, reason))
+
+
+class CacheCatalogValidationError(CacheMetadataError):
+    """Raised when native catalog metadata violates its declared schema."""
+
+    def __init__(
+        self,
+        message: str,
+        context: Optional[Dict[str, Any]] = None,
+        *,
+        reason: CacheReason = CacheReason.CATALOG_VALIDATION_FAILED,
+    ):
+        super().__init__(message, _context_with_reason(context, reason))
+
+
+class CacheCatalogQueryValidationError(CacheMetadataError):
+    """Raised before an invalid portable catalog query reaches an authority."""
+
+    def __init__(
+        self,
+        message: str,
+        context: Optional[Dict[str, Any]] = None,
+        *,
+        reason: CacheReason = CacheReason.CATALOG_QUERY_INVALID,
+    ):
+        super().__init__(message, _context_with_reason(context, reason))
+
+
+class CacheCatalogCursorError(CacheCatalogQueryValidationError):
+    """Raised when an opaque catalog cursor is malformed or mismatched."""
+
+    def __init__(
+        self,
+        message: str,
+        context: Optional[Dict[str, Any]] = None,
+        *,
+        reason: CacheReason = CacheReason.CATALOG_CURSOR_INVALID,
+    ):
+        super().__init__(message, context, reason=reason)
+
+
+class CacheCatalogStaleCursorError(CacheCatalogCursorError):
+    """Raised when a cursor cannot resume the authority snapshot it names."""
+
+    retryable = True
+
+    def __init__(
+        self,
+        message: str,
+        context: Optional[Dict[str, Any]] = None,
+        *,
+        reason: CacheReason = CacheReason.CATALOG_CURSOR_STALE,
+    ):
+        super().__init__(message, context, reason=reason)
+
+
+class CacheMigrationOrRebuildRequiredError(CacheStorageError):
+    """Raised for a layout that Phase 4 may classify but must not mutate."""
+
+    def __init__(
+        self,
+        message: str,
+        context: Optional[Dict[str, Any]] = None,
+        *,
+        reason: CacheReason = CacheReason.MIGRATION_OR_REBUILD_REQUIRED,
+    ):
+        super().__init__(message, _context_with_reason(context, reason))
+
+
+class CacheBlobMigrationPlanStaleError(CacheStorageError):
+    """Raised when a source or destination no longer matches an inspected plan."""
+
+    def __init__(
+        self,
+        message: str,
+        context: Optional[Dict[str, Any]] = None,
+        *,
+        reason: CacheReason = CacheReason.BLOB_MIGRATION_PLAN_STALE,
+    ):
+        super().__init__(message, _context_with_reason(context, reason))
+
+
+class CacheBlobMigrationEvidenceError(CacheStorageError, ValueError):
+    """Raised when explicit maintenance evidence is absent, malformed, or forged."""
+
+    def __init__(
+        self,
+        message: str,
+        context: Optional[Dict[str, Any]] = None,
+        *,
+        reason: CacheReason = CacheReason.BLOB_MIGRATION_EVIDENCE_INVALID,
+    ):
+        super().__init__(message, _context_with_reason(context, reason))
+
+
+class CacheBlobMigrationEvidenceMismatchError(CacheBlobMigrationEvidenceError):
+    """Raised when authentic evidence binds a different run, plan, or output."""
+
+    def __init__(
+        self,
+        message: str,
+        context: Optional[Dict[str, Any]] = None,
+        *,
+        reason: CacheReason = CacheReason.BLOB_MIGRATION_EVIDENCE_MISMATCH,
+    ):
+        super().__init__(message, context, reason=reason)
+
+
+class CacheBlobMigrationConfirmationError(CacheStorageError):
+    """Raised when an offline operator acknowledgement is absent or invalid."""
+
+    def __init__(
+        self,
+        message: str,
+        context: Optional[Dict[str, Any]] = None,
+        *,
+        reason: CacheReason = CacheReason.BLOB_MIGRATION_CONFIRMATION_REQUIRED,
+    ):
+        super().__init__(message, _context_with_reason(context, reason))
+
+
+class CacheBlobMigrationOfflineDecisionRequiredError(CacheStorageError):
+    """Raised when a resume needs explicit operator inputs or a fresh inspection."""
+
+    def __init__(
+        self,
+        message: str,
+        context: Optional[Dict[str, Any]] = None,
+        *,
+        reason: CacheReason = CacheReason.BLOB_MIGRATION_OFFLINE_DECISION_REQUIRED,
+    ):
+        super().__init__(message, _context_with_reason(context, reason))
+
+
+class CacheBlobMigrationCleanupError(CacheStorageError):
+    """Raised when explicit post-cutover cleanup requires a retryable offline action."""
+
+    def __init__(
+        self,
+        message: str,
+        context: Optional[Dict[str, Any]] = None,
+        *,
+        reason: CacheReason = CacheReason.BLOB_MIGRATION_CLEANUP_REQUIRED,
+    ):
+        super().__init__(message, _context_with_reason(context, reason))
+
+
+class CacheLegacyFormatError(CacheSerializationError):
+    """Raised when a legacy payload layout is unsafe or unsupported."""
+
+    def __init__(
+        self,
+        message: str,
+        context: Optional[Dict[str, Any]] = None,
+        *,
+        reason: CacheReason,
+    ):
+        super().__init__(message, _context_with_reason(context, reason))
+
+
+class CacheBlobIntegrityError(CacheIntegrityError):
+    """Base class for direct BlobStore evidence and payload integrity failures."""
+
+
+class CacheManifestIntegrityError(CacheBlobIntegrityError):
+    """Raised when canonical BlobStore evidence is malformed or tampered with."""
+
+    def __init__(
+        self,
+        message: str,
+        context: Optional[Dict[str, Any]] = None,
+        *,
+        reason: CacheReason = CacheReason.MANIFEST_INVALID,
+    ):
+        super().__init__(message, _context_with_reason(context, reason))
+
+
+class CacheBlobManifestMalformedError(CacheManifestIntegrityError):
+    """Raised when a canonical BlobStore manifest is malformed."""
+
+    def __init__(
+        self,
+        message: str,
+        context: Optional[Dict[str, Any]] = None,
+        *,
+        reason: CacheReason = CacheReason.BLOB_MANIFEST_MALFORMED,
+    ):
+        super().__init__(message, context, reason=reason)
+
+
+class CacheBlobManifestUnauthenticatedError(CacheManifestIntegrityError):
+    """Raised when a canonical BlobStore manifest cannot be authenticated."""
+
+    def __init__(
+        self,
+        message: str,
+        context: Optional[Dict[str, Any]] = None,
+        *,
+        reason: CacheReason = CacheReason.BLOB_MANIFEST_UNAUTHENTICATED,
+    ):
+        super().__init__(message, context, reason=reason)
+
+
+class CacheBlobPayloadMissingError(CacheManifestIntegrityError):
+    """Raised when an authenticated BlobStore payload is missing."""
+
+    def __init__(
+        self,
+        message: str,
+        context: Optional[Dict[str, Any]] = None,
+        *,
+        reason: CacheReason = CacheReason.BLOB_PAYLOAD_MISSING,
+    ):
+        super().__init__(message, context, reason=reason)
+
+
+class CacheBlobPayloadTamperedError(CacheManifestIntegrityError):
+    """Raised when a BlobStore payload fails an integrity check."""
+
+    def __init__(
+        self,
+        message: str,
+        context: Optional[Dict[str, Any]] = None,
+        *,
+        reason: CacheReason = CacheReason.BLOB_PAYLOAD_TAMPERED,
+    ):
+        super().__init__(message, context, reason=reason)
+
+
+class CacheManifestUnsupportedVersionError(CacheStorageError):
+    """Raised when a manifest or native payload version is not supported."""
+
+    def __init__(
+        self,
+        message: str,
+        context: Optional[Dict[str, Any]] = None,
+        *,
+        reason: CacheReason = CacheReason.MANIFEST_UNSUPPORTED_VERSION,
+    ):
+        super().__init__(message, _context_with_reason(context, reason))
+
+
+class CacheBlobManifestUnsupportedVersionError(CacheManifestUnsupportedVersionError):
+    """Raised when a BlobStore manifest schema version is unsupported."""
+
+    def __init__(
+        self,
+        message: str,
+        context: Optional[Dict[str, Any]] = None,
+        *,
+        reason: CacheReason = CacheReason.BLOB_MANIFEST_UNSUPPORTED_VERSION,
+    ):
+        super().__init__(message, context, reason=reason)
+
+
+class CacheBlobPayloadUnsupportedVersionError(CacheManifestUnsupportedVersionError):
+    """Raised when a BlobStore payload format version is unsupported."""
+
+    def __init__(
+        self,
+        message: str,
+        context: Optional[Dict[str, Any]] = None,
+        *,
+        reason: CacheReason = CacheReason.BLOB_PAYLOAD_UNSUPPORTED_VERSION,
+    ):
+        super().__init__(message, context, reason=reason)
+
+
+class CacheBlobLifecycleConflictError(CacheStorageError):
+    """Raised when a direct BlobStore read sees a non-committed generation."""
+
+    def __init__(
+        self,
+        message: str,
+        context: Optional[Dict[str, Any]] = None,
+        *,
+        reason: CacheReason = CacheReason.BLOB_LIFECYCLE_CONFLICT,
+    ):
+        super().__init__(message, _context_with_reason(context, reason))
+
+
+class CacheBlobBackendError(CacheStorageError):
+    """Raised when a manifest repository cannot complete a backend operation."""
+
+    def __init__(
+        self,
+        message: str,
+        context: Optional[Dict[str, Any]] = None,
+        *,
+        reason: CacheReason = CacheReason.BLOB_BACKEND_FAILURE,
+    ):
+        super().__init__(message, _context_with_reason(context, reason))
+
+
+class CacheBlobLockReleaseError(CacheStorageError):
+    """Raised when an otherwise successful lifecycle lock cannot be released."""
+
+    def __init__(
+        self,
+        message: str,
+        context: Optional[Dict[str, Any]] = None,
+        *,
+        reason: CacheReason = CacheReason.BLOB_LOCK_RELEASE_FAILURE,
+    ):
+        super().__init__(message, _context_with_reason(context, reason))
+
+
+class CacheBlobStoreClosedError(CacheStorageError):
+    """Raised when a BlobStore instance rejects new work during close."""
+
+    def __init__(
+        self,
+        message: str,
+        context: Optional[Dict[str, Any]] = None,
+        *,
+        reason: CacheReason = CacheReason.BLOB_STORE_CLOSED,
+    ):
+        super().__init__(message, _context_with_reason(context, reason))
+
+
+class CacheBlobCloseTimeoutError(CacheStorageError):
+    """Raised when a finite BlobStore close drain cannot complete in time."""
+
+    def __init__(
+        self,
+        message: str,
+        context: Optional[Dict[str, Any]] = None,
+        *,
+        reason: CacheReason = CacheReason.BLOB_CLOSE_TIMEOUT,
+    ):
+        super().__init__(message, _context_with_reason(context, reason))
+
+
+class CacheBlobLifecycleTimeoutError(CacheStorageError):
+    """Raised when a bounded lifecycle authority cannot be admitted in time."""
+
+    def __init__(
+        self,
+        message: str,
+        context: Optional[Dict[str, Any]] = None,
+        *,
+        reason: CacheReason = CacheReason.BLOB_LIFECYCLE_TIMEOUT,
+    ):
+        super().__init__(message, _context_with_reason(context, reason))
+
+
+class CacheBlobMigrationRequiredError(CacheStorageError):
+    """Raised for an exact legacy layout that requires explicit migration."""
+
+    def __init__(
+        self,
+        message: str,
+        context: Optional[Dict[str, Any]] = None,
+        *,
+        reason: CacheReason = CacheReason.BLOB_MIGRATION_REQUIRED,
+    ):
+        super().__init__(message, _context_with_reason(context, reason))
+
+
+class CacheBlobRecoverableCleanupError(CacheStorageError):
+    """Raised when published authority survives but cleanup needs resumption."""
+
+    def __init__(
+        self,
+        message: str,
+        context: Optional[Dict[str, Any]] = None,
+        *,
+        reason: CacheReason = CacheReason.BLOB_RECOVERABLE_CLEANUP,
+    ):
+        super().__init__(message, _context_with_reason(context, reason))
+
+
+class CacheBlobCommittedPartialError(CacheStorageError):
+    """Raised when requested derived work fails after an authority commit.
+
+    The receipt remains the exact committed BlobStore result. The exception
+    carries it unchanged so callers can distinguish derived recovery work from
+    a failed or revoked canonical generation.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        receipt: object,
+        remaining_cursor: str | None,
+        projection_name: str,
+        context: Optional[Dict[str, Any]] = None,
+        reason: CacheReason = CacheReason.BLOB_COMMITTED_PARTIAL,
+    ):
+        if not isinstance(projection_name, str) or not projection_name:
+            raise ValueError("projection_name must be a non-empty string")
+        if remaining_cursor is not None and (
+            not isinstance(remaining_cursor, str) or not remaining_cursor
+        ):
+            raise ValueError("remaining_cursor must be a non-empty string or None")
+        error_context = dict(context or {})
+        error_context.update(
+            {
+                "projection_name": projection_name,
+                "remaining_cursor": remaining_cursor,
+            }
+        )
+        self.receipt = receipt
+        self.remaining_cursor = remaining_cursor
+        self.projection_name = projection_name
+        super().__init__(message, _context_with_reason(error_context, reason))
+
+
+class CacheBlobReconciliationError(CacheStorageError):
+    """Raised when reconciliation cannot safely apply a requested repair."""
+
+    def __init__(
+        self,
+        message: str,
+        context: Optional[Dict[str, Any]] = None,
+        *,
+        reason: CacheReason = CacheReason.BLOB_RECONCILIATION_BLOCKED,
+    ):
+        super().__init__(message, _context_with_reason(context, reason))
+
+
+class CacheBlobReconciliationConflictError(CacheBlobReconciliationError):
+    """Raised when exact evidence changes during reconciliation revalidation."""
+
+    def __init__(
+        self,
+        message: str,
+        context: Optional[Dict[str, Any]] = None,
+        *,
+        reason: CacheReason = CacheReason.BLOB_RECONCILIATION_CONFLICT,
+    ):
+        super().__init__(message, _context_with_reason(context, reason))
+
+
+class CacheBlobReconciliationCheckpointError(CacheBlobIntegrityError):
+    """Raised when persisted reconciliation action progress is malformed."""
+
+    def __init__(
+        self,
+        message: str,
+        context: Optional[Dict[str, Any]] = None,
+        *,
+        reason: CacheReason = CacheReason.BLOB_RECONCILIATION_CHECKPOINT_INVALID,
+    ):
+        super().__init__(message, _context_with_reason(context, reason))
 
 
 def with_error_handling(

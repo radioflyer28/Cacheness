@@ -1,298 +1,23 @@
 """
-Cache Handler Interfaces
-=======================
+Format Handler Interfaces
+=========================
 
 This module defines focused interfaces for cache handlers, following the Interface Segregation Principle.
 Each interface is responsible for a specific aspect of cache handling.
 """
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
-from typing_extensions import TypedDict
+from dataclasses import dataclass
 from pathlib import Path
 import logging
+from typing import Any, ContextManager, Dict, Protocol, TYPE_CHECKING, TypedDict
+
+from .error_handling import FormatHandlerError
+
+if TYPE_CHECKING:
+    from .config import CacheConfig
 
 logger = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# Typed contracts for metadata dicts
-# ---------------------------------------------------------------------------
-
-
-class SignableFields(TypedDict, total=False):
-    """Superset of fields that may be included in cache-entry HMAC signatures.
-
-    Built by ``UnifiedCache._extract_signable_fields()`` and consumed by
-    ``CacheEntrySigner.sign_entry()`` / ``verify_entry()``.
-
-    ``total=False`` because individual fields may legitimately be ``None``
-    (the signer coerces missing values to empty strings).
-    """
-
-    cache_key: str
-    data_type: str
-    file_size: int
-    created_at: str  # ISO-format, timezone stripped for consistency
-    actual_path: str
-    file_hash: Optional[str]
-    object_type: Optional[str]
-    storage_format: Optional[str]
-    serializer: Optional[str]
-    compression_codec: Optional[str]
-
-
-class EntrySummary(TypedDict, total=False):
-    """Lightweight flat dict returned by ``iter_entry_summaries()``.
-
-    Required keys are always present; optional keys appear only when the
-    backend column is non-NULL.  All backends (JSON, SQLite, PostgreSQL)
-    MUST return at least the required keys.
-
-    Unlike ``list_entries()``, timestamps are **raw** (no isoformat conversion),
-    there is no nested ``metadata`` dict, and no ``size_mb`` calculation.
-    """
-
-    # --- always present ---
-    cache_key: str
-    data_type: str
-    description: str
-    created_at: Any  # raw timestamp — str or datetime depending on backend
-    accessed_at: Any
-    file_size: int
-
-    # --- present when non-NULL ---
-    object_type: str
-    storage_format: str
-    serializer: str
-    compression_codec: str
-    actual_path: str
-    file_hash: str
-    entry_signature: str
-    metadata_dict: str
-    s3_etag: str
-    access_count: int
-    ttl_seconds: int
-    expires_at: Any  # raw timestamp — str or datetime depending on backend
-    is_inline: int  # 1 if blob data is stored inline in metadata, 0 otherwise
-    blob_data: bytes  # raw inline blob bytes (only present when is_inline=1)
-
-
-class BlobReadContext(TypedDict, total=False):
-    """Metadata dict passed to ``handler.get()`` during deserialization.
-
-    Contains handler-specific fields written during ``put()`` plus
-    metadata columns like ``actual_path`` and ``file_hash``.
-
-    All keys are optional (``total=False``) because each handler reads
-    only the subset it needs.  The dict is built from the entry's
-    ``metadata`` sub-dict by ``UnifiedCache`` before calling ``_read_blob``.
-
-    This is a **documentation-only** contract — existing handlers and
-    plugins that accept ``Dict[str, Any]`` remain compatible.
-    """
-
-    # Storage / serialization info (ObjectHandler, ArrayHandler)
-    storage_format: str
-    serializer: str
-    compression_codec: str
-    object_type: str
-    actual_path: str
-    file_hash: Optional[str]
-
-    # Series metadata (PandasSeriesHandler, PolarsSeriesHandler)
-    is_series: bool
-    series_name: str
-
-    # Signature (present when entry signing is enabled)
-    entry_signature: str
-
-
-class EntryData(TypedDict, total=False):
-    """Canonical shape returned by ``get_entry()`` / accepted by ``put_entry()``.
-
-    All metadata backends (JSON, SQLite, PostgreSQL) produce and consume
-    dicts conforming to this contract.  ``total=False`` because optional
-    fields may be absent depending on the backend or entry state.
-
-    **Structure:** Top-level keys are the "envelope" (description, timing,
-    size).  The nested ``metadata`` dict holds handler-written fields
-    (storage format, hashes, handler extras).
-
-    **Backend divergences:**
-
-    * PostgreSQL includes ``cache_key`` at the top level (informational).
-    * ``metadata`` sub-keys vary by handler — only ``actual_path`` and
-      ``storage_format`` are reliably present for on-disk entries.
-    """
-
-    # --- always present from all backends ---
-    description: str
-    data_type: str
-    created_at: Any  # ISO str or float timestamp depending on backend
-    accessed_at: Any
-    file_size: int
-    metadata: Dict[str, Any]  # nested handler / storage metadata
-
-    # --- present in some backends ---
-    cache_key: str  # PostgreSQL includes this; JSON/SQLite do not
-    access_count: int  # per-entry access counter (0 if never read)
-    ttl_seconds: int  # per-entry TTL in seconds (None = use config default)
-    expires_at: Any  # expiry timestamp (None = no TTL)
-    is_inline: int  # 1 if blob data is stored inline in metadata, 0 otherwise
-    blob_data: bytes  # raw inline blob bytes (only present when is_inline=1)
-
-
-@dataclass
-class HandlerResult:
-    """Typed return contract for handler put() methods.
-
-    Replaces the untyped Dict[str, Any] previously returned by handlers.
-    Eliminates top-level vs nested key ambiguity (root cause of CACHE-198).
-
-    Top-level fields map to dedicated metadata columns in the backend.
-    The ``extra`` dict carries handler-specific metadata (shape, dtypes,
-    backend, is_series, etc.) that goes into the nested metadata blob.
-
-    Provides dict-compatible accessors (__getitem__, get, setdefault)
-    so existing code that treats the result as a dict continues to work
-    during the migration period.
-    """
-
-    storage_format: str
-    file_size: int
-    actual_path: str
-    compression_codec: Optional[str] = None
-    serializer: Optional[str] = None
-    object_type: Optional[str] = None
-    extra: Dict[str, Any] = field(default_factory=dict)
-
-    # -- dict-compatible accessors for transitional use --
-
-    def _as_legacy_dict(self) -> Dict[str, Any]:
-        """Return the legacy dict representation for backward compatibility."""
-        metadata = dict(self.extra)
-        if self.compression_codec is not None:
-            metadata["compression_codec"] = self.compression_codec
-        if self.serializer is not None:
-            metadata["serializer"] = self.serializer
-        if self.object_type is not None:
-            metadata["object_type"] = self.object_type
-        # Some handlers duplicated storage_format inside metadata
-        metadata.setdefault("storage_format", self.storage_format)
-        return {
-            "storage_format": self.storage_format,
-            "file_size": self.file_size,
-            "actual_path": self.actual_path,
-            "metadata": metadata,
-        }
-
-    def __getitem__(self, key: str) -> Any:
-        d = self._as_legacy_dict()
-        return d[key]
-
-    def __contains__(self, key: object) -> bool:
-        """Support ``'actual_path' in result`` checks."""
-        d = self._as_legacy_dict()
-        return key in d
-
-    def get(self, key: str, default: Any = None) -> Any:
-        d = self._as_legacy_dict()
-        return d.get(key, default)
-
-    def setdefault(self, key: str, default: Any = None) -> Any:
-        """Support ``result.setdefault('metadata', {})`` pattern in blob_store."""
-        if key == "metadata":
-            return self.extra
-        d = self._as_legacy_dict()
-        return d.setdefault(key, default)
-
-
-@dataclass
-class WriteBlobResult:
-    """Typed return contract for ``BlobStore._write_blob()``.
-
-    Replaces the unnamed ``tuple[CacheHandler, HandlerResult, Optional[str]]``
-    previously returned.  Named fields make call-site intent explicit and
-    prevent positional-index mistakes.
-    """
-
-    handler: Any  # CacheHandler (avoiding circular import)
-    result: HandlerResult
-    file_hash: Optional[str] = None
-
-
-@dataclass
-class IntegrityReport:
-    """Typed return contract for ``verify_integrity()``.
-
-    Replaces the untyped ``Dict[str, Any]`` previously returned.
-    Provides attribute access while keeping dict-compatible accessors
-    so existing ``report["orphaned_blobs"]`` patterns continue to work.
-    """
-
-    orphaned_blobs: List[str] = field(default_factory=list)
-    dangling_entries: List[Dict[str, Any]] = field(default_factory=list)
-    size_mismatches: List[Dict[str, Any]] = field(default_factory=list)
-    hash_mismatches: Optional[List[Dict[str, Any]]] = None
-    repaired: Optional[Dict[str, Any]] = None
-
-    # -- dict-compatible accessors (76+ test accesses use report["key"]) --
-
-    _FIELDS = frozenset(
-        {
-            "orphaned_blobs",
-            "dangling_entries",
-            "size_mismatches",
-            "hash_mismatches",
-            "repaired",
-        }
-    )
-
-    def _as_dict(self) -> Dict[str, Any]:
-        """Return a dict mirroring the legacy report structure.
-
-        Only includes ``hash_mismatches`` / ``repaired`` when they are set
-        (matching the old conditional-key behaviour).
-        """
-        d: Dict[str, Any] = {
-            "orphaned_blobs": self.orphaned_blobs,
-            "dangling_entries": self.dangling_entries,
-            "size_mismatches": self.size_mismatches,
-        }
-        if self.hash_mismatches is not None:
-            d["hash_mismatches"] = self.hash_mismatches
-        if self.repaired is not None:
-            d["repaired"] = self.repaired
-        return d
-
-    def __getitem__(self, key: str) -> Any:
-        d = self._as_dict()
-        return d[key]
-
-    def __contains__(self, key: object) -> bool:
-        return key in self._as_dict()
-
-    def get(self, key: str, default: Any = None) -> Any:
-        return self._as_dict().get(key, default)
-
-    def __len__(self) -> int:
-        """Number of keys in the report (matches dict len)."""
-        return len(self._as_dict())
-
-    def __iter__(self):
-        """Iterate over keys (matches dict iteration)."""
-        return iter(self._as_dict())
-
-    def keys(self):
-        return self._as_dict().keys()
-
-    def values(self):
-        return self._as_dict().values()
-
-    def items(self):
-        return self._as_dict().items()
 
 
 class CacheabilityChecker(ABC):
@@ -316,7 +41,7 @@ class CacheWriter(ABC):
     """Interface for writing data to cache."""
 
     @abstractmethod
-    def put(self, data: Any, file_path: Path, config: Any) -> HandlerResult:
+    def put(self, data: Any, file_path: Path, config: Any) -> Dict[str, Any]:
         """
         Store data to cache and return metadata.
 
@@ -326,52 +51,31 @@ class CacheWriter(ABC):
             config: Cache configuration
 
         Returns:
-            HandlerResult with storage metadata.
+            Dictionary containing:
+                - storage_format: Format used for storage
+                - payload_format: Stable handler-owned native payload identifier
+                - payload_format_version: Cacheness contract version for that format
+                - file_size: Size of cached file in bytes
+                - actual_path: Actual file path used (with extension)
+                - metadata: Handler-specific metadata
 
         Raises:
             CacheWriteError: If data cannot be written
         """
         pass
 
-    def put_bytes(self, data: Any, config: Any) -> tuple[bytes, HandlerResult]:
-        """Serialize *data* to bytes in-memory (zero disk I/O).
-
-        This is an optional fast-path used by the inline-blob machinery in
-        :pyclass:`UnifiedCache` to avoid a write→read round-trip when the
-        blob is small enough to embed in the metadata row.
-
-        The returned :class:`HandlerResult` carries the same metadata fields
-        as :meth:`put` (``storage_format``, ``compression_codec``, etc.)
-        but ``actual_path`` is set to ``""`` because no file was written.
-
-        Args:
-            data: The data to serialize.
-            config: Cache configuration.
-
-        Returns:
-            ``(blob_bytes, result)`` — the raw serialized bytes and a
-            :class:`HandlerResult` describing the serialization.
-
-        Raises:
-            NotImplementedError: Handler does not support in-memory
-                serialization (caller should fall back to :meth:`put`
-                followed by a file read-back).
-        """
-        raise NotImplementedError
-
 
 class CacheReader(ABC):
     """Interface for reading data from cache."""
 
     @abstractmethod
-    def get(self, file_path: Path, metadata: "BlobReadContext") -> Any:
+    def get(self, file_path: Path, metadata: Dict[str, Any]) -> Any:
         """
         Retrieve data from cache file.
 
         Args:
             file_path: Path to the cached file
-            metadata: Handler metadata from when data was cached.
-                See :class:`BlobReadContext` for available keys.
+            metadata: Metadata from when data was cached
 
         Returns:
             The cached data
@@ -380,29 +84,6 @@ class CacheReader(ABC):
             CacheReadError: If data cannot be read
         """
         pass
-
-    def get_bytes(self, blob: bytes, metadata: "BlobReadContext") -> Any:
-        """Deserialize *blob* bytes in-memory (zero disk I/O).
-
-        This is the read-side counterpart of :meth:`CacheWriter.put_bytes`.
-        Used by the inline-blob machinery to reconstruct the original object
-        directly from the bytes stored in the metadata row, without writing
-        a temporary file on disk.
-
-        Args:
-            blob: Raw serialized bytes (as produced by :meth:`put_bytes`).
-            metadata: Handler metadata from when data was cached.
-                See :class:`BlobReadContext` for available keys.
-
-        Returns:
-            The deserialized data.
-
-        Raises:
-            NotImplementedError: Handler does not support in-memory
-                deserialization (caller should fall back to the temp-file
-                path via :meth:`get`).
-        """
-        raise NotImplementedError
 
 
 class FormatProvider(ABC):
@@ -433,7 +114,43 @@ class FormatProvider(ABC):
         pass
 
 
-class CacheHandler(CacheabilityChecker, CacheWriter, CacheReader, FormatProvider):
+@dataclass(frozen=True)
+class PayloadTransformationEdge:
+    """One handler-owned exact directed native payload transformation.
+
+    Exact-compatible payloads continue through the ordinary verified byte-copy
+    path.  This value exists only when a registered source handler explicitly
+    owns a format-changing read/transform/write contract.
+    """
+
+    source_format: str
+    source_version: int
+    target_format: str
+    target_version: int
+
+    def __post_init__(self) -> None:
+        for field_name, value in (
+            ("source_format", self.source_format),
+            ("target_format", self.target_format),
+        ):
+            if not isinstance(value, str) or not value:
+                raise ValueError(f"{field_name} must be a non-empty string")
+            if "*" in value:
+                raise ValueError(f"{field_name} cannot contain a wildcard")
+        for field_name, value in (
+            ("source_version", self.source_version),
+            ("target_version", self.target_version),
+        ):
+            if type(value) is not int or value < 1:
+                raise ValueError(f"{field_name} must be a positive integer")
+        if (self.source_format, self.source_version) == (
+            self.target_format,
+            self.target_version,
+        ):
+            raise ValueError("payload transformation endpoints must be distinct")
+
+
+class FormatHandler(CacheabilityChecker, CacheWriter, CacheReader, FormatProvider):
     """
     Complete cache handler interface combining all capabilities.
 
@@ -441,11 +158,115 @@ class CacheHandler(CacheabilityChecker, CacheWriter, CacheReader, FormatProvider
     Handlers can also implement individual interfaces for more focused responsibilities.
     """
 
-    pass
+    PAYLOAD_FORMAT_VERSION = 1
+
+    @property
+    def payload_format(self) -> str:
+        """Return the stable native container identifier owned by this handler.
+
+        Custom handlers that have not opted into a native container identifier
+        retain the historical ``data_type`` fallback. Built-in handlers override
+        this property with their exact persisted format names.
+        """
+        return self.data_type
+
+    @property
+    def payload_format_version(self) -> int:
+        """Return the independently versioned Cacheness payload contract."""
+        return self.PAYLOAD_FORMAT_VERSION
+
+    def payload_identity(self) -> tuple[str, int]:
+        """Return the declared native payload format and contract version."""
+        return self.payload_format, self.payload_format_version
+
+    def supports_payload_contract(
+        self, payload_format: str, payload_format_version: int
+    ) -> bool:
+        """Check a declared payload identity without opening payload bytes."""
+        return (
+            payload_format == self.payload_format
+            and payload_format_version == self.payload_format_version
+        )
+
+    def payload_transformation_edges(self) -> tuple[PayloadTransformationEdge, ...]:
+        """Return directed transforms this handler explicitly owns.
+
+        The default is intentionally empty: identity contracts are copied as
+        verified bytes and no coordinator infers a native-format converter.
+        """
+        return ()
+
+    def transform_payload(
+        self,
+        snapshot: "GuardedReadSnapshot",
+        edge: PayloadTransformationEdge,
+        *,
+        destination_io: "GuardedHandlerIO",
+        key: str,
+        config: "CacheConfig",
+    ) -> "GuardedWriteResult":
+        """Refuse transforms until a handler implements one declared edge."""
+        del snapshot, edge, destination_io, key, config
+        raise CacheFormatError(
+            "Handler does not implement the declared payload transformation"
+        )
+
+
+class GuardedWriteResult(TypedDict, total=False):
+    """Handler result after private staging is published into managed storage.
+
+    The shape matches the existing ``CacheWriter.put`` result while making the
+    containment guarantee explicit: ``actual_path`` is always the final
+    managed locator, never a private staging file.
+    """
+
+    storage_format: str
+    payload_format: str
+    payload_format_version: int
+    file_size: int
+    actual_path: str
+    metadata: Dict[str, Any]
+
+
+@dataclass(frozen=True)
+class GuardedReadSnapshot:
+    """A context-owned private copy of one managed payload.
+
+    Callers may invoke a handler only with ``path`` while the context returned
+    by ``GuardedHandlerIO.open_snapshot`` remains entered. ``metadata`` has an
+    adjusted ``actual_path`` that points to this private copy, so handlers do
+    not need the managed locator.
+    """
+
+    path: Path
+    metadata: Dict[str, Any]
+
+
+class GuardedHandlerIO(Protocol):
+    """Containment adapter contract around the unchanged handler Path API.
+
+    Implementations stage writes privately before a guarded publish and expose
+    guarded reads only as a live private snapshot. They never deserialize
+    payloads or expose a managed-root path to a handler.
+    """
+
+    def put(
+        self,
+        handler: FormatHandler,
+        data: Any,
+        storage_id: str,
+        config: Any,
+    ) -> GuardedWriteResult:
+        """Serialize privately, then publish a final managed artifact."""
+
+    def open_snapshot(
+        self, locator: Path, metadata: Dict[str, Any]
+    ) -> ContextManager[GuardedReadSnapshot]:
+        """Yield one private snapshot without invoking ``handler.get``."""
 
 
 # Specific handler interfaces for different data categories
-class DataFrameHandler(CacheHandler):
+class DataFrameHandler(FormatHandler):
     """Specialized interface for DataFrame handlers."""
 
     @abstractmethod
@@ -462,7 +283,7 @@ class DataFrameHandler(CacheHandler):
         pass
 
 
-class SeriesHandler(CacheHandler):
+class SeriesHandler(FormatHandler):
     """Specialized interface for Series handlers."""
 
     @abstractmethod
@@ -482,7 +303,7 @@ class SeriesHandler(CacheHandler):
         pass
 
 
-class ArrayHandler(CacheHandler):
+class ArrayHandler(FormatHandler):
     """Specialized interface for array handlers."""
 
     @abstractmethod
@@ -500,7 +321,7 @@ class ArrayHandler(CacheHandler):
         pass
 
 
-class ObjectHandler(CacheHandler):
+class ObjectHandler(FormatHandler):
     """Specialized interface for general object handlers."""
 
     @abstractmethod
@@ -517,45 +338,25 @@ class ObjectHandler(CacheHandler):
         pass
 
 
-# Exception classes for handler errors
-class CacheHandlerError(Exception):
-    """Base exception for cache handler errors."""
-
-    def __init__(
-        self,
-        message: str,
-        handler_type: Optional[str] = None,
-        data_type: Optional[str] = None,
-    ):
-        self.handler_type = handler_type
-        self.data_type = data_type
-        super().__init__(message)
-
-        # Log the error for debugging
-        logger.error(
-            f"Cache handler error: {message} (handler={handler_type}, data_type={data_type})"
-        )
-
-
-class CacheWriteError(CacheHandlerError):
+class CacheWriteError(FormatHandlerError):
     """Exception raised when data cannot be written to cache."""
 
     pass
 
 
-class CacheReadError(CacheHandlerError):
+class CacheReadError(FormatHandlerError):
     """Exception raised when data cannot be read from cache."""
 
     pass
 
 
-class CacheFormatError(CacheHandlerError):
+class CacheFormatError(FormatHandlerError):
     """Exception raised when data format is incompatible with handler."""
 
     pass
 
 
-class CacheValidationError(CacheHandlerError):
+class CacheValidationError(FormatHandlerError):
     """Exception raised when data validation fails."""
 
     pass
@@ -566,7 +367,7 @@ class HandlerFactory(ABC):
     """Interface for creating cache handlers."""
 
     @abstractmethod
-    def create_handler(self, data_type: str, config: Any = None) -> CacheHandler:
+    def create_handler(self, data_type: str, config: Any = None) -> FormatHandler:
         """
         Create a handler for the specified data type.
 
@@ -598,7 +399,7 @@ class HandlerRegistry(ABC):
     """Interface for registering and retrieving cache handlers."""
 
     @abstractmethod
-    def register_handler(self, handler: CacheHandler, priority: int = 0) -> None:
+    def register_handler(self, handler: FormatHandler, priority: int = 0) -> None:
         """
         Register a new cache handler.
 
@@ -609,7 +410,7 @@ class HandlerRegistry(ABC):
         pass
 
     @abstractmethod
-    def get_handler(self, data: Any) -> CacheHandler:
+    def get_handler(self, data: Any) -> FormatHandler:
         """
         Get the most appropriate handler for the given data.
 
@@ -625,7 +426,7 @@ class HandlerRegistry(ABC):
         pass
 
     @abstractmethod
-    def get_handler_by_type(self, data_type: str) -> CacheHandler:
+    def get_handler_by_type(self, data_type: str) -> FormatHandler:
         """
         Get handler by data type identifier.
 
@@ -641,7 +442,7 @@ class HandlerRegistry(ABC):
         pass
 
     @abstractmethod
-    def list_handlers(self) -> Dict[str, CacheHandler]:
+    def list_handlers(self) -> Dict[str, FormatHandler]:
         """
         List all registered handlers.
 

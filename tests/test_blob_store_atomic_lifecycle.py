@@ -1,0 +1,558 @@
+"""Public BlobStore tests for the authority-owned immutable lifecycle."""
+
+from __future__ import annotations
+
+import json
+from multiprocessing import get_context
+import os
+from pathlib import Path
+import textwrap
+from typing import Any
+
+import pytest
+
+from cacheness.error_handling import CacheBlobRecoverableCleanupError
+from cacheness.storage import BlobReceipt, BlobStore
+from cacheness.storage.catalog import CatalogField, CatalogQuery, CatalogSchema
+from cacheness.storage.composition import BackendRef, StoreTopology
+from cacheness.storage.sqlite_lifecycle_authority import AUTHORITY_RELATIVE_PATH
+from _lifecycle_test_support import (
+    CRASH_BOUNDARY_EXIT,
+    authority_whole_state,
+    run_python_subprocess,
+)
+
+
+def _store(root: Path) -> BlobStore:
+    """Create the qualified local topology for lifecycle fault injection."""
+    return BlobStore(
+        StoreTopology(
+            payload=BackendRef(name="filesystem", options={"base_dir": root}),
+            authority=BackendRef(name="sqlite", options={"root": root}),
+        ),
+        cache_dir=root,
+    )
+
+
+def _crash_public_put(
+    root: Path, *, boundary: str, key: str, value: str
+):
+    """Terminate a current-topology write at one deterministic lifecycle seam."""
+    script = textwrap.dedent(
+        """
+        import os
+        import sys
+
+        from cacheness.storage import BlobStore
+        from cacheness.storage.composition import BackendRef, StoreTopology
+
+        root, boundary, key, value = sys.argv[1:]
+        topology = StoreTopology(
+            payload=BackendRef(name="filesystem", options={"base_dir": root}),
+            authority=BackendRef(name="sqlite", options={"root": root}),
+        )
+        store = BlobStore(topology, cache_dir=root)
+        store.lifecycle.test_hook = lambda reached: os._exit(86) if reached == boundary else None
+        try:
+            store.put(value, key=key)
+        finally:
+            store.close()
+        """
+    )
+    return run_python_subprocess("-c", script, str(root), boundary, key, value)
+
+
+class _NativeJsonHandler:
+    """Small handler whose payload bytes remain independently observable."""
+
+    data_type = "native_json"
+    payload_format = "json"
+    payload_format_version = 1
+
+    def __init__(self, events: list[str]) -> None:
+        self.events = events
+
+    def put(self, data: Any, file_path: Path, _config: Any) -> dict[str, Any]:
+        self.events.append("private_serialization")
+        payload_path = file_path.with_suffix(".json")
+        payload_path.write_text(json.dumps(data, sort_keys=True), encoding="utf-8")
+        return {
+            "actual_path": str(payload_path),
+            "file_size": payload_path.stat().st_size,
+            "metadata": {"storage_format": "json"},
+            "storage_format": "json",
+        }
+
+    def get(self, file_path: Path, _metadata: dict[str, Any]) -> Any:
+        self.events.append("handler_read")
+        return json.loads(file_path.read_text(encoding="utf-8"))
+
+
+class _SingleHandlerRegistry:
+    """Make selection of the public test handler deterministic."""
+
+    def __init__(self, handler: _NativeJsonHandler) -> None:
+        self.handler = handler
+
+    def get_handler(self, _data: Any) -> _NativeJsonHandler:
+        return self.handler
+
+    def get_handler_by_type(self, data_type: str) -> _NativeJsonHandler:
+        assert data_type == self.handler.data_type
+        return self.handler
+
+    def resolve_payload_contract(
+        self,
+        data_type: str,
+        payload_format: str,
+        payload_format_version: int,
+    ) -> _NativeJsonHandler:
+        assert data_type == self.handler.data_type
+        assert payload_format == self.handler.payload_format
+        assert payload_format_version == self.handler.payload_format_version
+        return self.handler
+
+
+class _SimulatedProcessLoss(BaseException):
+    """Model a crash that skips ordinary exception cleanup."""
+
+
+class _FailingSerializationHandler(_NativeJsonHandler):
+    """Prove native serialization precedes authority mutation evidence."""
+
+    def put(self, data: Any, file_path: Path, config: Any) -> dict[str, Any]:
+        del data, file_path, config
+        self.events.append("private_serialization")
+        raise RuntimeError("native serialization failed")
+
+
+class _CountingProjectionSink:
+    """Record only derived work attempted after a canonical commit."""
+
+    projection_name = "counting-projection"
+    projection_query = CatalogQuery()
+    projection_schema = CatalogSchema(
+        (CatalogField("kind", "string"),), schema_id="counting-projection"
+    )
+
+    def __init__(self) -> None:
+        self.attempts = 0
+        self.checkpoints: list[object] = []
+
+    def apply_projection_batch(self, _batch: object) -> None:
+        self.attempts += 1
+
+    def save_projection_checkpoint(self, checkpoint: object) -> None:
+        self.checkpoints.append(checkpoint)
+
+    def load_projection_checkpoint(self) -> None:
+        return None
+
+
+_EXCLUSIVE_STREAM_CRASH_EXIT = 91
+
+
+def _crash_during_live_exclusive_stream(root: str, boundary: str) -> None:
+    """Crash after durable intent at the participant/obstore publication seam."""
+    store = _store(root)
+    participant = store._materialize_authority_store()
+
+    def crash_with_prepared_candidate() -> None:
+        pending = store.lifecycle_authority.pending_mutations()
+        assert len(pending) == 1
+        assert pending[0].spec.candidate_locator
+        os._exit(_EXCLUSIVE_STREAM_CRASH_EXIT)
+
+    if boundary == "obstore_put":
+        obstore_store = participant._store
+        original_put = obstore_store.put
+
+        def crash_after_obstore_put(*args, **kwargs):
+            original_put(*args, **kwargs)
+            crash_with_prepared_candidate()
+
+        obstore_store.put = crash_after_obstore_put
+    elif boundary == "participant_publish":
+        original_publish = participant.publish_generation
+
+        def crash_after_participant_publish(*args, **kwargs):
+            original_publish(*args, **kwargs)
+            crash_with_prepared_candidate()
+
+        participant.publish_generation = crash_after_participant_publish
+    else:  # pragma: no cover - parametrized caller defines all supported boundaries.
+        raise AssertionError(f"Unknown exclusive-stream crash boundary: {boundary}")
+
+    store.put({"generation": "new", "payload": "x" * 16_384}, key="crash-key")
+    os._exit(1)
+
+
+def test_crash_harness_terminates_a_public_put_at_a_named_boundary(
+    tmp_path: Path,
+) -> None:
+    """A subprocess can stop a public put without timing-based coordination."""
+    result = _crash_public_put(
+        tmp_path / "crash-harness",
+        boundary="put.intent_prepared",
+        key="crash-key",
+        value="new",
+    )
+
+    assert result.returncode == CRASH_BOUNDARY_EXIT
+
+
+@pytest.mark.parametrize("boundary", ("obstore_put", "participant_publish"))
+def test_live_exclusive_stream_crash_preserves_prior_generation_and_exact_debt(
+    tmp_path: Path,
+    boundary: str,
+) -> None:
+    """Partial native publication stays indexed to its prepared mutation only."""
+    root = tmp_path / boundary
+    seeded = _store(root)
+    try:
+        seeded.put({"generation": "old"}, key="crash-key")
+        previous = seeded.lifecycle_authority.read_entry("crash-key")
+        assert previous is not None
+        previous_payload = (root / previous.locator).read_bytes()
+    finally:
+        seeded.close()
+
+    unrelated = root / "operator-owned.txt"
+    unrelated.write_bytes(b"unrelated bytes")
+    child = get_context("spawn").Process(
+        target=_crash_during_live_exclusive_stream,
+        args=(str(root), boundary),
+    )
+    child.start()
+    child.join(timeout=10)
+    assert not child.is_alive()
+    assert child.exitcode == _EXCLUSIVE_STREAM_CRASH_EXIT
+
+    reopened = _store(root)
+    try:
+        current = reopened.lifecycle_authority.read_entry("crash-key")
+        pending = reopened.lifecycle_authority.pending_mutations()
+        assert current == previous
+        assert (root / current.locator).read_bytes() == previous_payload
+        assert reopened.get("crash-key") == {"generation": "old"}
+        assert len(pending) == 1
+        prepared = pending[0]
+        assert prepared.spec.key == "crash-key"
+        assert prepared.spec.candidate_locator != previous.locator
+        candidate = root / prepared.spec.candidate_locator
+        first_dry_run = reopened.reconcile()
+        second_dry_run = reopened.reconcile()
+        assert first_dry_run.to_dict() == second_dry_run.to_dict()
+
+        applied = reopened.reconcile(apply=True)
+        assert applied.applied is True
+        assert reopened.lifecycle_authority.pending_mutations() == ()
+        assert not candidate.exists()
+        assert unrelated.read_bytes() == b"unrelated bytes"
+        assert reopened.lifecycle_authority.read_entry("crash-key") == previous
+    finally:
+        reopened.close()
+
+
+@pytest.mark.parametrize(
+    ("boundary", "committed_state", "mutation_state", "debt_count"),
+    (
+        ("put.intent_prepared", "old", "prepared", 0),
+        ("put.before_candidate_publish", "old", "prepared", 0),
+        ("put.candidate_published", "old", "prepared", 0),
+        ("put.candidate_verified", "old", "prepared", 0),
+        ("put.before_promotion", "old", "prepared", 0),
+        ("put.promoted", "new", "promoted", 1),
+        ("cleanup.before_payload_delete", "new", "promoted", 1),
+        ("cleanup.after_payload_delete", "new", "promoted", 1),
+        ("put.cleanup_retired", "new", "promoted", 0),
+    ),
+)
+def test_subprocess_crash_reopens_to_one_authoritative_generation_with_indexed_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    boundary: str,
+    committed_state: str,
+    mutation_state: str,
+    debt_count: int,
+) -> None:
+    """Every public put crash preserves old-or-new authority plus exact residue."""
+    root = tmp_path / boundary.replace(".", "-")
+    seeded = _store(root)
+    try:
+        seeded.put("old", key="crash-key")
+        previous = seeded.lifecycle_authority.read_entry("crash-key")
+        assert previous is not None
+        before = authority_whole_state(seeded.lifecycle_authority)
+    finally:
+        seeded.close()
+
+    result = _crash_public_put(
+        root,
+        boundary=boundary,
+        key="crash-key",
+        value="new",
+    )
+    assert result.returncode == CRASH_BOUNDARY_EXIT
+
+    reopened = _store(root)
+    try:
+        after = authority_whole_state(reopened.lifecycle_authority)
+        current = reopened.lifecycle_authority.read_entry("crash-key")
+        assert current is not None
+        assert len(after.entries) == 1
+        assert len(after.cleanup_debt) == debt_count
+        assert len(after.mutation_states) == len(before.mutation_states) + 1
+        new_mutation_states = set(after.mutation_states).difference(
+            before.mutation_states
+        )
+        assert len(new_mutation_states) == 1
+        assert next(iter(new_mutation_states))[1] == mutation_state
+        assert len(reopened.lifecycle_authority.pending_mutations()) == int(
+            committed_state == "old"
+        )
+        if committed_state == "old":
+            assert current == previous
+            assert after.entries == (previous,)
+        else:
+            assert current.generation != previous.generation
+            assert current.locator != previous.locator
+            assert after.entries == (current,)
+        if debt_count:
+            assert after.cleanup_debt == (
+                after.cleanup_debt[0],
+            )
+            debt = after.cleanup_debt[0]
+            assert (debt.key, debt.generation, debt.locator, debt.role) == (
+                "crash-key",
+                previous.generation,
+                previous.locator,
+                "previous_generation",
+            )
+
+        monkeypatch.setattr(
+            reopened,
+            "_resolve_payload_handler",
+            lambda _manifest: (_ for _ in ()).throw(
+                AssertionError("reconciliation must not deserialize payloads")
+            ),
+        )
+        first = reopened.reconcile()
+        second = reopened.reconcile()
+        assert first.to_dict() == second.to_dict()
+    finally:
+        reopened.close()
+
+
+def test_put_promotes_immutable_generation_through_lifecycle_authority(
+    tmp_path: Path,
+) -> None:
+    """Writes replace a generation through the one durable authority."""
+    events: list[str] = []
+    store = _store(tmp_path / "store")
+    store.handlers = _SingleHandlerRegistry(_NativeJsonHandler(events))
+    lifecycle_events: list[str] = []
+    store.lifecycle.test_hook = lifecycle_events.append
+    try:
+        first_receipt = store.put_entry({"generation": 1}, key="authority-key")
+        assert isinstance(first_receipt, BlobReceipt)
+        key = first_receipt.key
+        first = store.get_metadata(key)
+        assert first is not None
+        first_locator = store.cache_dir / first["metadata"]["actual_path"]
+
+        second_receipt = store.put_entry({"generation": 2}, key=key)
+        assert second_receipt.key == key
+        assert second_receipt.generation != first_receipt.generation
+        second = store.get_metadata(key)
+        assert second is not None
+        second_locator = store.cache_dir / second["metadata"]["actual_path"]
+        assert second_locator != first_locator
+        assert second_locator.parent.parent.name == "generations"
+        assert not first_locator.exists()
+        assert store.get(key) == {"generation": 2}
+        assert (store.cache_dir / AUTHORITY_RELATIVE_PATH).is_file()
+        assert not (store.cache_dir / "operations").exists()
+        assert lifecycle_events[:6] == [
+            "put.intent_prepared",
+            "put.before_candidate_publish",
+            "put.candidate_published",
+            "put.candidate_verified",
+            "put.before_promotion",
+            "put.promoted",
+        ]
+        assert events == ["private_serialization", "private_serialization", "handler_read"]
+    finally:
+        store.close()
+
+
+def test_blobstore_maintenance_canonical_put_replays_projection_free_receipt_after_response_loss(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A lost maintenance response replays one authority-owned canonical receipt."""
+    projection = _CountingProjectionSink()
+    store = BlobStore(
+        StoreTopology(
+            payload=BackendRef(name="memory"),
+            authority=BackendRef(name="memory"),
+            projections=(projection,),
+        ),
+        cache_dir=tmp_path / "memory-store",
+    )
+    events: list[str] = []
+    store.handlers = _SingleHandlerRegistry(_NativeJsonHandler(events))
+    published = 0
+    guarded_io = store._materialize_authority_store()
+    original_publish = guarded_io.publish_generation
+
+    def count_publish(*args: object, **kwargs: object) -> object:
+        nonlocal published
+        published += 1
+        return original_publish(*args, **kwargs)
+
+    monkeypatch.setattr(guarded_io, "publish_generation", count_publish)
+    operation_id = "rebuild-response-loss"
+
+    def lose_response(boundary: str) -> None:
+        if boundary == "put.promoted":
+            raise _SimulatedProcessLoss("response lost after canonical promotion")
+
+    store.lifecycle.fault_hook = lose_response
+    try:
+        with pytest.raises(_SimulatedProcessLoss, match="response lost"):
+            store._put_entry_canonical_for_maintenance(
+                {"generation": "canonical"},
+                key="rebuild-key",
+                operation_id=operation_id,
+            )
+
+        committed = store.lifecycle_authority.read_entry("rebuild-key")
+        assert committed is not None
+        revision = committed.expectation.revision
+        assert published == 1
+        assert events == ["private_serialization"]
+        assert projection.attempts == 0
+
+        store.lifecycle.fault_hook = None
+        replayed = store._put_entry_canonical_for_maintenance(
+            {"generation": "canonical"},
+            key="rebuild-key",
+            operation_id=operation_id,
+        )
+
+        assert replayed == BlobReceipt(
+            operation_id=operation_id,
+            key=committed.key,
+            generation=committed.generation,
+            locator=committed.locator,
+            expectation=committed.expectation,
+            catalog_revision=revision,
+            projections={},
+        )
+        assert store.lifecycle_authority.read_entry("rebuild-key") == committed
+        assert published == 1
+        assert events == ["private_serialization"]
+        assert projection.attempts == 0
+    finally:
+        store.close()
+
+
+def test_clear_preserves_post_snapshot_writes(tmp_path: Path) -> None:
+    """Clear removes only exact generations captured by the authority snapshot."""
+    store = _store(tmp_path / "clear-snapshot")
+    try:
+        store.put({"generation": "old"}, key="existing")
+
+        def write_after_snapshot(boundary: str) -> None:
+            if boundary == "clear.snapshot_committed":
+                store.put({"generation": "new"}, key="existing")
+                store.put({"generation": "late"}, key="late")
+
+        store.lifecycle.test_hook = write_after_snapshot
+        store.clear()
+        assert store.get("existing") == {"generation": "new"}
+        assert store.get("late") == {"generation": "late"}
+    finally:
+        store.close()
+
+
+def test_clear_resumes_after_payload_delete_before_progress_checkpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """LifecycleAuthority proves an already-deleted clear target on restart."""
+    store = _store(tmp_path / "clear-resume")
+    deletions: list[Path] = []
+    original_delete = store._delete_or_prove_absent
+
+    def observe_delete(locator: Path) -> None:
+        deletions.append(locator)
+        original_delete(locator)
+
+    monkeypatch.setattr(store, "_delete_or_prove_absent", observe_delete)
+    try:
+        store.put({"generation": "only"}, key="resume-key")
+
+        def interrupt_after_delete(boundary: str) -> None:
+            if boundary == "clear.after_target_delete":
+                raise _SimulatedProcessLoss("interrupted after exact target deletion")
+
+        store.lifecycle.test_hook = interrupt_after_delete
+        with pytest.raises(_SimulatedProcessLoss):
+            store.clear()
+        assert len(deletions) == 1
+
+        store.lifecycle.test_hook = None
+        assert store.clear() == 0
+        assert len(deletions) == 1
+        assert store.get("resume-key") is None
+    finally:
+        store.close()
+
+
+def test_failed_serialization_leaves_no_authority_entry_or_candidate(tmp_path: Path) -> None:
+    """A handler failure cannot create a committed authority entry."""
+    events: list[str] = []
+    root = tmp_path / "serialization-failure"
+    store = _store(root)
+    store.handlers = _SingleHandlerRegistry(_FailingSerializationHandler(events))
+    try:
+        with pytest.raises(RuntimeError, match="native serialization failed"):
+            store.put({"value": "never-published"}, key="failure-key")
+        assert events == ["private_serialization"]
+        assert not list(root.glob("*generation-*"))
+        assert store.lifecycle_authority.read_entry("failure-key") is None
+        assert store.get_metadata("failure-key") is None
+    finally:
+        store.close()
+
+
+def test_reconciliation_reclaims_only_old_cleanup_debt_after_new_winner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reconciliation cannot let old cleanup debt revoke a newer generation."""
+    root = tmp_path / "new-winner"
+    store = _store(root)
+    try:
+        key = store.put({"generation": "old"}, key="winner-key")
+        metadata = store.get_metadata(key)
+        assert metadata is not None
+        old_locator = root / metadata["metadata"]["actual_path"]
+        original_delete = store._delete_or_prove_absent
+        monkeypatch.setattr(
+            store,
+            "_delete_or_prove_absent",
+            lambda _locator: (_ for _ in ()).throw(OSError("defer exact cleanup")),
+        )
+        with pytest.raises(CacheBlobRecoverableCleanupError):
+            store.delete(key)
+
+        monkeypatch.setattr(store, "_delete_or_prove_absent", original_delete)
+        assert store.put({"generation": "new"}, key=key) == key
+        assert store.get(key) == {"generation": "new"}
+        assert old_locator.exists()
+
+        assert store.reconcile(apply=True).applied is True
+        assert not old_locator.exists()
+        assert store.get(key) == {"generation": "new"}
+    finally:
+        store.close()

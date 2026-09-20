@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "fixture_id": "json-split-signed-v038",
+  "source_commit": "71e4ba04cbcd7dfbcf74e5651f131213b7d45ab9",
+  "source_version": "0.3.8",
+  "generator_command": "Writer-only detached-worktree generation with np.arange(6, dtype=np.int32).reshape(2, 3), JSON metadata, use_blosc2_arrays=False, fixed_test_hmac_key_hex=00112233445566778899aabbccddeefffedcba98765432100123456789abcdef (correct-key HMAC verification succeeds), and wrong_test_hmac_key_hex=ffeeddccbbaa998877665544332211000123456789abcdeffedcba9876543210 (wrong-key HMAC verification fails); no historical reader invoked.",
+  "environment": {
+    "cacheness": "0.3.8",
+    "python": "3.13.3",
+    "numpy": "2.3.2",
+    "blosc2": "3.7.0"
+  },
+  "logical_input": {
+    "dtype": "int32",
+    "shape": [2, 3],
+    "values": [0, 1, 2, 3, 4, 5]
+  },
+  "discriminators": {
+    "metadata_kind": "json_split",
+    "json_top_level_keys": [
+      "entries",
+      "access_times",
+      "creation_times",
+      "file_sizes",
+      "data_types",
+      "cache_key_params",
+      "cache_hits",
+      "cache_misses",
+      "entry_signature"
+    ],
+    "signature_state": "present"
+  },
+  "files": {
+    "metadata.json": {
+      "source_sha256": "b8ebfb9bcc52b72a90e333dc2093273863cdad3c83fe5b3e50a9e5e032a2cb30",
+      "copied_sha256": "b8ebfb9bcc52b72a90e333dc2093273863cdad3c83fe5b3e50a9e5e032a2cb30"
+    },
+    "payload.npz": {
+      "source_sha256": "400fa42d786ab1e6924e051bbaa61238627909af333de87aab176c280c71fe2f",
+      "copied_sha256": "400fa42d786ab1e6924e051bbaa61238627909af333de87aab176c280c71fe2f"
+    }
+  }
+}

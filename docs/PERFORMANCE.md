@@ -169,7 +169,7 @@ Based on comprehensive benchmarking, here's how each backend performs across dif
 
 ### 1. Choose the Right Backend
 
-**This is the most critical performance decision.** See the [Backend Selection Guide](BACKEND_SELECTION.md) for comprehensive comparison and recommendations.
+**This is the most critical performance decision.** See [Release qualification](RELEASE_QUALIFICATION.md) for the current topology and performance boundaries.
 
 **Quick Reference:**
 - **< 200 entries + single process**: JSON backend  
@@ -186,7 +186,7 @@ from cacheness import CacheConfig
 config = CacheConfig(
     cache_dir="./dev_cache",
     metadata_backend="json",
-    max_cache_size="1gb"
+    max_cache_size_mb=1000
 )
 ```
 
@@ -210,7 +210,7 @@ config = CacheConfig(
 config = CacheConfig(
     cache_dir="/fast_storage/cache",
     metadata_backend="sqlite",
-    max_cache_size="10gb"
+    max_cache_size_mb=10000
 )
 ```
 
@@ -230,15 +230,13 @@ config = CacheConfig(
 - ✅ Complex SQL queries for metadata analysis
 - ✅ Automatic optimization with our tuned pragmas
 
-> **v0.5.2 – Core column-select optimisation:** `iter_entry_summaries()` now uses a SQLAlchemy Core `select()` with explicit columns instead of ORM `query()`, reducing per-row overhead for bulk listing and eviction operations on large caches.
-
 #### In-Memory SQLite - Ultra Fast
 ```python
 # Memory-optimized for temporary high-performance caching
 config = CacheConfig(
     cache_dir="./temp_cache",
     metadata_backend="sqlite_memory",
-    max_cache_size="2gb"
+    max_cache_size_mb=2000
 )
 ```
 
@@ -358,12 +356,12 @@ df_config = CacheConfig(
 api_config = CacheConfig(
     storage=CacheStorageConfig(
         cache_dir="./api_cache",
-        max_cache_size="2gb",
+        max_cache_size_mb=2000,
         cleanup_on_init=True
     ),
     metadata=CacheMetadataConfig(
         backend="sqlite",              # Fast metadata ops
-        store_full_metadata=False      # Skip parameter storage for speed
+        store_cache_key_params=False   # Skip parameter storage for speed
     ),
     compression=CompressionConfig(
         pickle_compression_codec="lz4",  # Fastest compression
@@ -373,13 +371,13 @@ api_config = CacheConfig(
         enable_collections=False,        # Skip deep analysis
         max_tuple_recursive_length=3
     ),
-    default_ttl="6h"
+    default_ttl_hours=6
 )
 
 # Use with decorators for maximum performance
 from cacheness import cached
 
-@cached(cache_instance=cacheness(api_config), ttl="1h")
+@cached(cache_instance=cacheness(api_config), ttl_hours=1)
 def fetch_api_data(endpoint, params):
     # Fast caching with minimal overhead
     return api_call(endpoint, params)
@@ -391,12 +389,12 @@ def fetch_api_data(endpoint, params):
 ml_config = CacheConfig(
     storage=CacheStorageConfig(
         cache_dir="./ml_cache",
-        max_cache_size="20gb",       # Large cache for datasets
+        max_cache_size_mb=20000,       # Large cache for datasets
         cleanup_on_init=False          # Preserve models across sessions
     ),
     metadata=CacheMetadataConfig(
         backend="sqlite",              # Handle many experiments
-        store_full_metadata=True,      # Track experiment parameters
+        store_cache_key_params=True,   # Track experiment parameters
         verify_cache_integrity=True    # Ensure model integrity
     ),
     compression=CompressionConfig(
@@ -412,7 +410,7 @@ ml_config = CacheConfig(
             "object_pickle"            # Models and misc objects
         ]
     ),
-    default_ttl="1w"
+    default_ttl_hours=168             # 1 week
 )
 ```
 
@@ -422,7 +420,7 @@ ml_config = CacheConfig(
 data_config = CacheConfig(
     storage=CacheStorageConfig(
         cache_dir="/fast_ssd/data_cache",  # Use fast storage
-        max_cache_size="50gb",           # Very large cache
+        max_cache_size_mb=50000,           # Very large cache
         cleanup_on_init=False
     ),
     metadata=CacheMetadataConfig(
@@ -436,7 +434,7 @@ data_config = CacheConfig(
         pickle_compression_codec="zstd",
         pickle_compression_level=3          # Balanced for large objects
     ),
-    default_ttl="3d"
+    default_ttl_hours=72
 )
 ```
 
@@ -497,8 +495,8 @@ print(f"Average entry size: {stats['avg_entry_size_mb']:.3f} MB")
 if stats['hit_rate'] < 0.5:
     print("Low hit rate - check cache TTL and key consistency")
 
-if stats['total_size_mb'] > 1000:
-    print("Cache over 1 GB — consider cleanup or size increase")
+if stats['total_size_mb'] > config.max_cache_size_mb * 0.9:
+    print("Cache nearly full - consider cleanup or size increase")
 ```
 
 ### Debug Logging
@@ -544,7 +542,7 @@ class PerformanceTracker:
 tracker = PerformanceTracker()
 
 # Measure cache performance
-@cached(ttl="24h")
+@cached(ttl_hours=24)
 def expensive_computation(data):
     time.sleep(1)  # Simulate work
     return len(data)
@@ -588,16 +586,16 @@ cache.put(model, proj="customer", model="xgb", ver="2.1")
 
 ```python
 # Different TTL for different data types
-@cached(ttl="1h")
+@cached(ttl_hours=1)      # Short: real-time data
 def get_stock_price(symbol): pass
 
-@cached(ttl="24h")
+@cached(ttl_hours=24)     # Medium: daily data
 def get_weather_forecast(city): pass
 
-@cached(ttl="1w")
+@cached(ttl_hours=168)    # Long: stable data
 def train_ml_model(data): pass
 
-@cached(ttl_seconds=None)      # Permanent: reference data
+@cached(ttl_hours=None)   # Permanent: reference data
 def load_country_codes(): pass
 ```
 
@@ -700,7 +698,7 @@ def process_large_dataset(data_path):
 fast_config = CacheConfig(
     storage=CacheStorageConfig(
         cache_dir="/fast_ssd/cache",     # SSD storage
-        max_cache_size="20gb"
+        max_cache_size_mb=20000
     ),
     metadata=CacheMetadataConfig(
         database_url="/fast_ssd/metadata.db"  # Fast storage for metadata
