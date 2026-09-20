@@ -1,6 +1,6 @@
 ---
 quick_id: 260920-hbn
-status: incomplete
+status: complete
 scope: local-first main integration
 ---
 

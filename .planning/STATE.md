@@ -5,7 +5,7 @@ status: Awaiting next milestone
 stopped_at: Phase 11 complete — all phases complete
 last_updated: "2026-09-20T15:46:58.537Z"
 last_activity: 2026-09-20
-last_activity_desc: Post-archive local regression repair validated on a clean checkout
+last_activity_desc: Local-first v1.0 snapshot integrated into GitHub main after regression repair
 state_head: 74e7a65d2b604684729d5eea399f23991488b5ba
 progress:
   total_phases: 12
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-09-20)
 Phase: Milestone v1.0 complete
 Plan: —
 Status: Awaiting next milestone
-Last activity: 2026-09-20 — Post-archive local regression repair validated on a clean checkout
+Last activity: 2026-09-20 — Local-first v1.0 snapshot integrated into GitHub main after regression repair
 
 The v1.0 closeout is an explicit **override closeout**. Eleven phases have
 canonical `passed` independent verifier records; Phase 3's independent report
@@ -619,6 +619,7 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 |---|-------------|------|--------|-----------|
 | 260920-h2a | Prepare local-first v1.0 squash integration branch and review remote-only changes; no merge/push | 2026-09-20 | `7975622` (candidate) | [260920-h2a](quick/260920-h2a-prepare-local-first-v1-0-squash-integrat/) |
 | 260920-hmi | Repair post-v1.0 archive regression checks without layout shims | 2026-09-20 | `21579fd` | [260920-hmi](quick/260920-hmi-repair-post-v1-0-archive-regression-chec/) |
+| 260920-hbn | Validate and integrate local-first v1.0 snapshot onto remote main after regression repair | 2026-09-20 | `ac25040` (snapshot) | [260920-hbn](quick/260920-hbn-validate-and-integrate-local-first-v1-0-/) |
 
 ### Roadmap Evolution
 
